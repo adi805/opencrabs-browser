@@ -9,13 +9,14 @@
 //! 3. Saat berhenti, mesin dimatikan sebagai process group, bukan hanya pid.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use cdp::ProxyState;
 use engine::{Engine, ShellEngine, discover_shell};
+use lifecycle::{Counters, Event, Machine};
 use tokio::net::TcpListener;
 
 use crate::cli::ServeArgs;
@@ -37,10 +38,22 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     let engine = launch_engine(&resolved, args.ready_timeout_ms).await?;
     let engine: Arc<dyn Engine> = Arc::new(engine);
 
+    // State daemon dilacak sejak awal. Metrik `browser_engine_state` yang
+    // dilaporkan tanpa state nyata cuma angka karangan, jadi state-nya
+    // dijalankan lewat tabel transisi yang sama dengan yang diuji unit.
+    let machine = Arc::new(Mutex::new(Machine::new()));
+    let counters = Arc::new(Counters::new());
+    apply_event(&machine, Event::Boot);
+    apply_event(&machine, Event::Booted);
+
     let bind = resolved.bind.clone();
     let public_ws_url = format!("ws://{bind}/devtools/browser/{}", session_token());
     let state = Arc::new(ProxyState::new(Arc::clone(&engine), public_ws_url));
-    let app: Router = cdp::router(state);
+    let app: Router = cdp::router(state).merge(metrics::router(
+        Arc::clone(&engine),
+        Arc::clone(&counters),
+        Arc::clone(&machine),
+    ));
 
     let listener = TcpListener::bind(&bind)
         .await
@@ -80,6 +93,9 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         .await
         .context("server berhenti dengan error")?;
 
+    apply_event(&machine, Event::Drain);
+    apply_event(&machine, Event::Reap);
+
     tracing::info!("mematikan mesin");
     let engine_for_stop = Arc::clone(&engine);
     match tokio::task::spawn_blocking(move || engine_for_stop.stop()).await {
@@ -87,7 +103,18 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         Ok(Err(err)) => tracing::warn!(%err, "mesin tidak berhenti bersih"),
         Err(err) => tracing::warn!(%err, "task penghentian gagal"),
     }
+
+    apply_event(&machine, Event::Reaped);
     Ok(())
+}
+
+/// Satu event state daemon. Transisi yang ditolak itu bug, bukan kejadian
+/// normal, jadi jangan pernah ditelan tanpa jejak.
+fn apply_event(machine: &Mutex<Machine>, event: Event) {
+    let mut guard = machine.lock().unwrap_or_else(|err| err.into_inner());
+    if let Err(err) = guard.apply(event) {
+        tracing::warn!(%err, ?event, "transisi state daemon ditolak");
+    }
 }
 
 async fn launch_engine(resolved: &Resolved, timeout_ms: u64) -> Result<ShellEngine> {

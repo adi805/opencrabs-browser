@@ -9,6 +9,41 @@
 //! dan `--single-process` = 522.8 MB RSS dengan PSS 355.8 MB. Selisih RSS
 //! 336 MB itu bukan penghematan, itu artefak cara menghitung.
 
+use std::sync::{Arc, Mutex};
+
+use axum::Router;
+use axum::routing::get;
+use engine::Engine;
+use lifecycle::{Counters, Machine, State};
+
+/// Gauge HIDUP: PSS dibaca saat permintaan datang, bukan disimpan dari
+/// pembacaan terakhir. Angka yang disimpan akan terlihat masuk akal di
+/// dashboard sambil salah.
+pub fn router(
+    engine: Arc<dyn Engine>,
+    counters: Arc<Counters>,
+    machine: Arc<Mutex<Machine>>,
+) -> Router {
+    let handler = move || {
+        let engine = Arc::clone(&engine);
+        let counters = Arc::clone(&counters);
+        let machine = Arc::clone(&machine);
+
+        async move {
+            let pss = engine.process_id().and_then(read_pss_bytes);
+            let state = machine.lock().map_or(State::Stopped, |guard| guard.state());
+            let body = counters.render(engine.kind(), state, pss);
+
+            (
+                [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+                body,
+            )
+        }
+    };
+
+    Router::new().route("/metrics", get(handler))
+}
+
 /// PSS total satu proses, dibaca dari `/proc/<pid>/smaps_rollup`.
 ///
 /// `None` kalau proses sudah mati atau berkasnya tidak bisa dibaca. Sengaja

@@ -6,6 +6,8 @@ mod cli;
 mod config;
 mod daemon;
 mod metrics;
+mod reap;
+mod selftest;
 
 use std::process::ExitCode;
 
@@ -18,6 +20,16 @@ fn main() -> ExitCode {
         cli::Command::Version => {
             println!("browserd {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
+        }
+        cli::Command::Selftest(args) => {
+            init_tracing();
+            match selftest::run(args) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("browserd selftest: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         cli::Command::Serve(args) => {
             init_tracing();
