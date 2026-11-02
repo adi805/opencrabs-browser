@@ -91,9 +91,13 @@ Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
 | `browser_screenshot` lewat daemon | PNG base64, bukan halaman kosong |
 | Browser produksi di `:9222` | tidak disentuh selama pengujian |
 | CI GitHub, run pertama (2 Nov 2026) | `success` dalam **1m9s**, cold cache, runner `rustc 1.98.1`, 36 test lulus (9/14/11/2 per crate) |
+| Build rilis di GitHub (run 41386053917) | `success` total 70s, `cargo build --release` selesai **43.36s**, `target` 267 MB |
+| Biner rilis x86_64 setelah `strip` | **1,28 MB** (`browserd-0.1.0-x86_64-unknown-linux-gnu.tar.gz`, 1 282 228 byte) |
 | Disk runner | `/dev/root` 145G, **85G tersedia** sebelum build |
 
-Yang **belum** diukur dan tidak diklaim: ukuran `target/` setelah build rilis, ukuran biner setelah `strip`, hit rate cache setelah beberapa run, dan selisih PSS antara laptop dan runner.
+Yang **belum** diukur dan tidak diklaim: hit rate cache setelah beberapa run, dan selisih PSS antara laptop dan runner.
+
+Catatan untuk yang membaca angka biner di atas: 1,28 MB itu **daemon**, bukan browser. Mesin (Chrome) tetap biner terpisah di sistem, dan total jejak RAM-nya yang nanti dijaga oleh budget di M1.
 
 Satu koreksi terhadap paket desain: batas disk runner diperkirakan 14 GB, yang terukur 85 GB tersedia. Penghematan disk (`CARGO_INCREMENTAL=0`, `df -h` sebelum dan sesudah) tetap dipakai karena murah, tapi batas 14 GB itu tidak lagi jadi alasan membatasi arsitektur.
 
