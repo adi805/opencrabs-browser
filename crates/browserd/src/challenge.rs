@@ -36,11 +36,20 @@ use tokio::sync::mpsc::UnboundedSender;
 /// panas untuk informasi yang tidak pernah dibaca.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observed {
-    /// Sesi baru menempel ke sebuah target.
+    /// Sesi baru menempel ke sebuah target (event auto-attach).
     Attached {
         session_id: String,
         target_id: String,
     },
+    /// Klien meminta sesi baru untuk sebuah target.
+    ///
+    /// Pemetaan sesi ke target **tidak** dikirim sebagai event: mesin hanya
+    /// membalas permintaan ini dengan `sessionId`, tanpa `targetId`. Karena
+    /// itu permintaan dan balasannya harus dipasangkan lewat `id`, kalau tidak
+    /// pengamat tahu ada sesi tapi tidak tahu target mana yang harus diperiksa.
+    AttachRequest { id: u64, target_id: String },
+    /// Balasan `Target.attachToTarget`, memasangkan `id` ke `sessionId`.
+    AttachReply { id: u64, session_id: String },
     /// Respons dokumen utama.
     Document {
         session_id: String,
@@ -60,17 +69,39 @@ pub enum Observed {
 #[must_use]
 pub fn parse_message(text: &str) -> Option<Observed> {
     let pesan: Value = serde_json::from_str(text).ok()?;
-    let method = pesan.get("method")?.as_str()?;
+
+    // `sessionId` menempel di akar pesan, di samping `method`/`params`, bukan
+    // di dalam `params`. Membacanya dari `params` membuat setiap event sesi
+    // terlihat seperti pesan asing dan pengamat tidak pernah menyala.
+    let sesi = pesan
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    let Some(method) = pesan.get("method").and_then(Value::as_str) else {
+        // Balasan perintah. Satu-satunya yang dibutuhkan: pasangan `id` →
+        // `sessionId` dari `Target.attachToTarget`.
+        let id = pesan.get("id")?.as_u64()?;
+        let session_id = pesan.get("result")?.get("sessionId")?.as_str()?;
+        return Some(Observed::AttachReply {
+            id,
+            session_id: session_id.to_owned(),
+        });
+    };
     let params = pesan.get("params")?;
 
     match method {
         "Target.attachedToTarget" => Some(Observed::Attached {
-            session_id: params.get("sessionId")?.as_str()?.to_owned(),
+            session_id: sesi?,
             target_id: params
                 .get("targetInfo")?
                 .get("targetId")?
                 .as_str()?
                 .to_owned(),
+        }),
+        "Target.attachToTarget" => Some(Observed::AttachRequest {
+            id: pesan.get("id")?.as_u64()?,
+            target_id: params.get("targetId")?.as_str()?.to_owned(),
         }),
         "Network.responseReceived" => {
             if params.get("type")?.as_str()? != "Document" {
@@ -78,7 +109,7 @@ pub fn parse_message(text: &str) -> Option<Observed> {
             }
             let response = params.get("response")?;
             Some(Observed::Document {
-                session_id: params.get("sessionId")?.as_str()?.to_owned(),
+                session_id: sesi?,
                 status: u16::try_from(response.get("status")?.as_u64()?).ok()?,
                 url: response.get("url")?.as_str()?.to_owned(),
             })
@@ -92,7 +123,7 @@ pub fn parse_message(text: &str) -> Option<Observed> {
                 return None;
             }
             Some(Observed::Navigated {
-                session_id: params.get("sessionId")?.as_str()?.to_owned(),
+                session_id: sesi?,
                 url: frame.get("url")?.as_str()?.to_owned(),
             })
         }
@@ -194,6 +225,29 @@ pub fn handoff_baru(
     }
 }
 
+/// Hasil satu probe, cukup untuk memutuskan dan menyusun handoff tanpa
+/// membaca ulang jejak.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeOutcome {
+    pub action: Action,
+    pub session_id: String,
+    pub evidence: Evidence,
+}
+
+/// Membaca hasil `Runtime.evaluate` milik [`JS_DETECT`].
+///
+/// Skrip mengembalikan `JSON.stringify(array)`, jadi nilainya string yang
+/// masih harus diparse. Bentuk lain dianggap "tidak tahu", bukan "aman":
+/// probe yang gagal dibaca tidak boleh membatalkan kecurigaan.
+#[must_use]
+pub fn dom_of(result: &Value) -> Option<DomFinding> {
+    let value = result
+        .get("result")
+        .and_then(|inner| inner.get("value"))
+        .and_then(Value::as_str)?;
+    DomFinding::parse_json(value)
+}
+
 /// Satu target yang sedang diamati.
 #[derive(Debug, Clone)]
 struct Track {
@@ -221,6 +275,8 @@ impl Track {
 pub struct Tracking {
     sessions: HashMap<String, String>,
     tracks: HashMap<String, Track>,
+    /// `id` perintah `Target.attachToTarget` yang belum dibalas.
+    pending_attach: HashMap<u64, String>,
 }
 
 impl Tracking {
@@ -283,6 +339,16 @@ impl Tracking {
                 target_id,
             } => {
                 self.attach(session_id, target_id);
+                None
+            }
+            Observed::AttachRequest { id, target_id } => {
+                self.pending_attach.insert(*id, target_id.clone());
+                None
+            }
+            Observed::AttachReply { id, session_id } => {
+                if let Some(target_id) = self.pending_attach.remove(id) {
+                    self.attach(session_id, &target_id);
+                }
                 None
             }
             Observed::Document {
@@ -373,6 +439,30 @@ impl ChallengeObserver {
         }
     }
 
+    /// Mencatat hasil probe dan mengembalikan keputusannya.
+    pub fn probed(&self, target_id: &str, dom: DomFinding) -> Option<ProbeOutcome> {
+        let mut tracking = self
+            .tracking
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let action = tracking.probed(target_id, dom);
+        let track = tracking.tracks.get(target_id)?;
+        Some(ProbeOutcome {
+            action,
+            session_id: track.session_id.clone(),
+            evidence: track.evidence.clone(),
+        })
+    }
+
+    /// Menaikkan tingkat eskalasi satu target.
+    pub fn escalate(&self, target_id: &str, available: LadderAvailability) -> Option<Escalation> {
+        let mut tracking = self
+            .tracking
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tracking.escalate(target_id, available)
+    }
+
     /// Membaca pesan tanpa memasukkannya. Dipakai pengujian parser.
     #[must_use]
     pub fn sidik(text: &str) -> Option<Observed> {
@@ -425,21 +515,24 @@ mod tests {
 
     #[test]
     fn hanya_tiga_kejadian_yang_dibaca() {
-        let doc = r#"{"method":"Network.responseReceived","params":{"sessionId":"S1","type":"Document","response":{"status":403,"url":"https://x.test/a"}}}"#;
+        // `sessionId` di akar pesan. Kalau fixture ini menaruhnya di dalam
+        // `params`, uji akan lulus sambil tidak cocok dengan bentuk CDP nyata
+        // dan pengamat diam di jalur sungguhan.
+        let doc = r#"{"method":"Network.responseReceived","sessionId":"S1","params":{"type":"Document","response":{"status":403,"url":"https://x.test/a"}}}"#;
         assert_eq!(parse_message(doc), Some(dokumen(403)));
 
         assert_eq!(parse_message(r#"{"id":7,"result":{}}"#), None);
 
-        let gambar = r#"{"method":"Network.responseReceived","params":{"sessionId":"S1","type":"Image","response":{"status":403,"url":"https://x.test/g"}}}"#;
+        let gambar = r#"{"method":"Network.responseReceived","sessionId":"S1","params":{"type":"Image","response":{"status":403,"url":"https://x.test/g"}}}"#;
         assert_eq!(parse_message(gambar), None);
     }
 
     #[test]
     fn frame_anak_diabaikan() {
-        let anak = r#"{"method":"Page.frameNavigated","params":{"sessionId":"S1","frame":{"url":"https://ads.test/challenge","parentId":"F0"}}}"#;
+        let anak = r#"{"method":"Page.frameNavigated","sessionId":"S1","params":{"frame":{"url":"https://ads.test/challenge","parentId":"F0"}}}"#;
         assert_eq!(parse_message(anak), None);
 
-        let utama = r#"{"method":"Page.frameNavigated","params":{"sessionId":"S1","frame":{"url":"https://x.test/a"}}}"#;
+        let utama = r#"{"method":"Page.frameNavigated","sessionId":"S1","params":{"frame":{"url":"https://x.test/a"}}}"#;
         assert_eq!(
             parse_message(utama),
             Some(Observed::Navigated {
@@ -447,6 +540,42 @@ mod tests {
                 url: "https://x.test/a".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn permintaan_dan_balasan_attach_dipasangkan() {
+        // Bentuk nyata: permintaan membawa `targetId`, balasan hanya membawa
+        // `sessionId`. Tanpa pemasangan lewat `id`, sesi tidak bisa
+        // dihubungkan ke target mana pun.
+        let minta = r#"{"id":2,"method":"Target.attachToTarget","params":{"targetId":"T1","flatten":true}}"#;
+        assert_eq!(
+            parse_message(minta),
+            Some(Observed::AttachRequest {
+                id: 2,
+                target_id: "T1".to_owned(),
+            })
+        );
+
+        let balas = r#"{"id":2,"result":{"sessionId":"S1"}}"#;
+        assert_eq!(
+            parse_message(balas),
+            Some(Observed::AttachReply {
+                id: 2,
+                session_id: "S1".to_owned(),
+            })
+        );
+
+        let mut tracking = Tracking::new();
+        tracking.observe(&Observed::AttachRequest {
+            id: 2,
+            target_id: "T1".to_owned(),
+        });
+        assert_eq!(tracking.target_of("S1"), None);
+        tracking.observe(&Observed::AttachReply {
+            id: 2,
+            session_id: "S1".to_owned(),
+        });
+        assert_eq!(tracking.target_of("S1"), Some("T1"));
     }
 
     #[test]
@@ -553,6 +682,58 @@ mod tests {
             1
         );
         assert_eq!(counters.events(CounterKind::Challenge, Outcome::Skipped), 1);
+    }
+
+    #[test]
+    fn hasil_probe_dibaca_dari_runtime_evaluate() {
+        let nilai = serde_json::json!({
+            "result": {"type": "string", "value": "[\"cf_dom\",\"challenge_text\"]"}
+        });
+        let dom = dom_of(&nilai).expect("harus terbaca");
+        assert!(dom.challenge_form);
+        assert!(dom.challenge_text);
+        assert!(!dom.captcha_widget);
+
+        // Label asing diabaikan, bukan dianggap tantangan.
+        let asing = serde_json::json!({
+            "result": {"type": "string", "value": "[\"sesuatu_lain\"]"}
+        });
+        assert_eq!(dom_of(&asing), Some(DomFinding::default()));
+
+        // Probe yang gagal dibaca bukan bukti aman.
+        assert_eq!(dom_of(&serde_json::json!({"result": {}})), None);
+    }
+
+    #[test]
+    fn probe_dan_eskalasi_lewat_observer() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let observer = ChallengeObserver::new(tx, std::sync::Arc::new(CaptchaCounters::new()));
+        observer.ingest(&attached());
+        observer.ingest(&dokumen(403));
+        let probe = rx.try_recv().expect("probe harus masuk antrean");
+
+        let hasil = observer
+            .probed(
+                &probe.target_id,
+                DomFinding {
+                    challenge_form: true,
+                    ..DomFinding::default()
+                },
+            )
+            .expect("target harus dikenal");
+        assert_eq!(hasil.action, Action::Handoff);
+        assert_eq!(hasil.session_id, "S1");
+
+        assert_eq!(
+            observer.escalate(
+                "T1",
+                LadderAvailability {
+                    full: false,
+                    cloak: false
+                }
+            ),
+            Some(Escalation::Handoff)
+        );
     }
 
     #[test]

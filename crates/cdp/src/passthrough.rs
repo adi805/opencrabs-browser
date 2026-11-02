@@ -109,7 +109,17 @@ pub async fn proxy_with_observer(
                 match incoming {
                     Ok(message) => {
                         stats.to_engine += 1;
-                        if let Err(err) = engine_tx.send(framing::axum_to_ts(message)).await {
+                        let message = framing::axum_to_ts(message);
+                        // Pengamat juga membaca arah klien. Tanpa itu
+                        // pemetaan sesi ke target hilang: mesin hanya
+                        // mengirim `sessionId` di balasan attach, sedangkan
+                        // `targetId` cuma ada di permintaan klien.
+                        if let Some(observer) = observer.as_ref()
+                            && let Some(teks) = framing::text_of(&message)
+                        {
+                            observer.observe(teks);
+                        }
+                        if let Err(err) = engine_tx.send(message).await {
                             tracing::debug!(%err, "mesin menolak pesan");
                             break;
                         }
