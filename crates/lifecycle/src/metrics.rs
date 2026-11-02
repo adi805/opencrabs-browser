@@ -116,13 +116,28 @@ impl Counters {
         reason_index(reason).map_or(0, |idx| self.reap_reasons[idx].load(Ordering::Relaxed))
     }
 
-    /// Seluruh metrik dalam format teks Prometheus.
+    /// Seluruh metrik dalam format teks Prometheus: bagian per mesin lalu
+    /// bagian milik daemon.
     ///
     /// `pss_bytes` adalah pembacaan hidup; `None` berarti proses engine tidak
     /// ada atau statusnya tidak terbaca, dan itu ditulis sebagai komentar.
     #[must_use]
     pub fn render(&self, engine: &str, state: State, pss_bytes: Option<u64>) -> String {
-        let mut out = String::with_capacity(1024);
+        let mut out = self.render_engine(engine, state, pss_bytes);
+        out.push_str(&self.render_global());
+        out
+    }
+
+    /// Metrik yang **milik satu mesin**: memori dan state.
+    ///
+    /// Dipisah dari [`Self::render_global`] karena daemon sekarang bisa
+    /// menjalankan lebih dari satu mesin. Kalau seluruh blok dicetak per
+    /// mesin, penghitung yang hanya punya satu nilai untuk seluruh daemon
+    /// (reap, anggaran) muncul dua kali dengan angka yang sama, dan scraper
+    /// akan menjumlahkannya menjadi dua kali lipat kejadian yang sebenarnya.
+    #[must_use]
+    pub fn render_engine(&self, engine: &str, state: State, pss_bytes: Option<u64>) -> String {
+        let mut out = String::with_capacity(512);
 
         match pss_bytes {
             Some(bytes) => {
@@ -143,6 +158,15 @@ impl Counters {
                 candidate.as_str()
             );
         }
+
+        out
+    }
+
+    /// Metrik yang **milik daemon**, tanpa label mesin: satu nilai untuk
+    /// seluruh proses, jadi hanya boleh dicetak sekali.
+    #[must_use]
+    pub fn render_global(&self) -> String {
+        let mut out = String::with_capacity(768);
 
         out.push_str("# TYPE browser_engine_restarts_total counter\n");
         for reason in ReapReason::ALL {
