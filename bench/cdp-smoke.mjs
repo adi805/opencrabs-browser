@@ -13,6 +13,8 @@
 // Keluar 0 hanya kalau semua lolos. Skrip ini tidak menyalakan apa pun:
 // daemon yang dites harus sudah berjalan, supaya yang diukur benar-benar
 // jalur proxy, bukan jalur mesin.
+import fs from 'node:fs';
+
 const argv = process.argv.slice(2);
 function arg(name, fallback) {
   const i = argv.indexOf(name);
@@ -130,7 +132,17 @@ if (expectTitle && title !== expectTitle) {
   fail('judul', `dapat ${JSON.stringify(title)}, harap ${JSON.stringify(expectTitle)}`);
 }
 
-// 5. Tutup
+// 5. Screenshot (opsional, untuk membuktikan CSS benar-benar dirender)
+const shotPath = arg('--screenshot', '');
+if (shotPath) {
+  const shot = await send('Page.captureScreenshot', { format: 'png' }, sessionId);
+  if (shot.error) fail('Page.captureScreenshot', JSON.stringify(shot.error));
+  const bytes = Buffer.from(shot.result.data, 'base64');
+  fs.writeFileSync(shotPath, bytes);
+  ok('Page.captureScreenshot', `${shotPath} ${bytes.length} byte`);
+}
+
+// 6. Tutup
 await send('Target.closeTarget', { targetId });
 ok('Target.closeTarget', targetId);
 ws.close();
