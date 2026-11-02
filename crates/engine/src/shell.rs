@@ -23,6 +23,10 @@ pub const DEFAULT_READY_TIMEOUT_MS: u64 = 15_000;
 /// berarti yang menjawab bukan mesin yang kita kira.
 const MAX_RESPONSE_BYTES: usize = 1 << 20;
 
+/// Berkas stderr mesin di dalam `user_data_dir`. Namanya dipakai juga oleh
+/// pesan error, jadi hanya didefinisikan sekali di sini.
+pub const STDERR_LOG: &str = "engine-stderr.log";
+
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -76,7 +80,20 @@ impl ShellEngine {
         cmd.args(&spec.extra_args);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        // stderr tidak dibuang: kegagalan boot yang bisu memaksa orang menebak.
+        // Isinya kecil (belasan baris) dan berakhir di sebelah profil, sehingga
+        // "mesin tidak siap" selalu punya sebab yang bisa dibaca.
+        let stderr_log = spec.user_data_dir.join(STDERR_LOG);
+        match std::fs::File::create(&stderr_log) {
+            Ok(file) => {
+                cmd.stderr(Stdio::from(file));
+            }
+            Err(err) => {
+                tracing::warn!(path = %stderr_log.display(), %err, "tidak bisa menulis log stderr mesin");
+                cmd.stderr(Stdio::null());
+            }
+        }
+        cmd.stdout(Stdio::null());
         // Group sendiri: SIGTERM ke group ini ikut mematikan seluruh anaknya.
         cmd.process_group(0);
 
@@ -111,6 +128,17 @@ impl ShellEngine {
                 Err(err)
             }
         }
+    }
+}
+
+/// `Debug` sengaja ditulis tangan: yang berguna saat log adalah resep dan fakta
+/// mesin, bukan isi `Mutex<Child>` yang tidak bisa dibaca dari luar.
+impl std::fmt::Debug for ShellEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellEngine")
+            .field("spec", &self.spec)
+            .field("info", &self.info)
+            .finish_non_exhaustive()
     }
 }
 
@@ -267,6 +295,13 @@ fn http_get(port: u16, path: &str) -> Result<String, EngineError> {
                 if buf.len() > MAX_RESPONSE_BYTES {
                     return Err(EngineError::Discovery("respons melebihi 1 MiB".into()));
                 }
+                // Chrome mengabaikan `Connection: close` dan membiarkan socket
+                // terbuka. Menunggu EOF berarti menunggu sampai read timeout,
+                // dan discovery tidak pernah selesai. Berhenti saat body sudah
+                // lengkap menurut Content-Length.
+                if is_complete(&buf) {
+                    break;
+                }
             }
             Err(err)
                 if matches!(
@@ -291,6 +326,30 @@ fn http_get(port: u16, path: &str) -> Result<String, EngineError> {
     }
     String::from_utf8(body.to_vec())
         .map_err(|err| EngineError::Discovery(format!("body bukan UTF-8: {err}")))
+}
+
+/// Membaca nilai `Content-Length` dari kepala respons. Nama header tidak
+/// peka huruf besar-kecil, dan spasi setelah titik dua boleh ada.
+fn content_length(head: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(head);
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("content-length") {
+            return None;
+        }
+        value.trim().parse::<usize>().ok()
+    })
+}
+
+/// `true` kalau kepala sudah utuh DAN body sudah sepanjang yang dijanjikan.
+///
+/// Respons tanpa `Content-Length` (atau `Transfer-Encoding: chunked`) hanya
+/// dianggap selesai saat socket ditutup, persis seperti perilaku lama.
+fn is_complete(buf: &[u8]) -> bool {
+    let Some((head, body)) = split_http_response(buf) else {
+        return false;
+    };
+    content_length(head).is_some_and(|expected| body.len() >= expected)
 }
 
 fn split_http_response(buf: &[u8]) -> Option<(&[u8], &[u8])> {
@@ -377,6 +436,57 @@ mod tests {
         assert_eq!(info.browser, "HeadlessChrome/test");
         assert_eq!(info.devtools_port, port);
         assert_eq!(info.v8_version, None, "field yang tidak dikirim tetap None");
+    }
+
+    /// Regresi bug 2 Nov 2026: `chrome-headless-shell` mengabaikan
+    /// `Connection: close` dan tidak menutup socket. Klien yang menunggu EOF
+    /// selalu kena read timeout dan discovery tidak pernah selesai. Test ini
+    /// meniru server yang tetap terbuka setelah menjawab.
+    #[test]
+    fn respons_keep_alive_selesai_tanpa_menunggu_socket_ditutup() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("port bebas");
+        let port = listener.local_addr().expect("alamat lokal").port();
+
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("satu koneksi");
+            let body = r#"{"Browser":"HeadlessChrome/keep-alive","User-Agent":"ua","webSocketDebuggerUrl":"ws://127.0.0.1:1/x"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .expect("tulis respons");
+            socket.flush().expect("flush");
+            // Socket sengaja TIDAK ditutup: menahan lebih lama dari read timeout
+            // klien (2 detik). Kalau klien masih menunggu EOF, test ini gagal
+            // dengan timeout, bukan lulus kebetulan.
+            std::thread::sleep(Duration::from_millis(2500));
+        });
+
+        let started = Instant::now();
+        let body = http_get(port, "/json/version").expect("harus terbaca walau socket terbuka");
+        let elapsed = started.elapsed();
+        server.join().expect("server selesai");
+
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "klien menunggu EOF: butuh {elapsed:?}, seharusnya selesai segera setelah body lengkap"
+        );
+        assert!(body.contains("keep-alive"), "body: {body}");
+    }
+
+    #[test]
+    fn content_length_tidak_peka_huruf() {
+        let head = b"HTTP/1.1 200 OK\r\ncontent-length: 42\r\n\r\n";
+        assert_eq!(content_length(head), Some(42));
+        assert!(is_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc"
+        ));
+        assert!(!is_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nabc"
+        ));
+        assert!(!is_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"));
     }
 
     #[test]
