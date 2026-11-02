@@ -2,12 +2,14 @@
 
 #![forbid(unsafe_code)]
 
+mod cdp_client;
 mod cli;
 mod config;
 mod daemon;
 mod metrics;
 mod reap;
 mod selftest;
+mod storecmd;
 
 use std::process::ExitCode;
 
@@ -31,6 +33,20 @@ fn main() -> ExitCode {
                 }
             }
         }
+        cli::Command::Keygen(args) => match storecmd::keygen(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("browserd keygen: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
+        cli::Command::Cookies(args) => match run_cookies(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("browserd cookies: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
         cli::Command::Serve(args) => {
             init_tracing();
             match run(args) {
@@ -42,6 +58,18 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+    }
+}
+
+fn run_cookies(args: cli::CookiesArgs) -> anyhow::Result<()> {
+    match args.action {
+        cli::CookieAction::Ls(a) => storecmd::ls(&a.umum, a.host.as_deref()),
+        cli::CookieAction::Export(a) => storecmd::export(&a.umum),
+        cli::CookieAction::Import(a) => storecmd::import(&a.umum),
+        cli::CookieAction::Proof(a) => {
+            init_tracing();
+            storecmd::proof(&a)
         }
     }
 }

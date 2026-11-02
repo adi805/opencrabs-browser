@@ -35,6 +35,13 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         );
     }
 
+    // Store dibuka SEBELUM mesin dinyalakan: kunci yang hilang atau rusak harus
+    // terlihat sebagai daemon yang tidak mau start, bukan sebagai daemon sehat
+    // yang diam-diam kehilangan semua cookie saat restart berikutnya.
+    // Disimpan hidup selama daemon berjalan: perintah cookie (export/import)
+    // dan sesi berikutnya memakai koneksi yang sama.
+    let _store = buka_store(&file)?;
+
     let engine = launch_engine(&resolved, args.ready_timeout_ms).await?;
     let engine: Arc<dyn Engine> = Arc::new(engine);
 
@@ -108,6 +115,13 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     Ok(())
 }
 
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|durasi| durasi.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Satu event state daemon. Transisi yang ditolak itu bug, bukan kejadian
 /// normal, jadi jangan pernah ditelan tanpa jejak.
 fn apply_event(machine: &Mutex<Machine>, event: Event) {
@@ -115,6 +129,40 @@ fn apply_event(machine: &Mutex<Machine>, event: Event) {
     if let Err(err) = guard.apply(event) {
         tracing::warn!(%err, ?event, "transisi state daemon ditolak");
     }
+}
+
+/// Membuka store, menjalankan retensi, dan melaporkan isinya.
+///
+/// Profil yang belum ada dibuat di sini hanya kalau operator sudah menyebutnya
+/// lewat config; daemon tidak mengarang identitas sendiri.
+fn buka_store(file: &FileConfig) -> Result<store::Store> {
+    let db = file.store_db();
+    let key = file.store_key();
+    let store = store::Store::open_with_key_file(&db, &key).with_context(|| {
+        format!(
+            "store tidak bisa dibuka ({} + {}); jalankan `browserd keygen` sekali di host ini",
+            db.display(),
+            key.display()
+        )
+    })?;
+
+    let now = unix_seconds();
+    let sweep = store.sweep(now)?;
+    let profil = store.list_profiles()?;
+    let cookie = store
+        .count_cookies("scratch")
+        .map(|jumlah| jumlah.to_string())
+        .unwrap_or_else(|err| format!("tidak terbaca: {err}"));
+
+    tracing::info!(
+        db = %db.display(),
+        profiles = profil.len(),
+        cookies_scratch = %cookie,
+        swept_session = sweep.session,
+        swept_engine_run = sweep.engine_run,
+        "store siap"
+    );
+    Ok(store)
 }
 
 async fn launch_engine(resolved: &Resolved, timeout_ms: u64) -> Result<ShellEngine> {

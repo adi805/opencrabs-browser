@@ -23,6 +23,12 @@ pub struct DaemonSection {
     pub bind: Option<String>,
     pub engine_port: Option<u16>,
     pub log_dir: Option<String>,
+    /// Berkas database store. Bawaan: `~/.opencrabs/browser-daemon/store.db`.
+    pub store_db: Option<String>,
+    /// Berkas kunci store. Bawaan: `~/.opencrabs/browser-daemon/store.key`.
+    /// Tanpa kunci ini daemon menolak start: cookie tidak pernah ditulis
+    /// plaintext sebagai kompromi.
+    pub store_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -76,6 +82,22 @@ impl FileConfig {
     #[must_use]
     pub fn max_tabs(&self) -> Option<u32> {
         self.engines.as_ref()?.chrome_shell.as_ref()?.max_tabs
+    }
+
+    #[must_use]
+    pub fn store_db(&self) -> PathBuf {
+        self.daemon
+            .as_ref()
+            .and_then(|daemon| daemon.store_db.as_ref())
+            .map_or_else(super::storecmd::default_db, |raw| expand_home(raw))
+    }
+
+    #[must_use]
+    pub fn store_key(&self) -> PathBuf {
+        self.daemon
+            .as_ref()
+            .and_then(|daemon| daemon.store_key.as_ref())
+            .map_or_else(super::storecmd::default_key, |raw| expand_home(raw))
     }
 
     #[must_use]
