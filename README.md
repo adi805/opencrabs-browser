@@ -77,6 +77,33 @@ cargo xtask check     # fmt --check, clippy -D warnings, test
 
 Isi perintah itu sama persis dengan `.github/workflows/ci.yml`. Hijau lokal dan hijau di CI artinya hal yang sama.
 
+## Port kontrol (handoff tantangan)
+
+Selain port CDP, daemon membuka satu port HTTP kecil untuk manusia: `127.0.0.1:9223` (bisa diubah lewat `[daemon] control_bind`). Port ini **tidak** menyajikan halaman, hanya JSON, dan tidak pernah bind ke alamat publik.
+
+```bash
+token=$(cat ~/.opencrabs/browser-daemon/control.token)   # 0600, dibuat otomatis saat start
+curl -s -H "Authorization: Bearer $token" http://127.0.0.1:9223/api/v1/health
+```
+
+| Endpoint | Guna |
+|---|---|
+| `GET /api/v1/health` | status daemon, versi, uptime, jumlah handoff menunggu |
+| `GET /api/v1/handoff/pending` | antrean tantangan yang menunggu jawaban manusia |
+| `POST /api/v1/handoff/{id}/answer` | kirim jawaban (`keys`, `click`, `text`, `abort`) untuk diterapkan ke tab |
+| `POST /api/v1/challenge/probe` | periksa satu target: ada form tantangan di DOM atau tidak |
+
+Pembungkus yang sudah menyembunyikan token dari `argv` (terbaca lewat `ps`) ada di `~/.opencrabs/scripts/browserd-ctl.sh`:
+
+```bash
+browserd-ctl.sh health
+browserd-ctl.sh pending
+browserd-ctl.sh answer <handoff-id> '{"type":"keys","value":"Enter"}'
+browserd-ctl.sh probe <target-id>
+```
+
+**Simpangan dari paket desain:** dokumen 04 menyebut `token_file = "~/.opencrabs/keys.toml"`. Implementasi memakai berkas sendiri, `~/.opencrabs/browser-daemon/control.token` (mode `0600`, dibuat dengan `O_EXCL` oleh `keygen`/`serve`). Alasannya: `keys.toml` adalah berkas kredensial milik OpenCrabs yang dipakai banyak proses lain, dan daemon ini tidak perlu bisa membaca kunci provider mana pun. Perbandingan token dilakukan constant-time, dan token tidak pernah dicetak ke log maupun ke baris perintah.
+
 ## Yang sudah dibuktikan
 
 Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
