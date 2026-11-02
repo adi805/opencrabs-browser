@@ -91,7 +91,11 @@ pub struct EngineSection {
     /// profil, dan mesin kedua gagal start dengan pesan yang tidak menyebut
     /// sebabnya.
     pub user_data_dir: Option<String>,
-    /// Dibaca tapi belum ditegakkan: pembatasan tab milik `lifecycle` (M1).
+    /// Batas jumlah tab halaman untuk mesin ini.
+    ///
+    /// Ditegakkan di lapisan protokol: `/json/new` menjawab `429` dan
+    /// `Target.createTarget` dijawab galat `-32010` saat batasnya tercapai.
+    /// Kosong dan `0` sama-sama berarti tanpa batas.
     pub max_tabs: Option<u32>,
 }
 
@@ -159,9 +163,10 @@ impl FileConfig {
         Some(expand_home(raw))
     }
 
-    /// Batas tab dari config. Nilainya **belum ditegakkan** v0.1 karena
-    /// penegakan milik crate `lifecycle` (M1); daemon melaporkannya saat start
-    /// supaya tidak ada yang mengira batas ini sudah berlaku.
+    /// Batas tab mesin `chrome_shell`, bentuk config lama (satu mesin).
+    ///
+    /// Jalur multi-mesin membaca `max_tabs` per bagian `[engines.<id>]`, bukan
+    /// dari sini: nilai tunggal tidak bisa mewakili beberapa mesin sekaligus.
     #[must_use]
     pub fn max_tabs(&self) -> Option<u32> {
         self.engines.as_ref()?.daftar.get("chrome_shell")?.max_tabs

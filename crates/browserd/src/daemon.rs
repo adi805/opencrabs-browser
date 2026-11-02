@@ -48,7 +48,8 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
 
     let engines = launch_all(&resolved.machines, args.ready_timeout_ms).await?;
     let pool = EnginePool::new(resolved.default_id.clone(), engines)
-        .map_err(|err| anyhow::anyhow!("konfigurasi mesin tidak sah: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("konfigurasi mesin tidak sah: {err}"))?
+        .dengan_batas_tab(batas_tab(&resolved.machines));
 
     // State daemon dilacak sejak awal. Metrik `browser_engine_state` yang
     // dilaporkan tanpa state nyata cuma angka karangan, jadi state-nya
@@ -133,14 +134,20 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     }
 
     for mesin in &resolved.machines {
-        if mesin.max_tabs.is_some() {
-            // Jangan diam: config yang menyebut batas tab tapi tidak ditegakkan
-            // akan dibaca orang sebagai "sudah dibatasi".
-            tracing::warn!(
+        match mesin.max_tabs {
+            // Batas yang tidak dilaporkan saat start akan dikira tidak berlaku:
+            // operator menulis angka di config dan berharap melihatnya diyakini
+            // oleh daemon, bukan cuma dibaca.
+            Some(batas) if batas > 0 => tracing::info!(
                 mesin = %mesin.id,
-                max_tabs = ?mesin.max_tabs,
-                "max_tabs terbaca tetapi belum ditegakkan di v0.1 (milik lifecycle, M1)"
-            );
+                max_tabs = batas,
+                "batas tab ditegakkan untuk mesin ini"
+            ),
+            Some(_) => tracing::info!(
+                mesin = %mesin.id,
+                "max_tabs = 0 dibaca sebagai tanpa batas"
+            ),
+            None => {}
         }
     }
 
@@ -552,6 +559,21 @@ async fn matikan_semua(slots: Vec<Arc<Slot>>) {
             Err(err) => tracing::warn!(mesin = %id, %err, "task penghentian gagal"),
         }
     }
+}
+
+/// Batas tab per mesin yang benar-benar ditegakkan.
+///
+/// Mesin tanpa `max_tabs`, dan mesin dengan `max_tabs = 0`, tidak masuk peta:
+/// keduanya berarti tanpa batas, dan mesin tanpa entri tidak membayar satu
+/// pemeriksaan pun di jalur pembuatan tab.
+fn batas_tab(machines: &[Mesin]) -> BTreeMap<String, u32> {
+    machines
+        .iter()
+        .filter_map(|mesin| {
+            let batas = mesin.max_tabs?;
+            (batas > 0).then(|| (mesin.id.clone(), batas))
+        })
+        .collect()
 }
 
 /// Satu mesin yang harus dinyalakan, hasil penggabungan CLI dan config.
