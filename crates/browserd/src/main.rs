@@ -1,15 +1,6 @@
 //! Titik masuk `browserd`.
 
-#![forbid(unsafe_code)]
-
-mod cdp_client;
-mod cli;
-mod config;
-mod daemon;
-mod metrics;
-mod reap;
-mod selftest;
-mod storecmd;
+use browserd::{cli, config, daemon, selftest, storecmd};
 
 use std::process::ExitCode;
 

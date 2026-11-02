@@ -34,16 +34,48 @@ impl Client {
         Ok(Self { ws, next_id: 1 })
     }
 
+    /// Memanggil satu perintah CDP di tingkat browser (tanpa sesi).
+    pub async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.call_with(None, method, params).await
+    }
+
+    /// Memanggil satu perintah CDP di dalam satu sesi target.
+    ///
+    /// Perintah yang menyentuh halaman (`Input.*`, `Runtime.*`, `Page.*`) harus
+    /// lewat sesi: dikirim tanpa `sessionId`, mesin menjawab "not attached to
+    /// an active target", dan itu galat yang membingungkan kalau tidak tahu.
+    pub async fn call_in(
+        &mut self,
+        session_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        self.call_with(Some(session_id), method, params).await
+    }
+
     /// Memanggil satu perintah CDP dan mengembalikan `result`-nya.
     ///
     /// Event (pesan tanpa `id`) dilewati, bukan dianggap galat: mesin mengirim
     /// `Target.targetCreated` dan kawan-kawan kapan saja, termasuk di sela
     /// menunggu balasan.
-    pub async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    async fn call_with(
+        &mut self,
+        session_id: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
 
-        let pesan = json!({ "id": id, "method": method, "params": params });
+        let pesan = match session_id {
+            Some(session_id) => json!({
+                "id": id,
+                "method": method,
+                "params": params,
+                "sessionId": session_id,
+            }),
+            None => json!({ "id": id, "method": method, "params": params }),
+        };
         self.ws
             .send(Message::Text(pesan.to_string().into()))
             .await
