@@ -116,7 +116,10 @@ impl DomFinding {
 }
 
 /// Semua yang diamati untuk satu navigasi. Tidak ada field tebakan.
-#[derive(Debug, Clone, Default)]
+///
+/// `PartialEq` dipakai pengamat di `browserd` untuk membandingkan bukti antar
+/// navigasi; itu juga yang mencegah handoff ganda untuk halaman yang sama.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Evidence {
     /// Status dokumen utama dari `Network.responseReceived`.
     pub document_status: Option<u16>,

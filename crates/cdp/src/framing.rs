@@ -40,6 +40,19 @@ pub fn ts_to_axum(message: TsMessage) -> Option<AxumMessage> {
     }
 }
 
+/// Teks sebuah pesan, kalau memang pesan teks.
+///
+/// Dipakai pengamat yang hanya membaca. Dipisah dari [`ts_to_axum`] supaya
+/// pengamat tidak perlu mengambil alih pesan, dan supaya urutan "baca dulu,
+/// teruskan kemudian" terlihat di kode pemanggil.
+#[must_use]
+pub fn text_of(message: &TsMessage) -> Option<&str> {
+    match message {
+        TsMessage::Text(teks) => Some(teks.as_str()),
+        _ => None,
+    }
+}
+
 /// Memisahkan header dan body pada respons HTTP mentah.
 pub fn split_http_response(buf: &[u8]) -> Option<(&[u8], &[u8])> {
     const SEP: &[u8] = b"\r\n\r\n";

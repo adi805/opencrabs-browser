@@ -24,6 +24,21 @@ use std::sync::Arc;
 use axum::Router;
 use engine::Engine;
 
+/// Pembaca pesan yang lewat, tanpa hak mengubahnya.
+///
+/// Dipanggil sinkron di dalam jalur penerusan, jadi implementasinya wajib
+/// cepat: parsing ringan dan `try_send` ke antrean. Pekerjaan yang butuh
+/// perjalanan bolak-balik ke mesin (mis. probe DOM) dikerjakan di tempat lain,
+/// bukan di sini, karena menahannya di jalur ini berarti memperlambat setiap
+/// pesan klien.
+///
+/// `observe` tidak mengembalikan apa pun dan tidak menerima pesan yang bisa
+/// diubah: satu-satunya cara observer merusak penerusan adalah panik, dan itu
+/// ditangkap pemanggil.
+pub trait FrameObserver: Send + Sync {
+    fn observe(&self, payload: &str);
+}
+
 /// Yang dibutuhkan lapisan protokol untuk melayani klien.
 ///
 /// `public_ws_url` adalah URL yang **kita** iklankan ke klien. URL milik mesin
@@ -33,6 +48,9 @@ use engine::Engine;
 pub struct ProxyState {
     pub engine: Arc<dyn Engine>,
     pub public_ws_url: String,
+    /// `None` berarti tidak ada yang mengamati: perilaku persis sama dengan
+    /// sebelum fitur ini ada.
+    pub observer: Option<Arc<dyn FrameObserver>>,
 }
 
 impl ProxyState {
@@ -40,7 +58,14 @@ impl ProxyState {
         Self {
             engine,
             public_ws_url: public_ws_url.into(),
+            observer: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn FrameObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 }
 

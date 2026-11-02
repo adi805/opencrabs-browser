@@ -28,7 +28,11 @@ pub fn ws_router(state: Arc<ProxyState>) -> Router {
 
 /// Soket browser titipan: di sinilah `Target.*` dan `sessionId` berlaku.
 async fn upgrade_browser(ws: WebSocketUpgrade, State(state): State<Arc<ProxyState>>) -> Response {
-    upgrade(ws, state.engine.web_socket_url().to_owned())
+    upgrade(
+        ws,
+        state.engine.web_socket_url().to_owned(),
+        state.observer.clone(),
+    )
 }
 
 /// Soket halaman harus benar-benar mendarat di halaman itu. Kalau diteruskan
@@ -45,12 +49,20 @@ async fn upgrade_page(
         return CdpError::Upstream("target halaman tidak bisa dipetakan ke mesin".to_owned())
             .into_response();
     }
-    upgrade(ws, format!("ws://127.0.0.1:{port}/devtools/page/{id}"))
+    upgrade(
+        ws,
+        format!("ws://127.0.0.1:{port}/devtools/page/{id}"),
+        state.observer.clone(),
+    )
 }
 
-fn upgrade(ws: WebSocketUpgrade, engine_url: String) -> Response {
+fn upgrade(
+    ws: WebSocketUpgrade,
+    engine_url: String,
+    observer: Option<Arc<dyn crate::FrameObserver>>,
+) -> Response {
     ws.on_upgrade(move |socket| async move {
-        match proxy(socket, engine_url).await {
+        match proxy_with_observer(socket, engine_url, observer).await {
             Ok(stats) => tracing::info!(
                 to_engine = stats.to_engine,
                 from_engine = stats.from_engine,
@@ -68,6 +80,19 @@ pub struct Stats {
 }
 
 pub async fn proxy(client: WebSocket, engine_url: String) -> Result<Stats, CdpError> {
+    proxy_with_observer(client, engine_url, None).await
+}
+
+/// Sama dengan [`proxy`], plus pengamat yang membaca setiap pesan dari mesin.
+///
+/// Pesan yang diteruskan tetap pesan yang sama persis. Observer hanya menerima
+/// teksnya, dan panik di dalamnya ditangkap supaya satu bug di fitur pengamatan
+/// tidak memutus sesi yang sedang dipakai.
+pub async fn proxy_with_observer(
+    client: WebSocket,
+    engine_url: String,
+    observer: Option<Arc<dyn crate::FrameObserver>>,
+) -> Result<Stats, CdpError> {
     let (engine_socket, _response) = connect_async(engine_url.as_str())
         .await
         .map_err(|err| CdpError::WebSocket(err.to_string()))?;
@@ -100,6 +125,14 @@ pub async fn proxy(client: WebSocket, engine_url: String) -> Result<Stats, CdpEr
                 match outgoing {
                     Ok(message) => {
                         stats.from_engine += 1;
+                        if let Some(observer) = observer.as_ref()
+                            && let Some(teks) = framing::text_of(&message)
+                        {
+                            // Observer berjalan di jalur panas dan tidak
+                            // boleh menahan pesan: kontraknya hanya parsing
+                            // ringan lalu `try_send` ke antrean pekerja.
+                            observer.observe(teks);
+                        }
                         let Some(message) = framing::ts_to_axum(message) else {
                             tracing::debug!("pesan tanpa padanan dilewati");
                             continue;
