@@ -222,6 +222,7 @@ dependencies = [
  "axum",
  "engine",
  "futures-util",
+ "lifecycle",
  "serde_json",
  "testing",
  "thiserror",

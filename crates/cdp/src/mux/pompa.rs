@@ -32,6 +32,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as TsMessage;
 
+use crate::batas::Penjaga;
 use crate::engines::EnginePool;
 use crate::framing;
 use crate::mux::peta::{Balasan, KODE_DITOLAK, KODE_SESI_TAK_DIKENAL, MuxError, Perintah, Peta};
@@ -150,7 +151,22 @@ pub async fn proxy_multiplex(
 
                 match peta.terjemahkan_klien(teks) {
                     Ok(perintah) => {
-                        kirim_perintah(&perintah, &kanal, &mut gabung, &mut siar).await;
+                        let galat = kirim_perintah(
+                            &perintah,
+                            &pool,
+                            &kanal,
+                            &mut gabung,
+                            &mut siar,
+                        )
+                        .await;
+                        // Tab yang ditolak dijawab langsung ke klien, bukan
+                        // diteruskan: mesin tidak boleh sempat melahirkan tab
+                        // yang sudah kita putuskan tidak boleh ada.
+                        if let Some(galat) = galat
+                            && klien_tx.send(AxumMessage::Text(galat.into())).await.is_err()
+                        {
+                            break;
+                        }
                     }
                     Err(err) => {
                         // Ditolak di sini, bukan di mesin: mesin tidak tahu
@@ -242,12 +258,23 @@ pub async fn proxy_multiplex(
 /// Mengirim satu perintah klien ke mesin yang berhak menerimanya.
 async fn kirim_perintah(
     perintah: &Perintah,
+    pool: &EnginePool,
     kanal: &BTreeMap<String, mpsc::Sender<TsMessage>>,
     gabung: &mut BTreeMap<i64, Gabung>,
     siar: &mut BTreeMap<i64, Siar>,
-) {
+) -> Option<String> {
     match perintah {
         Perintah::Satu { mesin, payload } => {
+            // Hanya `Satu` yang diperiksa. `Target.createTarget` selalu
+            // menuju tepat satu mesin, sedangkan `Gabung` dan `Siar` menyebar
+            // ke banyak mesin untuk perintah yang tidak melahirkan tab;
+            // memeriksa batas di sana berarti satu GET ke setiap mesin pada
+            // setiap `getTargets`, dan itu biaya tanpa manfaat.
+            if let Some(penjaga) = Penjaga::dari_pool(pool, mesin)
+                && let Some(galat) = penjaga.tolak_create(payload).await
+            {
+                return Some(galat);
+            }
             if let Some(tx) = kanal.get(mesin) {
                 let _ = tx.send(TsMessage::Text(payload.clone().into())).await;
             }
@@ -258,7 +285,7 @@ async fn kirim_perintah(
                 .filter(|(mesin, _)| kanal.contains_key(mesin))
                 .collect();
             if hidup.is_empty() {
-                return;
+                return None;
             }
             // Jumlah yang diharapkan dihitung dari mesin yang benar-benar
             // hidup. Menghitung dari pool membuat satu mesin mati menahan
@@ -279,7 +306,7 @@ async fn kirim_perintah(
         Perintah::Siar { klien_id, pesan } => {
             let hidup = pesan.iter().filter(|(m, _)| kanal.contains_key(m)).count();
             if hidup == 0 {
-                return;
+                return None;
             }
             siar.insert(
                 *klien_id,
@@ -295,6 +322,7 @@ async fn kirim_perintah(
             }
         }
     }
+    None
 }
 
 /// `true` kalau balasan ini adalah balasan siaran yang bukan pertama.

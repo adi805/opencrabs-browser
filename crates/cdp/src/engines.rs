@@ -67,6 +67,13 @@ impl PoolError {
 pub struct EnginePool {
     default: String,
     slots: BTreeMap<String, Arc<Slot>>,
+    /// Batas tab per mesin, dari `[engines.<id>] max_tabs`.
+    ///
+    /// Disimpan di pool, bukan di [`Slot`], karena batas ini milik lapisan
+    /// protokol (berapa tab yang boleh dibuka klien), bukan milik proses.
+    /// Mesin tanpa entri di sini berarti **tanpa batas**, dan pemanggil yang
+    /// benar-benar akan membuka tab tidak perlu menyentuh mesin sama sekali.
+    batas: BTreeMap<String, u32>,
 }
 
 impl std::fmt::Debug for EnginePool {
@@ -97,7 +104,11 @@ impl EnginePool {
         ));
         let mut slots = BTreeMap::new();
         slots.insert(id.clone(), slot);
-        Self { default: id, slots }
+        Self {
+            default: id,
+            slots,
+            batas: BTreeMap::new(),
+        }
     }
 
     /// Pool dari mesin-mesin yang **sudah hidup**.
@@ -152,7 +163,32 @@ impl EnginePool {
         if !slots.contains_key(&default) {
             return Err(PoolError::BawaanTidakAda(default));
         }
-        Ok(Self { default, slots })
+        Ok(Self {
+            default,
+            slots,
+            batas: BTreeMap::new(),
+        })
+    }
+
+    /// Memasang batas tab per mesin.
+    ///
+    /// Entri untuk id yang tidak ada diabaikan (bukan panic): pool sudah
+    /// menolak konfigurasi yang menyebut mesin bawaan yang tidak ada, dan batas
+    /// yang tidak punya mesin tidak bisa ditegakkan oleh siapa pun.
+    #[must_use]
+    pub fn dengan_batas_tab(mut self, batas: BTreeMap<String, u32>) -> Self {
+        for (id, nilai) in batas {
+            if self.slots.contains_key(&id) {
+                self.batas.insert(id, nilai);
+            }
+        }
+        self
+    }
+
+    /// Batas tab mesin ini, kalau operator memasangnya.
+    #[must_use]
+    pub fn batas_tab(&self, id: &str) -> Option<u32> {
+        self.batas.get(id).copied()
     }
 
     #[must_use]

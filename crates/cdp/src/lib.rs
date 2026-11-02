@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod batas;
 pub mod engines;
 pub mod errors;
 pub mod framing;

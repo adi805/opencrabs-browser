@@ -17,6 +17,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as TsMessage;
 
+use crate::batas::Penjaga;
 use crate::{CdpError, ProxyState, framing};
 
 pub fn ws_router(state: Arc<ProxyState>) -> Router {
@@ -55,11 +56,15 @@ async fn upgrade_browser(ws: WebSocketUpgrade, State(state): State<Arc<ProxyStat
         Ok(hidup) => hidup,
         Err(err) => return err.into_response(),
     };
+    // Batas tab hanya ada artinya di soket browser: di situlah
+    // `Target.createTarget` datang. Soket halaman tidak bisa melahirkan tab.
+    let penjaga = Penjaga::dari_pool(&state.engines, hidup.slot.id());
     upgrade(
         ws,
         hidup.engine.web_socket_url().to_owned(),
         state.observer.clone(),
         Some(hidup.slot),
+        penjaga,
     )
 }
 
@@ -93,6 +98,7 @@ async fn upgrade_page(
         format!("ws://127.0.0.1:{port}/devtools/page/{upstream}"),
         state.observer.clone(),
         Some(hidup.slot),
+        None,
     )
 }
 
@@ -107,10 +113,11 @@ fn upgrade(
     engine_url: String,
     observer: Option<Arc<dyn crate::FrameObserver>>,
     slot: Option<Arc<engine::Slot>>,
+    penjaga: Option<Penjaga>,
 ) -> Response {
     ws.on_upgrade(move |socket| async move {
         let _sesi = slot.map(crate::SesiSlot::buka);
-        match proxy_with_observer(socket, engine_url, observer).await {
+        match proxy_dengan_penjaga(socket, engine_url, observer, penjaga).await {
             Ok(stats) => tracing::info!(
                 to_engine = stats.to_engine,
                 from_engine = stats.from_engine,
@@ -141,6 +148,21 @@ pub async fn proxy_with_observer(
     engine_url: String,
     observer: Option<Arc<dyn crate::FrameObserver>>,
 ) -> Result<Stats, CdpError> {
+    proxy_dengan_penjaga(client, engine_url, observer, None).await
+}
+
+/// [`proxy_with_observer`] plus penegakan `max_tabs`.
+///
+/// Penjaga diperiksa **sebelum** pesan menyentuh mesin. Tab yang lahir lalu
+/// ditutup lagi tetap membayar boot, memori, dan waktu; yang ingin dihemat
+/// justru semuanya. Pesan yang ditolak tidak pernah sampai ke mesin, jadi
+/// hitungan tab di sana tidak pernah melewati batas karena jalur ini.
+pub async fn proxy_dengan_penjaga(
+    client: WebSocket,
+    engine_url: String,
+    observer: Option<Arc<dyn crate::FrameObserver>>,
+    penjaga: Option<Penjaga>,
+) -> Result<Stats, CdpError> {
     let (engine_socket, _response) = connect_async(engine_url.as_str())
         .await
         .map_err(|err| CdpError::WebSocket(err.to_string()))?;
@@ -156,8 +178,19 @@ pub async fn proxy_with_observer(
                 let Some(incoming) = incoming else { break };
                 match incoming {
                     Ok(message) => {
-                        stats.to_engine += 1;
                         let message = framing::axum_to_ts(message);
+                        // Batas tab diperiksa di sini, sebelum pesan menyentuh
+                        // mesin dan sebelum dihitung sebagai lalu lintas.
+                        if let Some(penjaga) = penjaga.as_ref()
+                            && let Some(teks) = framing::text_of(&message)
+                            && let Some(galat) = penjaga.tolak_create(teks).await
+                        {
+                            if client_tx.send(AxumMessage::Text(galat.into())).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        stats.to_engine += 1;
                         // Pengamat juga membaca arah klien. Tanpa itu
                         // pemetaan sesi ke target hilang: mesin hanya
                         // mengirim `sessionId` di balasan attach, sedangkan

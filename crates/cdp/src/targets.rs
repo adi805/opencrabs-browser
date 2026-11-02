@@ -264,6 +264,15 @@ async fn new_target(
     method: Method,
     uri: Uri,
 ) -> Result<Response, CdpError> {
+    // Batas tab diperiksa **sebelum** mesin dibangunkan. Mesin yang sedang
+    // tidur punya nol tab, jadi tidak mungkin penuh, dan membangunkan Chromium
+    // hanya untuk menolaknya adalah pekerjaan yang sia-sia.
+    let mesin = state.engines.default_id().to_owned();
+    if let Some(penjaga) = crate::batas::Penjaga::dari_pool(&state.engines, &mesin)
+        && let Some(tolak) = penjaga.periksa().await
+    {
+        return Ok(tolak.respons_http());
+    }
     let hidup = bangun(&state, None).await?;
     forward_json(&state, &hidup.engine, &method, &path_and_query(&uri)).await
 }
@@ -305,9 +314,9 @@ async fn rute_per_id(
     .await
 }
 
-struct Upstream {
-    status: u16,
-    body: String,
+pub(crate) struct Upstream {
+    pub(crate) status: u16,
+    pub(crate) body: String,
 }
 
 async fn forward_json(
@@ -434,7 +443,7 @@ fn rewrite_value(
     }
 }
 
-async fn forward(
+pub(crate) async fn forward(
     engine: &Arc<dyn Engine>,
     method: &Method,
     path_and_query: &str,
