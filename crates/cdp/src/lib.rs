@@ -2,21 +2,29 @@
 //!
 //! Aturan crate ini:
 //!
-//! - **Pesan klien tidak pernah diubah isinya.** Id, `sessionId`, urutan, dan
-//!   byte-nya diteruskan apa adanya. Di v0.1 ini bukan multiplex: satu koneksi
-//!   klien memetakan ke satu koneksi mesin.
+//! - **Pesan klien tidak diubah isinya.** Id, `sessionId`, urutan, dan byte-nya
+//!   diteruskan apa adanya selama hanya ada satu mesin.
+//! - **Dengan lebih dari satu mesin, identitas diterjemahkan, bukan isinya.**
+//!   `id`, `sessionId`, dan `targetId` dipetakan ke ruang id milik klien karena
+//!   dua mesin bisa memakai nilai yang sama untuk hal yang berbeda. Field lain
+//!   tidak disentuh. Lihat [`mux`].
 //! - **Crate ini tidak tahu mesin mana yang dipakai.** Dia hanya pegang trait
-//!   [`engine::Engine`], jadi engine palsu bisa dipakai di test.
-//! - **Keputusan routing bukan di sini.** Itu di `policy`, dan belum masuk v0.1.
+//!   [`engine::Engine`] di dalam [`EnginePool`], jadi mesin palsu bisa dipakai
+//!   di test.
+//! - **Keputusan routing bukan di sini.** Pemilihan mesin milik `policy`;
+//!   [`mux`] hanya menjalankan peta yang sudah ada.
 
 #![forbid(unsafe_code)]
 
+pub mod engines;
 pub mod errors;
 pub mod framing;
 pub mod ids;
+pub mod mux;
 pub mod passthrough;
 pub mod targets;
 
+pub use engines::{EnginePool, PoolError};
 pub use errors::CdpError;
 
 use std::sync::Arc;
@@ -46,7 +54,7 @@ pub trait FrameObserver: Send + Sync {
 /// mesin, proxy ini kehilangan seluruh gunanya.
 #[derive(Clone)]
 pub struct ProxyState {
-    pub engine: Arc<dyn Engine>,
+    pub engines: EnginePool,
     pub public_ws_url: String,
     /// `None` berarti tidak ada yang mengamati: perilaku persis sama dengan
     /// sebelum fitur ini ada.
@@ -54,12 +62,23 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
+    /// Satu mesin, perilaku sama seperti sebelum multiplex ada.
     pub fn new(engine: Arc<dyn Engine>, public_ws_url: impl Into<String>) -> Self {
+        Self::pool(EnginePool::single(engine), public_ws_url)
+    }
+
+    pub fn pool(pool: EnginePool, public_ws_url: impl Into<String>) -> Self {
         Self {
-            engine,
+            engines: pool,
             public_ws_url: public_ws_url.into(),
             observer: None,
         }
+    }
+
+    /// Mesin bawaan. Endpoint discovery yang tidak menyebut mesin memakai ini.
+    #[must_use]
+    pub fn engine(&self) -> &Arc<dyn Engine> {
+        self.engines.default_engine()
     }
 
     #[must_use]

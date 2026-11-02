@@ -18,12 +18,19 @@ pub enum CdpError {
 
     #[error("websocket mesin tidak bisa dibuka: {0}")]
     WebSocket(String),
+
+    #[error("mesin '{diminta}' tidak ada; yang terpasang: {tersedia}")]
+    MesinTakAda { diminta: String, tersedia: String },
 }
 
 impl CdpError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
+            // Mesin yang tidak ada bukan kegagalan server: klien menyebut
+            // nama yang tidak terpasang, dan 404 yang menyebut daftar mesin
+            // membuat salah ketik selesai dalam satu percobaan.
+            Self::MesinTakAda { .. } => StatusCode::NOT_FOUND,
             Self::Malformed | Self::WebSocket(_) => StatusCode::BAD_GATEWAY,
         }
     }

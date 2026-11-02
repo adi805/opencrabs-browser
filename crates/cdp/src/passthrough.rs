@@ -27,10 +27,29 @@ pub fn ws_router(state: Arc<ProxyState>) -> Router {
 }
 
 /// Soket browser titipan: di sinilah `Target.*` dan `sessionId` berlaku.
+///
+/// Satu mesin tetap lewat jalur pass-through lama, yang sudah dipakai produksi.
+/// Multiplex hanya dipakai kalau memang ada lebih dari satu mesin: menaruh
+/// penerjemahan identitas di jalur satu mesin berarti mempertaruhkan yang sudah
+/// jalan tanpa alasan.
 async fn upgrade_browser(ws: WebSocketUpgrade, State(state): State<Arc<ProxyState>>) -> Response {
+    if state.engines.is_multi() {
+        let pool = state.engines.clone();
+        let observer = state.observer.clone();
+        return ws.on_upgrade(move |socket| async move {
+            match crate::mux::proxy_multiplex(socket, pool, observer).await {
+                Ok(stats) => tracing::info!(
+                    to_engine = stats.to_engine,
+                    from_engine = stats.from_engine,
+                    "sesi CDP multiplex selesai"
+                ),
+                Err(err) => tracing::warn!(%err, "sesi CDP multiplex gagal"),
+            }
+        });
+    }
     upgrade(
         ws,
-        state.engine.web_socket_url().to_owned(),
+        state.engine().web_socket_url().to_owned(),
         state.observer.clone(),
     )
 }
@@ -44,14 +63,28 @@ async fn upgrade_page(
     Path(rest): Path<String>,
 ) -> Response {
     let id = rest.trim_start_matches('/');
-    let port = state.engine.info().devtools_port;
-    if id.is_empty() || port == 0 {
+    // Id halaman boleh berprefiks mesin (`<mesin>~<id>`) karena itu bentuk
+    // yang kita iklankan di `/json/list`. Tanpa prefiks, halaman dianggap milik
+    // mesin bawaan, sehingga URL lama tetap bekerja.
+    let (mesin, upstream) = crate::engines::pecah_id(id);
+    let engine = match mesin {
+        Some(mesin) => match state.engines.get(mesin) {
+            Some(engine) => engine,
+            None => {
+                return CdpError::Upstream(format!("mesin '{mesin}' tidak terpasang"))
+                    .into_response();
+            }
+        },
+        None => state.engine(),
+    };
+    let port = engine.info().devtools_port;
+    if upstream.is_empty() || port == 0 {
         return CdpError::Upstream("target halaman tidak bisa dipetakan ke mesin".to_owned())
             .into_response();
     }
     upgrade(
         ws,
-        format!("ws://127.0.0.1:{port}/devtools/page/{id}"),
+        format!("ws://127.0.0.1:{port}/devtools/page/{upstream}"),
         state.observer.clone(),
     )
 }
