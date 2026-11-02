@@ -104,19 +104,67 @@ browserd-ctl.sh probe <target-id>
 
 **Simpangan dari paket desain:** dokumen 04 menyebut `token_file = "~/.opencrabs/keys.toml"`. Implementasi memakai berkas sendiri, `~/.opencrabs/browser-daemon/control.token` (mode `0600`, dibuat dengan `O_EXCL` oleh `keygen`/`serve`). Alasannya: `keys.toml` adalah berkas kredensial milik OpenCrabs yang dipakai banyak proses lain, dan daemon ini tidak perlu bisa membaca kunci provider mana pun. Perbandingan token dilakukan constant-time, dan token tidak pernah dicetak ke log maupun ke baris perintah.
 
-## Yang sudah dibuktikan
+## Multiplex: lebih dari satu mesin
+
+Satu daemon bisa menjalankan beberapa mesin sekaligus. Setiap bagian di bawah `[engines]` adalah satu mesin, dan **nama bagian itu adalah id mesin**:
+
+```toml
+[daemon]
+engine_default = "chrome_shell"      # opsional; tanpa ini dipakai chrome_shell, lalu id terkecil
+
+[engines.chrome_shell]
+binary = "~/bin/chrome-headless-shell"
+args = ["--no-sandbox", "--mute-audio"]
+max_tabs = 6
+
+[engines.shell_dua]
+kind = "shell"
+binary = "~/bin/chrome-headless-shell"
+port = 43002                         # wajib unik; 0 berarti pilih port bebas
+user_data_dir = "~/.cache/opencrabs-browser/dua-profile"
+```
+
+Bentuk lama `[engines.chrome_shell]` tanpa `[[engines]]` tetap jalan: yang berubah cuma jumlah mesin yang boleh ada di dalamnya.
+
+Yang berubah di sisi klien, dan hanya ini: **id target diberi prefiks mesin**. Klien yang bicara ke daemon melihat tab `chrome_shell~A1B2…`, dan `/json/close/chrome_shell~A1B2…` menutup tab itu di mesin yang benar. Field lain tidak disentuh, `sessionId` diterjemahkan ke ruang id milik klien supaya dua mesin yang kebetulan memakai nilai sama tidak saling menimpa, dan URL websocket selalu menunjuk ke daemon, bukan ke port mesin.
+
+Aturan yang berlaku saat ada lebih dari satu mesin:
+
+| Kejadian | Perilaku |
+|---|---|
+| `Target.getTargets` | digabung dari semua mesin |
+| `Target.setDiscoverTargets` | disiarkan ke semua mesin, jawaban pertama yang dikembalikan |
+| `Target.createTarget` tanpa `openCrabsOptions.engine` | dibuat di mesin bawaan |
+| `openCrabsOptions.engine = "<id>"` | dibuat di mesin itu; parameter dibuang sebelum diteruskan |
+| id mesin yang tidak terpasang | ditolak `-32000` dengan daftar mesin yang ada, bukan diam-diam memakai bawaan |
+| `sessionId` yang tidak dikenal | ditolak `-32001`, tidak ditelan |
+| satu mesin mati | sesinya menerima `Target.detachedFromTarget`, klien tetap tersambung |
+| semua mesin mati | koneksi klien ditutup |
+| `/json/list` dengan satu mesin mati | mesin itu dilewati dengan peringatan di log; 502 hanya kalau semuanya gagal |
+| `/metrics` | satu baris `browser_engine_state` per mesin; penghitung milik daemon tetap satu |
+
+**Batas yang jujur, belum dikerjakan:**
+
+- Pemilihan mesin per host belum otomatis. `policy` menentukan **jenis** mesin (`shell` atau penuh); pemetaan host ke **instance** tertentu belum ada, jadi semua permintaan yang tidak menyebut mesin berakhir di mesin bawaan.
+- `/json/new` selalu membuat tab di mesin bawaan. Endpoint itu tidak punya tempat untuk menyebut mesin; pakai `Target.createTarget` dengan `openCrabsOptions`.
+- Probe handoff (port kontrol) masih menembak mesin bawaan saja. Kalau tantangan muncul di halaman mesin lain, probe-nya tidak melihat halaman itu; yang dilaporkan adalah apa yang ada di mesin bawaan.
+- Idle reap per mesin belum ada: tabel transisi daemon masih satu, dan `/metrics` melaporkan state tiap mesin dari hidup/matinya proses.
+- Satu klien websocket berbicara ke semua mesin lewat satu antrean per mesin (256 pesan). Kalau antrean penuh, perintah ditolak dengan galat, bukan dibuang diam-diam.
 
 Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
 
 | Bukti | Hasil |
 |---|---|
-| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 36 test |
+| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 293 test (dihitung ulang 2 Nov 2026 setelah M4) |
 | `cargo xtask doctor` | exit 0 |
 | `node bench/cdp-smoke.mjs` | 6/6 lulus |
 | Klien nyata (OpenCrabs `browser_navigate`) lewat daemon | `https://example.com` → "Example Domain" |
 | `browser_eval` lewat daemon | `bodyChars=917`, URL benar |
 | `browser_screenshot` lewat daemon | PNG base64, bukan halaman kosong |
 | Browser produksi di `:9222` | tidak disentuh selama pengujian |
+| Bukti M4: dua mesin palsu, satu daemon | `cargo test -p cdp --test discovery` 7 lulus, `-p cdp --test multiplex` 8 lulus |
+| Bukti M4: dua `chrome-headless-shell` nyata | `cargo test -p browserd --test m4_proof` 1 lulus: judul tab tidak tertukar, tutup tab kanan tidak memengaruhi tab kiri |
+| Bukti M4: `/metrics` dua mesin | `cargo test -p browserd --test m4_metrics` 2 lulus: label per mesin, blok global tetap satu |
 | CI GitHub, run pertama (2 Nov 2026) | `success` dalam **1m9s**, cold cache, runner `rustc 1.98.1`, 36 test lulus (9/14/11/2 per crate) |
 | Build rilis di GitHub (run 41386053917) | `success` total 70s, `cargo build --release` selesai **43.36s**, `target` 267 MB |
 | Biner rilis x86_64 setelah `strip` | **1,28 MB** (`browserd-0.1.0-x86_64-unknown-linux-gnu.tar.gz`, 1 282 228 byte) |
@@ -132,12 +180,15 @@ Satu koreksi terhadap paket desain: batas disk runner diperkirakan 14 GB, yang t
 
 | Versi | Isi minimum | Milestone |
 |---|---|---|
-| `0.1.0` | daemon, `/json/version`, pass-through, reroute, L1+L2 hijau di CI | M2 |
-| `0.2.0` | lifecycle: TTL tab, reap, ratchet PSS terbukti | M3 |
-| `0.3.0` | deteksi tantangan + handoff OTP, arm64 | M4 |
-| `0.4.0` | multiplex CDP | M5 |
+| `0.1.0` (sekarang) | daemon, `/json/version`, pass-through, reroute, L1+L2 hijau di CI | M0 |
+| `0.1.0` (sekarang) | lifecycle: TTL tab, reap, ratchet PSS terbukti | M1 |
+| `0.1.0` (sekarang) | store: profil, cookie yang bertahan restart | M2 |
+| `0.1.0` (sekarang) | policy, deteksi tantangan, handoff OTP | M3 |
+| belum ditag | multiplex CDP: beberapa mesin dalam satu daemon | M4 |
+| belum ditag | adapter `oxi`, hanya kalau uji kapabilitas lulus | M5 |
+| belum ditag | `chrome-full` + xvfb + jalur artefak `cloakbrowser` | M6 |
 
-Nomor versi di `Cargo.toml` sudah `0.1.0`, tapi **belum ada tag**: repo yang punya tag `0.1.0` sementara belum bisa dipakai orang adalah rilis palsu.
+Nomor milestone di tabel ini mengikuti `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex). Versi `0.1.0` di `Cargo.toml` belum dinaikkan sejak M0: yang bertambah isinya, bukan nomornya. **Belum ada tag**, karena repo yang punya tag `0.1.0` sementara belum bisa dipakai orang adalah rilis palsu.
 
 ## Kebijakan
 
