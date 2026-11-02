@@ -60,6 +60,19 @@ impl FakeEngine {
         }
     }
 
+    /// Pid yang dilaporkan mesin palsu.
+    ///
+    /// Bawaan 4242 cukup untuk test yang hanya membaca angka. Test yang
+    /// **benar-benar** mengirim sinyal (mis. `browserd::daemon::putaran_reap`
+    /// lewat `PgidGroup`) wajib memakai pid di atas `pid_max` kernel: group itu
+    /// dipindai di `/proc`, dan kalau kebetulan ada proses host dengan pgid
+    /// sama, sinyalnya mendarat di proses yang salah.
+    #[must_use]
+    pub fn with_pid(mut self, pid: u32) -> Self {
+        self.pid = pid;
+        self
+    }
+
     #[must_use]
     pub fn stop_calls(&self) -> u32 {
         self.stop_calls.load(Ordering::SeqCst)

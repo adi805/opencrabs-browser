@@ -15,9 +15,11 @@
 
 pub mod probe;
 pub mod shell;
+pub mod slot;
 
 pub use probe::discover_shell;
 pub use shell::ShellEngine;
+pub use slot::{Keadaan, Penggerak, PenggerakShell, Slot, SlotError};
 
 use std::path::PathBuf;
 
