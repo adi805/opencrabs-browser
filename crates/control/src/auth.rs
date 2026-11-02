@@ -131,16 +131,14 @@ pub fn ensure_token_file(path: &Path) -> Result<Token, AuthError> {
     }
 
     let token = random_token()?;
-    match open_private(path)? {
-        Some(mut berkas) => {
-            berkas.write_all(token.as_bytes())?;
-            berkas.write_all(b"\n")?;
-            berkas.sync_all()?;
-        }
-        // Proses lain membuat berkas yang sama di antara pemeriksaan dan open.
-        // Itu bukan kegagalan: berkasnya sudah ada, dan tokennyalah yang
-        // dipakai. Membaca ulang di bawah membuat dua jalur ini bertemu.
-        None => {}
+    // `None` berarti proses lain membuat berkas yang sama di antara
+    // pemeriksaan dan open. Itu bukan kegagalan: berkasnya sudah ada, dan
+    // tokennyalah yang dipakai. Membaca ulang di bawah membuat dua jalur ini
+    // bertemu.
+    if let Some(mut berkas) = open_private(path)? {
+        berkas.write_all(token.as_bytes())?;
+        berkas.write_all(b"\n")?;
+        berkas.sync_all()?;
     }
     read_token_file(path)
 }

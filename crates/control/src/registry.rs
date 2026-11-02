@@ -412,12 +412,19 @@ impl Registry {
             .collect()
     }
 
+    /// Jumlah handoff yang sedang disimpan, termasuk yang sudah selesai dan
+    /// menunggu dibersihkan. Dipakai uji dan laporan status.
     #[must_use]
     pub fn len(&self) -> usize {
         self.handoffs
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

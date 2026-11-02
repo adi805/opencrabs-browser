@@ -99,8 +99,8 @@ fn jitter(i: usize) -> (f64, f64) {
     // Deret sederhana: cukup untuk menyebar, tidak perlu generator acak.
     let a = ((i * 37 + 11) % 7) as f64 / 6.0;
     let b = ((i * 53 + 5) % 5) as f64 / 4.0;
-    let tanda_a = if i % 2 == 0 { 1.0 } else { -1.0 };
-    let tanda_b = if i % 3 == 0 { -1.0 } else { 1.0 };
+    let tanda_a = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
+    let tanda_b = if i.is_multiple_of(3) { -1.0 } else { 1.0 };
     (
         tanda_a * (JITTER_MIN + a * rentang),
         tanda_b * (JITTER_MIN + b * rentang),

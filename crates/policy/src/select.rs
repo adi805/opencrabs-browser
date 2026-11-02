@@ -405,13 +405,13 @@ pub fn select(
     }
 
     // 7. Teks saja: mesin termurah yang bisa menjalankan JavaScript.
-    if !request.needs.layout {
-        if let Some(kind) = cheapest_script(catalog, request.needs) {
-            return Ok(Decision {
-                kind,
-                rule: RULE_CHEAPEST,
-            });
-        }
+    if !request.needs.layout
+        && let Some(kind) = cheapest_script(catalog, request.needs)
+    {
+        return Ok(Decision {
+            kind,
+            rule: RULE_CHEAPEST,
+        });
     }
 
     // 8. Bawaan dari config, lalu shell.
