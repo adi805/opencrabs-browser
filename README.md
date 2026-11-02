@@ -115,7 +115,7 @@ engine_default = "chrome_shell"      # opsional; tanpa ini dipakai chrome_shell,
 [engines.chrome_shell]
 binary = "~/bin/chrome-headless-shell"
 args = ["--no-sandbox", "--mute-audio"]
-max_tabs = 6
+max_tabs = 6                         # ditegakkan, lihat bagian Batas tab
 
 [engines.shell_dua]
 kind = "shell"
@@ -154,7 +154,7 @@ Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
 
 | Bukti | Hasil |
 |---|---|
-| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 312 test (dihitung ulang 2 Nov 2026 setelah idle reap) |
+| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 330 test (dihitung ulang 2 Nov 2026 setelah `max_tabs` ditegakkan) |
 | `cargo xtask doctor` | exit 0 |
 | `node bench/cdp-smoke.mjs` | 6/6 lulus |
 | Klien nyata (OpenCrabs `browser_navigate`) lewat daemon | `https://example.com` → "Example Domain" |
@@ -163,6 +163,7 @@ Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
 | Browser produksi di `:9222` | tidak disentuh selama pengujian |
 | Bukti M4: dua mesin palsu, satu daemon | `cargo test -p cdp --test discovery` 7 lulus, `-p cdp --test multiplex` 8 lulus |
 | Bukti M4: dua `chrome-headless-shell` nyata | `cargo test -p browserd --test m4_proof` 1 lulus: judul tab tidak tertukar, tutup tab kanan tidak memengaruhi tab kiri |
+| Bukti `max_tabs`: batas ditegakkan | `cargo test -p cdp --test batas_tab` 9 lulus: `/json/new` 429, `-32010` di passthrough dan di multiplex, dan pesan yang ditolak tidak pernah sampai ke mesin |
 | Bukti M1: reap lalu bangun lagi | `cargo test -p browserd --test idle_reap` 5 lulus (mesin palsu, HTTP sungguhan) dan `--test idle_proof` 1 lulus (`chrome-headless-shell` sungguhan, PSS turun 12,2 MB, daemon tidak restart) |
 | Bukti M4: `/metrics` dua mesin | `cargo test -p browserd --test m4_metrics` 2 lulus: label per mesin, blok global tetap satu |
 | CI GitHub, run pertama (2 Nov 2026) | `success` dalam **1m9s**, cold cache, runner `rustc 1.98.1`, 36 test lulus (9/14/11/2 per crate) |
@@ -175,6 +176,30 @@ Yang **belum** diukur dan tidak diklaim: hit rate cache setelah beberapa run, da
 Catatan untuk yang membaca angka biner di atas: 1,28 MB itu **daemon**, bukan browser. Mesin (Chrome) tetap biner terpisah di sistem, dan total jejak RAM-nya yang nanti dijaga oleh budget di M1.
 
 Satu koreksi terhadap paket desain: batas disk runner diperkirakan 14 GB, yang terukur 85 GB tersedia. Penghematan disk (`CARGO_INCREMENTAL=0`, `df -h` sebelum dan sesudah) tetap dipakai karena murah, tapi batas 14 GB itu tidak lagi jadi alasan membatasi arsitektur.
+
+## Batas tab: `max_tabs`
+
+`max_tabs` di bawah satu mesin **ditegakkan**, bukan cuma dibaca. Batasnya per mesin, dan kosong atau `0` sama-sama berarti tanpa batas.
+
+| Jalur | Yang terjadi saat batas tercapai |
+|---|---|
+| `PUT /json/new` | `429 Too Many Requests` dengan body `{"error":"…"}`; mesin tidak disentuh sama sekali |
+| `Target.createTarget`, satu mesin | balasan galat JSON-RPC `-32010`; `id` dan `sessionId` dipantulkan supaya pustaka klien tidak menunggu selamanya |
+| `Target.createTarget`, multiplex | sama, dan hanya mesin tujuannya yang diperiksa: mesin lain tanpa batas tetap bisa membuat tab |
+| `/json/list` | tetap dijawab. Batas tab tidak boleh membuat klien buta, karena klien yang ingin menutup tab justru perlu melihat daftarnya |
+
+Yang dihitung hanya target bertipe `page`. Chrome melaporkan `iframe`, `service_worker`, dan `background_page` di daftar yang sama, dan menghitung semuanya akan membuat satu halaman dengan tiga iframe memakan empat jatah tab.
+
+Angkanya dibaca dari **mesin itu sendiri** (`/json/list`), bukan dari penghitung di daemon. Penghitung sendiri berarti dua angka yang bisa berbeda: tab yang ditutup klien lewat soket CDP tidak akan terlihat oleh daemon, dan batas akan menolak tab baru padahal mesinnya kosong. Harganya satu GET localhost sebelum tab dibuat, jauh lebih murah daripada satu boot Chromium. Pesan galatnya menyebut angkanya (`2 dari batas 2`) dan jalan keluarnya, jadi operator tidak perlu membuka config untuk tahu siapa yang penuh.
+
+Batas yang tetap jujur:
+
+- **Tidak atomik.** Dua `Target.createTarget` yang benar-benar bersamaan bisa sama-sama membaca angka di bawah batas lalu sama-sama lolos. Menutupnya butuh penghitung permintaan yang sedang terbang, dan itu state kedua yang justru ingin dihindari.
+- **Tab yang lahir di dalam halaman tidak terlihat.** `window.open`, popup OAuth, dan `Target.createTarget` yang dipanggil dari dalam halaman tidak melewati daemon; jumlahnya baru terlihat pada permintaan berikutnya.
+- **Gagal-terbuka saat menghitung gagal.** Kalau `/json/list` tidak terbaca, batas tidak ditegakkan dan sebabnya dicatat di log (`jumlah tab tidak terbaca`). Menolak tab karena masalah pengukuran akan mengubah satu gangguan kecil menjadi "browser tidak bisa dipakai".
+- **`max_tabs` itu pagar sopan, bukan pengaman memori.** Penjaga kerasnya tetap anggaran memori dan reap: mesin yang penuh tetap di-reap saat menganggur, dan mesin yang dipaksa bekerja di luar batas tetap dibatasi anggarannya.
+
+Bukti: `cargo test -p cdp --test batas_tab` (9 kasus, mesin palsu yang benar-benar server HTTP dan websocket; tiga di antaranya membuktikan pesan yang ditolak **tidak pernah sampai** ke mesin).
 
 ## Lifecycle: mesin tidur saat menganggur
 
