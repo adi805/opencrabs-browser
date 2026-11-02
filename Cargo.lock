@@ -185,6 +185,7 @@ dependencies = [
  "serde",
  "serde_json",
  "store",
+ "testing",
  "tokio",
  "tokio-tungstenite",
  "toml",
