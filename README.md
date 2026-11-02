@@ -184,7 +184,7 @@ Satu koreksi terhadap paket desain: batas disk runner diperkirakan 14 GB, yang t
 | `0.1.0` (sekarang) | lifecycle: TTL tab, reap, ratchet PSS terbukti | M1 |
 | `0.1.0` (sekarang) | store: profil, cookie yang bertahan restart | M2 |
 | `0.1.0` (sekarang) | policy, deteksi tantangan, handoff OTP | M3 |
-| belum ditag | multiplex CDP: beberapa mesin dalam satu daemon | M4 |
+| `0.1.0` (sekarang) | multiplex CDP: beberapa mesin dalam satu daemon | M4 |
 | belum ditag | adapter `oxi`, hanya kalau uji kapabilitas lulus | M5 |
 | belum ditag | `chrome-full` + xvfb + jalur artefak `cloakbrowser` | M6 |
 
