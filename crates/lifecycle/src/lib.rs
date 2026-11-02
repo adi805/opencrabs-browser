@@ -18,6 +18,7 @@ pub mod budget;
 pub mod metrics;
 pub mod reaper;
 pub mod state;
+pub mod tabs;
 
 pub use budget::{
     Action, Budget, BudgetConfig, BudgetError, BudgetViolation, GroupReading, Level, MB,
