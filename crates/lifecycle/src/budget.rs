@@ -472,6 +472,12 @@ pub fn processes_in_group(pgid: u32) -> Result<Vec<u32>, BudgetError> {
 }
 
 /// Jumlahkan PSS seluruh proses dalam satu process group.
+///
+/// Anggota yang tidak bisa dibaca (sudah mati, atau `smaps_rollup` milik user
+/// lain) dihitung `skipped`, bukan menggagalkan seluruh pembacaan. Kegagalan
+/// total berarti daemon kehilangan kemampuan memantau dirinya sendiri justru
+/// di host yang paling butuh pemantauan: runner CI dan mesin bersama, di mana
+/// proses satu group bisa dimiliki user berbeda.
 pub fn read_process_group(pgid: u32) -> Result<GroupReading, BudgetError> {
     let pids = processes_in_group(pgid)?;
     let mut reading = GroupReading::default();
@@ -483,7 +489,7 @@ pub fn read_process_group(pgid: u32) -> Result<GroupReading, BudgetError> {
                 reading.rss_bytes = reading.rss_bytes.saturating_add(smaps.rss_bytes);
                 reading.processes += 1;
             }
-            Err(BudgetError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            Err(BudgetError::Io { source, .. }) if anggota_boleh_dilewati(source.kind()) => {
                 reading.skipped += 1;
             }
             Err(err) => return Err(err),
@@ -491,6 +497,16 @@ pub fn read_process_group(pgid: u32) -> Result<GroupReading, BudgetError> {
     }
 
     Ok(reading)
+}
+
+/// Apakah kegagalan satu anggota grup boleh dilewati tanpa membatalkan
+/// pembacaan. Dua jenis yang sah: proses sudah hilang, dan proses yang tidak
+/// boleh dibaca user ini (`/proc/<pid>/smaps_rollup` milik user lain).
+fn anggota_boleh_dilewati(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    )
 }
 
 #[cfg(test)]
@@ -744,5 +760,25 @@ Pss_Shmem:         6000 kB
             reading.pss_bytes <= reading.rss_bytes + 4 * 1024 * 1024 * 1024,
             "PSS tidak masuk akal dibanding RSS"
         );
+    }
+
+    /// Kegagalan yang sah untuk satu anggota grup. Kalau salah satu jenis ini
+    /// ikut membatalkan pembacaan, CI (yang menolak `smaps_rollup` proses lain
+    /// di group yang sama) mematikan gate, dan di produksi daemon buta terhadap
+    /// pemakaiannya sendiri. Deterministik: tidak menyentuh /proc.
+    #[test]
+    fn anggota_yang_hilang_atau_terlarang_dilewati_sisanya_tetap_galat() {
+        assert!(anggota_boleh_dilewati(io::ErrorKind::NotFound));
+        assert!(anggota_boleh_dilewati(io::ErrorKind::PermissionDenied));
+        for lain in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::OutOfMemory,
+            io::ErrorKind::Other,
+        ] {
+            assert!(
+                !anggota_boleh_dilewati(lain),
+                "{lain:?} harus tetap menggagalkan pembacaan, bukan dilewati diam-diam"
+            );
+        }
     }
 }
