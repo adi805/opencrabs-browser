@@ -1,0 +1,10 @@
+//! Memilih mesin untuk satu permintaan, dan menjawab apakah halaman ini tantangan.
+//!
+//! Belum diimplementasikan. Milestone M3 di `docs/adr` dan paket desain
+//! (dokumen 00 sampai 04) memuat rancangannya.
+//!
+//! Crate ini sengaja dibiarkan kosong alih-alih berisi fungsi yang belum
+//! dipakai: tanda tangan API yang ditebak sekarang akan jadi utang yang
+//! memaksa refactor tepat saat isinya mulai ditulis.
+
+#![forbid(unsafe_code)]

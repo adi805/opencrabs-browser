@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --package xtask --quiet --"
+
+[build]
+# 4 core di mesin pengembangan. Lebih dari ini bikin thrash, bukan lebih cepat.
+jobs = 2
