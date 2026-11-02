@@ -15,6 +15,7 @@ use axum::Router;
 use axum::routing::get;
 use engine::Engine;
 use lifecycle::{Counters, Machine, State};
+use policy::counters::CaptchaCounters;
 
 /// Gauge HIDUP: PSS dibaca saat permintaan datang, bukan disimpan dari
 /// pembacaan terakhir. Angka yang disimpan akan terlihat masuk akal di
@@ -22,17 +23,23 @@ use lifecycle::{Counters, Machine, State};
 pub fn router(
     engine: Arc<dyn Engine>,
     counters: Arc<Counters>,
+    captcha: Arc<CaptchaCounters>,
     machine: Arc<Mutex<Machine>>,
 ) -> Router {
     let handler = move || {
         let engine = Arc::clone(&engine);
         let counters = Arc::clone(&counters);
+        let captcha = Arc::clone(&captcha);
         let machine = Arc::clone(&machine);
 
         async move {
             let pss = engine.process_id().and_then(read_pss_bytes);
             let state = machine.lock().map_or(State::Stopped, |guard| guard.state());
-            let body = counters.render(engine.kind(), state, pss);
+            // Dua keluarga metrik digabung di satu endpoint supaya scraper
+            // tidak perlu dua target. Tanpa penggabungan ini, handoff yang
+            // berjalan akan tidak terlihat di dashboard sama sekali.
+            let mut body = counters.render(engine.kind(), state, pss);
+            body.push_str(&captcha.render());
 
             (
                 [("content-type", "text/plain; version=0.0.4; charset=utf-8")],

@@ -19,3 +19,4 @@ pub mod metrics;
 pub mod reap;
 pub mod selftest;
 pub mod storecmd;
+pub mod wiring;

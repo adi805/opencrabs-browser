@@ -22,6 +22,7 @@ use tokio::net::TcpListener;
 use crate::cli::ServeArgs;
 use crate::config::{self, FileConfig};
 use crate::metrics;
+use crate::{wiring, wiring::Wired};
 
 const DETACHED_ENV: &str = "OCB_BROWSERD_DETACHED";
 
@@ -53,12 +54,23 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     apply_event(&machine, Event::Boot);
     apply_event(&machine, Event::Booted);
 
+    // Pengamat tantangan dipasang sebelum router dibangun: dia harus melihat
+    // trafik sejak frame pertama, bukan sejak handoff pertama.
+    let wired = wiring::start(
+        engine.web_socket_url().to_owned(),
+        limits_handoff(&file),
+        control::RegistryLimits::default(),
+    );
+
     let bind = resolved.bind.clone();
     let public_ws_url = format!("ws://{bind}/devtools/browser/{}", session_token());
-    let state = Arc::new(ProxyState::new(Arc::clone(&engine), public_ws_url));
+    let state = Arc::new(
+        ProxyState::new(Arc::clone(&engine), public_ws_url).with_observer(wired.observer.clone()),
+    );
     let app: Router = cdp::router(state).merge(metrics::router(
         Arc::clone(&engine),
         Arc::clone(&counters),
+        Arc::clone(&wired.counters),
         Arc::clone(&machine),
     ));
 
@@ -83,8 +95,12 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         );
     }
 
+    pasang_control(&file, &wired).await?;
+
     tracing::info!(
         bind = %bind,
+        control_bind = %file.control_bind(),
+        handoff = %wiring::ringkas(&wired.registry),
         engine = engine.kind(),
         pid = ?engine.process_id(),
         engine_http = %engine.http_base(),
@@ -112,6 +128,54 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     }
 
     apply_event(&machine, Event::Reaped);
+    Ok(())
+}
+
+/// Batas handoff dari `[captcha]`.
+///
+/// Dibangun eksplisit, bukan lewat `From`, karena ketiga angka ini punya
+/// bawaan di dua tempat: dokumen 03 §3.1 dan `CaptchaSection::default()`.
+/// Satu titik pemetaan membuat perbedaan di antara keduanya terlihat.
+fn limits_handoff(file: &FileConfig) -> policy::HandoffLimits {
+    let captcha = file.captcha();
+    policy::HandoffLimits {
+        per_host_hour: captcha.handoff_per_host_hour,
+        total_day: captcha.handoff_total_day,
+        cooldown_secs: captcha.cooldown_secs,
+    }
+}
+
+/// Menyalakan port kontrol di task sendiri.
+///
+/// Token dibuat di sini kalau belum ada, dan **tidak** pernah dicetak: yang
+/// dilaporkan hanya path-nya. Owner dan agent membaca berkasnya sendiri.
+async fn pasang_control(file: &FileConfig, wired: &Wired) -> Result<()> {
+    let bind = file.control_bind();
+    let token_path = file.control_token_path();
+    let token = control::ensure_token_file(&token_path)
+        .with_context(|| format!("menyiapkan token kontrol {}", token_path.display()))?;
+
+    let control_state = Arc::new(control::ControlState {
+        registry: Arc::clone(&wired.registry),
+        token,
+        started_at: unix_seconds().max(0) as u64,
+        version: env!("CARGO_PKG_VERSION"),
+    });
+    let app = control::build_router(control_state);
+
+    let listener = TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("bind kontrol {bind} gagal; port dipakai proses lain?"))?;
+
+    tracing::info!(control_bind = %bind, token = %token_path.display(), "port kontrol siap");
+    println!("control_endpoint = \"http://{bind}\"");
+    println!("control_token = \"{}\"", token_path.display());
+
+    tokio::spawn(async move {
+        if let Err(err) = axum::serve(listener, app).await {
+            tracing::error!(%err, "server kontrol berhenti");
+        }
+    });
     Ok(())
 }
 

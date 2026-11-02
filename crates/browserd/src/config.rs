@@ -16,6 +16,11 @@ pub struct FileConfig {
     pub daemon: Option<DaemonSection>,
     #[serde(default)]
     pub engines: Option<EnginesSection>,
+    /// Bagian yang sudah dibaca sejak M3: pemilihan mesin dan batas handoff.
+    #[serde(default)]
+    pub policy: Option<policy::PolicySection>,
+    #[serde(default)]
+    pub captcha: Option<policy::CaptchaSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +34,15 @@ pub struct DaemonSection {
     /// Tanpa kunci ini daemon menolak start: cookie tidak pernah ditulis
     /// plaintext sebagai kompromi.
     pub store_key: Option<String>,
+    /// Alamat port kontrol (handoff). Bawaan `127.0.0.1:9223`.
+    ///
+    /// Dipisah dari port CDP karena dua alasan: klien CDP tidak boleh bisa
+    /// menjawab handoff tanpa token, dan port CDP harus tetap menerima
+    /// websocket apa adanya sementara port ini hanya bicara JSON.
+    pub control_bind: Option<String>,
+    /// Berkas token kontrol. Bawaan
+    /// `~/.opencrabs/browser-daemon/control.token`.
+    pub control_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -98,6 +112,40 @@ impl FileConfig {
             .as_ref()
             .and_then(|daemon| daemon.store_key.as_ref())
             .map_or_else(super::storecmd::default_key, |raw| expand_home(raw))
+    }
+
+    /// Alamat port kontrol. Bawaannya loopback: handoff berisi URL dan path
+    /// screenshot milik sesi owner, dan tidak ada alasan port itu terbuka ke
+    /// jaringan.
+    #[must_use]
+    pub fn control_bind(&self) -> String {
+        self.daemon
+            .as_ref()
+            .and_then(|daemon| daemon.control_bind.clone())
+            .unwrap_or_else(|| "127.0.0.1:9223".to_owned())
+    }
+
+    #[must_use]
+    pub fn control_token_path(&self) -> PathBuf {
+        self.daemon
+            .as_ref()
+            .and_then(|daemon| daemon.control_token.as_ref())
+            .map_or_else(
+                || home().join(".opencrabs/browser-daemon/control.token"),
+                |raw| expand_home(raw),
+            )
+    }
+
+    /// Batas handoff dari `[captcha]`, atau bawaan dokumen 03 §3.1.
+    #[must_use]
+    pub fn captcha(&self) -> policy::CaptchaSection {
+        self.captcha.clone().unwrap_or_default()
+    }
+
+    /// Aturan pemilihan mesin dari `[policy]`.
+    #[must_use]
+    pub fn policy(&self) -> policy::PolicySection {
+        self.policy.clone().unwrap_or_default()
     }
 
     #[must_use]
@@ -170,6 +218,57 @@ args = ["--no-sandbox", "--mute-audio"]
             "~ harus diperluas, dapat: {}",
             binary.display()
         );
+    }
+
+    #[test]
+    fn bagian_kontrol_dan_captcha_terbaca() {
+        let text = r#"
+[daemon]
+control_bind = "127.0.0.1:9333"
+control_token = "/tmp/uji/token"
+
+[captcha]
+handoff_per_host_hour = 2
+handoff_total_day = 7
+cooldown_secs = 30
+
+[policy]
+default = "shell"
+
+[policy.rules]
+"shop.example" = "chrome-full"
+"#;
+        let config: FileConfig = toml::from_str(text).expect("harus bisa diparse");
+        assert_eq!(config.control_bind(), "127.0.0.1:9333");
+        assert_eq!(
+            config.control_token_path(),
+            PathBuf::from("/tmp/uji/token"),
+            "path absolut harus dipakai apa adanya"
+        );
+        let captcha = config.captcha();
+        assert_eq!(captcha.handoff_per_host_hour, 2);
+        assert_eq!(captcha.handoff_total_day, 7);
+        assert_eq!(captcha.cooldown_secs, 30);
+        assert_eq!(
+            config
+                .policy()
+                .rules
+                .get("shop.example")
+                .map(String::as_str),
+            Some("chrome-full")
+        );
+    }
+
+    #[test]
+    fn bawaan_kontrol_loopback() {
+        let config: FileConfig = toml::from_str("").expect("harus bisa diparse");
+        assert_eq!(config.control_bind(), "127.0.0.1:9223");
+        assert!(
+            config.control_token_path().is_absolute(),
+            "token harus di path absolut, dapat: {}",
+            config.control_token_path().display()
+        );
+        assert_eq!(config.captcha().handoff_per_host_hour, 5);
     }
 
     #[test]
