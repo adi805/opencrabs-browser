@@ -179,6 +179,7 @@ dependencies = [
  "engine",
  "futures-util",
  "serde_json",
+ "testing",
  "thiserror",
  "tokio",
  "tokio-tungstenite",

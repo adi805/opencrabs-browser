@@ -9,9 +9,9 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::extract::{Path, State};
+use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
@@ -21,14 +21,36 @@ use crate::{CdpError, ProxyState, framing};
 
 pub fn ws_router(state: Arc<ProxyState>) -> Router {
     Router::new()
-        .route("/devtools/browser/{*rest}", any(upgrade))
-        .route("/devtools/page/{*rest}", any(upgrade))
+        .route("/devtools/browser/{*rest}", any(upgrade_browser))
+        .route("/devtools/page/{*rest}", any(upgrade_page))
         .with_state(state)
 }
 
-async fn upgrade(ws: WebSocketUpgrade, State(state): State<Arc<ProxyState>>) -> Response {
+/// Soket browser titipan: di sinilah `Target.*` dan `sessionId` berlaku.
+async fn upgrade_browser(ws: WebSocketUpgrade, State(state): State<Arc<ProxyState>>) -> Response {
+    upgrade(ws, state.engine.web_socket_url().to_owned())
+}
+
+/// Soket halaman harus benar-benar mendarat di halaman itu. Kalau diteruskan
+/// ke soket browser, `Page.navigate` tanpa `sessionId` ditolak di sana, dan
+/// klien melihat kegagalan yang tidak ada hubungannya dengan permintaannya.
+async fn upgrade_page(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<ProxyState>>,
+    Path(rest): Path<String>,
+) -> Response {
+    let id = rest.trim_start_matches('/');
+    let port = state.engine.info().devtools_port;
+    if id.is_empty() || port == 0 {
+        return CdpError::Upstream("target halaman tidak bisa dipetakan ke mesin".to_owned())
+            .into_response();
+    }
+    upgrade(ws, format!("ws://127.0.0.1:{port}/devtools/page/{id}"))
+}
+
+fn upgrade(ws: WebSocketUpgrade, engine_url: String) -> Response {
     ws.on_upgrade(move |socket| async move {
-        match proxy(socket, state).await {
+        match proxy(socket, engine_url).await {
             Ok(stats) => tracing::info!(
                 to_engine = stats.to_engine,
                 from_engine = stats.from_engine,
@@ -45,8 +67,7 @@ pub struct Stats {
     pub from_engine: u64,
 }
 
-pub async fn proxy(client: WebSocket, state: Arc<ProxyState>) -> Result<Stats, CdpError> {
-    let engine_url = state.engine.web_socket_url().to_owned();
+pub async fn proxy(client: WebSocket, engine_url: String) -> Result<Stats, CdpError> {
     let (engine_socket, _response) = connect_async(engine_url.as_str())
         .await
         .map_err(|err| CdpError::WebSocket(err.to_string()))?;

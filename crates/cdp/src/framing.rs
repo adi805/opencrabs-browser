@@ -47,6 +47,29 @@ pub fn split_http_response(buf: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&buf[..pos], &buf[pos + SEP.len()..]))
 }
 
+/// Nilai `Content-Length` dari kepala respons. Nama header tidak peka huruf.
+pub fn content_length(head: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(head);
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("content-length") {
+            return None;
+        }
+        value.trim().parse::<usize>().ok()
+    })
+}
+
+/// `true` kalau kepala utuh dan body sudah sepanjang `Content-Length`.
+///
+/// Chrome mengabaikan `Connection: close` dan tidak menutup socket, jadi
+/// menunggu EOF berarti menunggu sampai timeout di setiap permintaan.
+pub fn is_complete(buf: &[u8]) -> bool {
+    let Some((head, body)) = split_http_response(buf) else {
+        return false;
+    };
+    content_length(head).is_some_and(|expected| body.len() >= expected)
+}
+
 /// Kode status dari baris pertama respons HTTP.
 pub fn parse_status(head: &[u8]) -> Option<u16> {
     let text = std::str::from_utf8(head).ok()?;
