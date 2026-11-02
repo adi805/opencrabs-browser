@@ -22,12 +22,32 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{self, Token};
 use crate::registry::{Answer, Registry, RegistryError};
 
+/// Fungsi probe yang disuntikkan pemanggil.
+///
+/// Didefinisikan di sini, bukan di crate `browserd`, karena router tidak boleh
+/// tahu cara menghubungi mesin. Yang penting hanya bentuknya: satu target id
+/// masuk, satu temuan DOM keluar. `None` berarti daemon ini memang tidak
+/// menyediakan probe, dan itu dilaporkan apa adanya, bukan dipalsukan jadi
+/// "tidak ada tanda tantangan".
+pub type ProbeFn = Arc<
+    dyn Fn(
+            String,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<policy::challenge::DomFinding, String>>
+                    + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 /// Keadaan yang dibagi semua handler.
 pub struct ControlState {
     pub registry: Arc<Registry>,
     pub token: Token,
     pub started_at: u64,
     pub version: &'static str,
+    pub probe: Option<ProbeFn>,
 }
 
 /// Galat yang keluar sebagai JSON, bukan halaman HTML.
@@ -114,12 +134,29 @@ struct AnswerBody {
     answer: Answer,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProbeBody {
+    target_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProbeHasil {
+    finding: policy::challenge::DomFinding,
+    /// `true` kalau ada satu pun tanda tantangan terlihat di DOM.
+    ///
+    /// Sengaja bukan keputusan penuh: bobot dan ambang tinggal di crate
+    /// policy, dan menjawab "tantangan" dari satu probe tanpa bukti status
+    /// akan membuat alarm palsu pada halaman normal.
+    detected: bool,
+}
+
 /// Membangun router lengkap.
 pub fn router(state: Arc<ControlState>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/handoff/pending", get(pending))
         .route("/api/v1/handoff/{id}/answer", post(answer))
+        .route("/api/v1/challenge/probe", post(challenge_probe))
         .with_state(state)
 }
 
@@ -139,6 +176,25 @@ fn sekarang() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+async fn challenge_probe(
+    State(state): State<Arc<ControlState>>,
+    headers: HeaderMap,
+    body: Result<Json<ProbeBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<ProbeHasil>, ApiError> {
+    otorisasi(&headers, &state)?;
+    let Json(body) = body.map_err(|err| ApiError::BadRequest(err.body_text()))?;
+    let Some(probe) = state.probe.clone() else {
+        return Err(ApiError::BadRequest(
+            "daemon ini tidak menyediakan probe tantangan".to_owned(),
+        ));
+    };
+    let finding = probe(body.target_id).await.map_err(ApiError::BadRequest)?;
+    Ok(Json(ProbeHasil {
+        detected: finding != policy::challenge::DomFinding::default(),
+        finding,
+    }))
 }
 
 async fn health(
@@ -205,6 +261,35 @@ mod tests {
             token: Token::new(TOKEN),
             started_at: sekarang(),
             version: "0.0.0-uji",
+            probe: None,
+        });
+        (state, antrean)
+    }
+
+    /// State dengan probe palsu yang mengembalikan temuan yang sudah pasti.
+    fn state_dengan_probe(
+        temuan: policy::challenge::DomFinding,
+    ) -> (
+        Arc<ControlState>,
+        Arc<Mutex<Vec<crate::registry::ApplyRequest>>>,
+    ) {
+        let (state, antrean) = state();
+        let state = Arc::new(ControlState {
+            registry: Arc::clone(&state.registry),
+            token: Token::new(TOKEN),
+            started_at: state.started_at,
+            version: state.version,
+            probe: Some(Arc::new(move |target_id: String| {
+                assert_eq!(target_id, "T1", "target id harus sampai apa adanya");
+                Box::pin(async move { Ok(temuan) })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<policy::challenge::DomFinding, String>,
+                                > + Send,
+                        >,
+                    >
+            })),
         });
         (state, antrean)
     }
@@ -398,5 +483,64 @@ mod tests {
             antrean.lock().unwrap().is_empty(),
             "body rusak tidak boleh masuk antrean"
         );
+    }
+
+    #[tokio::test]
+    async fn probe_tanpa_dukungan_ditolak_terang_terangan() {
+        let (state, _) = state();
+        let (status, body) = kirim(
+            Arc::clone(&state),
+            minta(
+                "POST",
+                "/api/v1/challenge/probe",
+                Some(TOKEN),
+                Some(r#"{"target_id":"T1"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("probe"),
+            "galat harus menyebut probe: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_mengembalikan_temuan_dan_penanda() {
+        let temuan = policy::challenge::DomFinding {
+            challenge_form: true,
+            ..policy::challenge::DomFinding::default()
+        };
+        let (state, _) = state_dengan_probe(temuan);
+        let (status, body) = kirim(
+            Arc::clone(&state),
+            minta(
+                "POST",
+                "/api/v1/challenge/probe",
+                Some(TOKEN),
+                Some(r#"{"target_id":"T1"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["detected"], true);
+        assert_eq!(body["finding"]["challenge_form"], true);
+    }
+
+    #[tokio::test]
+    async fn probe_bersih_tidak_menyebut_tantangan() {
+        let (state, _) = state_dengan_probe(policy::challenge::DomFinding::default());
+        let (status, body) = kirim(
+            Arc::clone(&state),
+            minta(
+                "POST",
+                "/api/v1/challenge/probe",
+                Some(TOKEN),
+                Some(r#"{"target_id":"T1"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["detected"], false);
     }
 }

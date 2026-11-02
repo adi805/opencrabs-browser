@@ -21,9 +21,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use crate::cdp_client::Client;
 use crate::challenge::{Action, ChallengeObserver, Probe, dom_of, handoff_baru, probe_params};
 
-/// Jeda antar sapuan handoff kedaluwarsa. Cukup rapat untuk melepas tab
-/// sebelum owner berikutnya menunggu, cukup jarang untuk tidak membangunkan
-/// runtime 20 kali per detik.
 /// Berapa kali probe DOM diulang sebelum halaman dianggap bersih.
 ///
 /// Angka ini perdagangan langsung: terlalu kecil dan tantangan yang lambat
@@ -33,6 +30,9 @@ use crate::challenge::{Action, ChallengeObserver, Probe, dom_of, handoff_baru, p
 const PROBE_ATTEMPTS: usize = 8;
 const PROBE_DELAY: Duration = Duration::from_millis(200);
 
+/// Jeda antar sapuan handoff kedaluwarsa. Cukup rapat untuk melepas tab
+/// sebelum owner berikutnya menunggu, cukup jarang untuk tidak membangunkan
+/// runtime 20 kali per detik.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Semua bagian yang perlu dipegang daemon setelah pekerja dinyalakan.
@@ -40,6 +40,9 @@ pub struct Wired {
     pub registry: Arc<Registry>,
     pub counters: Arc<CaptchaCounters>,
     pub observer: Arc<ChallengeObserver>,
+    /// Alamat WebSocket mesin, disimpan supaya jalur kontrol bisa meminta
+    /// probe tanpa membangun koneksi baru dari nol.
+    pub engine_ws: String,
 }
 
 fn sekarang() -> u64 {
@@ -92,6 +95,7 @@ pub fn start(
     let counters = Arc::new(CaptchaCounters::new());
     let (probe_tx, probe_rx) = unbounded_channel();
     let observer = Arc::new(ChallengeObserver::new(probe_tx, Arc::clone(&counters)));
+    let engine_ws_awal = engine_ws.clone();
 
     tokio::spawn(apply_loop(
         apply_rx,
@@ -113,6 +117,7 @@ pub fn start(
         registry,
         counters,
         observer,
+        engine_ws: engine_ws_awal,
     }
 }
 
@@ -268,6 +273,24 @@ async fn run_probe(engine_ws: &str, probe: &Probe) -> Result<policy::challenge::
         .await;
 
     Ok(terakhir)
+}
+
+/// Probe satu target tanpa syarat bukti apa pun.
+///
+/// Dipakai jalur kontrol `POST /api/v1/challenge/probe`: operator ingin tahu
+/// apakah tab yang sedang terbuka sekarang menampilkan tanda tantangan. Bukti
+/// status/URL tidak ikut dinilai di sini, karena yang ditanya hanya DOM.
+pub async fn probe_target(
+    engine_ws: &str,
+    target_id: &str,
+) -> Result<policy::challenge::DomFinding> {
+    let probe = Probe {
+        session_id: String::new(),
+        target_id: target_id.to_owned(),
+        url: String::new(),
+        evidence: policy::challenge::Evidence::default(),
+    };
+    run_probe(engine_ws, &probe).await
 }
 
 async fn sweep_loop(registry: Arc<Registry>, counters: Arc<CaptchaCounters>) {

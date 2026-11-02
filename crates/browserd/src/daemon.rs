@@ -160,6 +160,26 @@ async fn pasang_control(file: &FileConfig, wired: &Wired) -> Result<()> {
         token,
         started_at: unix_seconds().max(0) as u64,
         version: env!("CARGO_PKG_VERSION"),
+        // Probe disuntikkan dari sini karena hanya daemon yang tahu alamat
+        // WebSocket mesin. Router kontrol tetap tidak tahu cara bicara CDP.
+        probe: Some(std::sync::Arc::new({
+            let engine_ws = wired.engine_ws.clone();
+            move |target_id: String| {
+                let engine_ws = engine_ws.clone();
+                Box::pin(async move {
+                    crate::wiring::probe_target(&engine_ws, &target_id)
+                        .await
+                        .map_err(|err| format!("probe gagal: {err}"))
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<policy::challenge::DomFinding, String>,
+                                > + Send,
+                        >,
+                    >
+            }
+        })),
     });
     let app = control::build_router(control_state);
 
