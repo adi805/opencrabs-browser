@@ -9,12 +9,12 @@
 //! pembacaan `/proc` (itu sudah diuji di unit test `metrics`).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use cdp::EnginePool;
 use engine::Engine;
-use lifecycle::{Counters, Machine};
+use lifecycle::Counters;
 use policy::counters::CaptchaCounters;
 use testing::FakeEngine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,7 +40,6 @@ async fn rig() -> Rig {
         pool,
         Arc::new(Counters::new()),
         Arc::new(CaptchaCounters::new()),
-        Arc::new(Mutex::new(Machine::new())),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

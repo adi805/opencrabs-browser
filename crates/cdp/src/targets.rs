@@ -51,7 +51,18 @@ pub fn discovery_router(state: Arc<ProxyState>) -> Router {
 /// Karena itu kunci selalu ada; kalau mesin tidak melaporkan, isinya string
 /// kosong. Itu jujur (tidak mengklaim versi apa pun) dan tetap bisa di-parse.
 async fn version(State(state): State<Arc<ProxyState>>) -> Response {
-    let info = state.engine().info();
+    // Sengaja TIDAK membangunkan mesin: versi dan user-agent tidak berubah
+    // antar boot, jadi membangunkan Chromium hanya untuk menjawab string akan
+    // membatalkan seluruh penghematan reap. Kalau mesin belum pernah boot sama
+    // sekali, info belum ada dan tidak ada cara jujur menjawabnya tanpa
+    // menyalakannya.
+    let info = match state.slot().info() {
+        Some(info) => info,
+        None => match state.bangunkan(None, crate::engines::BOOT_TIMEOUT_MS).await {
+            Ok(hidup) => hidup.engine.info().clone(),
+            Err(err) => return galat(StatusCode::SERVICE_UNAVAILABLE, &err.to_string()),
+        },
+    };
     let mut body = Map::new();
     body.insert("Browser".into(), info.browser.clone().into());
     body.insert(
@@ -74,62 +85,107 @@ async fn version(State(state): State<Arc<ProxyState>>) -> Response {
     axum::Json(Value::Object(body)).into_response()
 }
 
+fn galat(status: StatusCode, pesan: &str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        format!("{{\"error\":{}}}\n", Value::String(pesan.to_owned())),
+    )
+        .into_response()
+}
+
+/// Status per mesin, tanpa membangunkan apa pun.
+///
+/// Tiga keadaan tidak-hidup dibedakan, dan bedanya penting bagi pemantau:
+///
+/// - `tidur`: proses sudah di-reap karena menganggur, resepnya masih ada.
+///   Ini **sehat**. Melaporkannya merah akan membuat alarm menyala setiap kali
+///   daemon berhemat, dan alarm yang menyala karena perilaku normal akan
+///   diabaikan orang.
+/// - `mati`: proses hilang di luar kendali kita. Ini kegagalan.
+/// - `belum_pernah`: belum di-boot sejak daemon lahir.
 async fn healthz(State(state): State<Arc<ProxyState>>) -> Response {
-    let (status, body) = if state.engines.is_multi() {
-        // Satu mesin bisa mati sementara yang lain hidup. Melaporkan satu
-        // "ok" untuk seluruh daemon akan menyembunyikan mesin yang sudah
-        // mati, jadi yang dijawab adalah daftar per mesin.
+    if state.engines.is_multi() {
         let mut daftar = Vec::new();
-        let mut semua_hidup = true;
-        for (id, engine) in state.engines.engines() {
-            let hidup = engine.is_running();
-            semua_hidup &= hidup;
+        let mut semua_sehat = true;
+        for (id, slot) in state.engines.slots() {
+            let keadaan = slot.keadaan();
+            semua_sehat &= keadaan.sehat();
+            let hidup = slot.hidup();
+            // `running` dipertahankan untuk pemantau lama; `state` yang
+            // membawa arti sehat atau tidak.
             daftar.push(format!(
-                "{{\"id\":\"{id}\",\"kind\":\"{}\",\"running\":{hidup},\"pid\":{}}}",
-                engine.kind(),
-                engine
-                    .process_id()
+                "{{\"id\":\"{id}\",\"kind\":\"{}\",\"running\":{},\"state\":\"{}\",\"pid\":{}}}",
+                slot.kind(),
+                hidup.is_some(),
+                keadaan.nama(),
+                hidup
+                    .as_ref()
+                    .and_then(|engine| engine.process_id())
                     .map_or_else(|| "null".to_string(), |pid| pid.to_string())
             ));
         }
-        let kode = if semua_hidup {
+        let kode = if semua_sehat {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
         (
             kode,
+            [(header::CONTENT_TYPE, "application/json")],
             format!(
-                "{{\"ok\":{semua_hidup},\"engines\":[{}]}}\n",
+                "{{\"ok\":{semua_sehat},\"engines\":[{}]}}\n",
                 daftar.join(",")
             ),
         )
+            .into_response()
     } else {
-        let running = state.engine().is_running();
-        let pid = state.engine().process_id();
-        let kode = if running {
+        let slot = state.slot();
+        let keadaan = slot.keadaan();
+        let hidup = slot.hidup();
+        let kode = if keadaan.sehat() {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
         (
             kode,
+            [(header::CONTENT_TYPE, "application/json")],
             format!(
-                "{{\"ok\":{},\"engine\":\"{}\",\"pid\":{}}}\n",
-                running,
-                state.engine().kind(),
-                pid.map_or_else(|| "null".to_string(), |pid| pid.to_string())
+                "{{\"ok\":{},\"engine\":\"{}\",\"state\":\"{}\",\"pid\":{}}}\n",
+                keadaan.sehat(),
+                slot.kind(),
+                keadaan.nama(),
+                hidup
+                    .as_ref()
+                    .and_then(|engine| engine.process_id())
+                    .map_or_else(|| "null".to_string(), |pid| pid.to_string())
             ),
         )
-    };
-    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+            .into_response()
+    }
 }
 
 async fn list(State(state): State<Arc<ProxyState>>) -> Result<Response, CdpError> {
     if state.engines.is_multi() {
         return daftar_gabungan(&state).await;
     }
-    forward_json(&state, state.engine(), &Method::GET, "/json/list").await
+    // `/json/list` adalah permintaan nyata: klien yang memanggilnya akan
+    // menyambung ke salah satu tab. Mesin yang tidur dibangunkan di sini,
+    // bukan dijawab dengan daftar kosong yang menyesatkan.
+    let hidup = bangun(&state, None).await?;
+    forward_json(&state, &hidup.engine, &Method::GET, "/json/list").await
+}
+
+/// Mesin yang hidup, dinyalakan dulu kalau perlu.
+///
+/// Satu tempat untuk seluruh jalur HTTP: batas waktu boot dan bentuk galatnya
+/// harus sama di semua endpoint, kalau tidak klien akan melihat dua jenis
+/// kegagalan berbeda untuk masalah yang sama.
+async fn bangun(state: &ProxyState, mesin: Option<&str>) -> Result<crate::Bangun, CdpError> {
+    state
+        .bangunkan(mesin, crate::engines::BOOT_TIMEOUT_MS)
+        .await
 }
 
 /// Daftar target dari **semua** mesin, digabung jadi satu array.
@@ -146,14 +202,27 @@ async fn daftar_gabungan(state: &ProxyState) -> Result<Response, CdpError> {
     let mut items: Vec<Value> = Vec::new();
     let mut gagal: Vec<String> = Vec::new();
 
-    for (id, engine) in state.engines.engines() {
-        match forward(engine, &Method::GET, "/json/list").await {
+    // Semua mesin dibangunkan bersamaan: satu per satu berarti klien menunggu
+    // jumlah batas waktu boot, bukan satu.
+    for (id, hasil) in state
+        .engines
+        .bangun_semua(crate::engines::BOOT_TIMEOUT_MS)
+        .await
+    {
+        let engine = match hasil {
+            Ok(engine) => engine,
+            Err(err) => {
+                gagal.push(format!("{id}: {err}"));
+                continue;
+            }
+        };
+        match forward(&engine, &Method::GET, "/json/list").await {
             Ok(upstream) => {
                 let body = rewrite_discovery_mesin(
                     &upstream.body,
                     public_ws_base(state),
-                    &authority_of(engine),
-                    Some(id),
+                    &authority_of(&engine),
+                    Some(&id),
                 );
                 match serde_json::from_str::<Value>(&body) {
                     Ok(Value::Array(mut daftar)) => items.append(&mut daftar),
@@ -180,7 +249,8 @@ async fn daftar_gabungan(state: &ProxyState) -> Result<Response, CdpError> {
 }
 
 async fn protocol(State(state): State<Arc<ProxyState>>) -> Result<Response, CdpError> {
-    forward_json(&state, state.engine(), &Method::GET, "/json/protocol").await
+    let hidup = bangun(&state, None).await?;
+    forward_json(&state, &hidup.engine, &Method::GET, "/json/protocol").await
 }
 
 // Method diteruskan apa adanya: Chrome memakai PUT untuk /json/new sejak
@@ -194,7 +264,8 @@ async fn new_target(
     method: Method,
     uri: Uri,
 ) -> Result<Response, CdpError> {
-    forward_json(&state, state.engine(), &method, &path_and_query(&uri)).await
+    let hidup = bangun(&state, None).await?;
+    forward_json(&state, &hidup.engine, &method, &path_and_query(&uri)).await
 }
 
 async fn activate(
@@ -222,26 +293,16 @@ async fn rute_per_id(
     id: &str,
 ) -> Result<Response, CdpError> {
     let (mesin, id_asli) = crate::engines::pecah_id(id);
-    let engine = pilih_engine(state, mesin)?;
-    forward_json(state, engine, method, &format!("/json/{aksi}/{id_asli}")).await
-}
-
-/// Mesin yang disebut nama, atau mesin bawaan kalau tidak disebut.
-///
-/// Nama yang tidak terpasang **ditolak** dengan daftar mesin yang ada. Diam-
-/// diam memakai mesin bawaan akan menutup tab di mesin yang salah, dan itu
-/// jenis kesalahan yang baru terlihat setelah datanya hilang.
-fn pilih_engine<'a>(
-    state: &'a ProxyState,
-    mesin: Option<&str>,
-) -> Result<&'a Arc<dyn Engine>, CdpError> {
-    match mesin {
-        None => Ok(state.engine()),
-        Some(id) => state.engines.get(id).ok_or_else(|| CdpError::MesinTakAda {
-            diminta: id.to_owned(),
-            tersedia: state.engines.ids().cloned().collect::<Vec<_>>().join(", "),
-        }),
-    }
+    // Mesin yang disebut nama wajib ada; `bangunkan` menolak nama asing dengan
+    // daftar mesin yang ada, dan tidak diam-diam memakai mesin bawaan.
+    let hidup = bangun(state, mesin).await?;
+    forward_json(
+        state,
+        &hidup.engine,
+        method,
+        &format!("/json/{aksi}/{id_asli}"),
+    )
+    .await
 }
 
 struct Upstream {
@@ -286,7 +347,8 @@ fn authority_of(engine: &Arc<dyn Engine>) -> String {
 
 #[cfg(test)]
 fn engine_authority(state: &ProxyState) -> String {
-    authority_of(state.engine())
+    let info = state.slot().info().expect("slot uji sudah punya info");
+    format!("127.0.0.1:{}", info.devtools_port)
 }
 
 /// Menitipkan alamat daemon ke data target milik mesin.

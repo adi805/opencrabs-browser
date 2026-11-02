@@ -30,7 +30,7 @@ pub use errors::CdpError;
 use std::sync::Arc;
 
 use axum::Router;
-use engine::Engine;
+use engine::{Engine, Slot};
 
 /// Pembaca pesan yang lewat, tanpa hak mengubahnya.
 ///
@@ -75,16 +75,95 @@ impl ProxyState {
         }
     }
 
-    /// Mesin bawaan. Endpoint discovery yang tidak menyebut mesin memakai ini.
+    /// Slot mesin bawaan. Endpoint discovery yang tidak menyebut mesin memakai ini.
     #[must_use]
-    pub fn engine(&self) -> &Arc<dyn Engine> {
-        self.engines.default_engine()
+    pub fn slot(&self) -> &Arc<Slot> {
+        self.engines.default_slot()
+    }
+
+    /// Mesin yang **hidup**, dinyalakan dulu kalau sedang tidur.
+    ///
+    /// Semua jalur yang benar-benar akan berbicara ke mesin lewat sini, bukan
+    /// lewat [`Self::slot`]: mesin yang di-reap karena menganggur harus bangun
+    /// sendiri saat ada klien, tanpa daemon perlu di-restart. Boot berjalan di
+    /// `spawn_blocking` karena menunggu Chromium siap berarti mem-poll port
+    /// selama belasan detik.
+    ///
+    /// `mesin = None` berarti mesin bawaan.
+    pub async fn bangunkan(
+        &self,
+        mesin: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<Bangun, CdpError> {
+        let (id, slot) = match mesin {
+            None => (
+                self.engines.default_id().to_owned(),
+                Arc::clone(self.slot()),
+            ),
+            Some(id) => {
+                let slot = self.engines.get(id).ok_or_else(|| CdpError::MesinTakAda {
+                    diminta: id.to_owned(),
+                    tersedia: self.engines.ids().cloned().collect::<Vec<_>>().join(", "),
+                })?;
+                (id.to_owned(), Arc::clone(slot))
+            }
+        };
+        let slot_id = id.clone();
+        let sekarang = engine::slot::detik_sekarang();
+        let untuk_boot = Arc::clone(&slot);
+        let hasil = tokio::task::spawn_blocking(move || untuk_boot.pastikan(timeout_ms, sekarang))
+            .await
+            .map_err(|err| {
+                CdpError::Upstream(format!("tugas boot mesin '{slot_id}' gagal: {err}"))
+            })?;
+        let engine = hasil.map_err(|err| CdpError::Upstream(err.to_string()))?;
+        Ok(Bangun { id, slot, engine })
     }
 
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn FrameObserver>) -> Self {
         self.observer = Some(observer);
         self
+    }
+}
+
+/// Mesin yang sudah dipastikan hidup, plus slot pemiliknya.
+///
+/// Slotnya ikut dikembalikan karena pemanggil yang menyambung ke mesin harus
+/// menandai sesi terbuka di slot itu: hitungan sesi itulah yang menahan reap
+/// selama klien masih tersambung, seberapa lama pun dia diam.
+pub struct Bangun {
+    pub id: String,
+    pub slot: Arc<Slot>,
+    pub engine: Arc<dyn Engine>,
+}
+
+/// Penanda sesi yang menutup sendiri saat dijatuhkan.
+///
+/// Dijatuhkan otomatis, termasuk saat tugas penerusan berakhir karena galat
+/// atau klien memutus sepihak. Hitungan yang hanya ditutup di jalur sukses
+/// akan bocor satu per klien yang kabur, dan mesin itu berhenti di-reap
+/// selamanya.
+pub struct SesiSlot {
+    slot: Arc<Slot>,
+}
+
+impl SesiSlot {
+    #[must_use]
+    pub fn buka(slot: Arc<Slot>) -> Self {
+        slot.buka_sesi(engine::slot::detik_sekarang());
+        Self { slot }
+    }
+
+    #[must_use]
+    pub fn slot(&self) -> &Arc<Slot> {
+        &self.slot
+    }
+}
+
+impl Drop for SesiSlot {
+    fn drop(&mut self) {
+        self.slot.tutup_sesi(engine::slot::detik_sekarang());
     }
 }
 

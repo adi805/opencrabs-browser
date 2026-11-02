@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use control::{ApplyOutcome, ApplyRequest, Registry, RegistryLimits};
+use engine::Slot;
 use policy::challenge::{LadderAvailability, Verdict};
 use policy::counters::{CaptchaCounters, Kind, Outcome};
 use policy::rate::{HandoffLimits, RateState};
@@ -40,9 +41,33 @@ pub struct Wired {
     pub registry: Arc<Registry>,
     pub counters: Arc<CaptchaCounters>,
     pub observer: Arc<ChallengeObserver>,
-    /// Alamat WebSocket mesin, disimpan supaya jalur kontrol bisa meminta
-    /// probe tanpa membangun koneksi baru dari nol.
-    pub engine_ws: String,
+    /// Slot mesin bawaan. Yang disimpan **slot**, bukan string alamat: mesin
+    /// yang di-reap lalu lahir lagi memilih port baru, jadi alamat yang dicatat
+    /// sekali saat boot akan menunjuk port mati. Lihat [`alamat_mesin`].
+    pub slot: Arc<Slot>,
+    /// Batas tunggu boot, dipakai [`alamat_mesin`] saat membangunkan mesin yang
+    /// sedang tidur.
+    pub ready_timeout_ms: u64,
+}
+
+/// Alamat WebSocket mesin, **dibaca saat dipakai**.
+///
+/// Mesin yang tidur dibangunkan di sini. Semua jalur yang benar-benar akan
+/// bicara ke mesin (terapkan jawaban owner, probe DOM) lewat fungsi ini, karena
+/// jalur-jalur itu tidak punya gunanya tanpa mesin hidup.
+///
+/// Boot berjalan di `spawn_blocking`: menunggu Chromium siap mem-poll port dan
+/// berkas `DevToolsActivePort` selama belasan detik, dan itu tidak boleh
+/// menahan reactor yang juga melayani proxy CDP.
+pub async fn alamat_mesin(slot: Arc<Slot>, timeout_ms: u64) -> Result<String> {
+    let id = slot.id().to_owned();
+    let engine = tokio::task::spawn_blocking(move || {
+        slot.pastikan(timeout_ms, engine::slot::detik_sekarang())
+    })
+    .await
+    .with_context(|| format!("tugas boot mesin '{id}' panik"))?
+    .with_context(|| format!("mesin '{id}' tidak bisa dinyalakan"))?;
+    Ok(engine.web_socket_url().to_owned())
 }
 
 fn sekarang() -> u64 {
@@ -78,7 +103,8 @@ const AVAILABLE: LadderAvailability = LadderAvailability {
 
 /// Menyalakan pekerja latar dan mengembalikan state yang dipakai daemon.
 pub fn start(
-    engine_ws: String,
+    slot: Arc<Slot>,
+    ready_timeout_ms: u64,
     handoff_limits: HandoffLimits,
     registry_limits: RegistryLimits,
 ) -> Wired {
@@ -95,13 +121,12 @@ pub fn start(
     let counters = Arc::new(CaptchaCounters::new());
     let (probe_tx, probe_rx) = unbounded_channel();
     let observer = Arc::new(ChallengeObserver::new(probe_tx, Arc::clone(&counters)));
-    let engine_ws_awal = engine_ws.clone();
-
     tokio::spawn(apply_loop(
         apply_rx,
         Arc::clone(&registry),
         Arc::clone(&counters),
-        engine_ws.clone(),
+        Arc::clone(&slot),
+        ready_timeout_ms,
     ));
     tokio::spawn(probe_loop(
         probe_rx,
@@ -109,7 +134,8 @@ pub fn start(
         Arc::clone(&registry),
         Arc::clone(&counters),
         Arc::new(Mutex::new(RateState::new(handoff_limits))),
-        engine_ws,
+        Arc::clone(&slot),
+        ready_timeout_ms,
     ));
     tokio::spawn(sweep_loop(Arc::clone(&registry), Arc::clone(&counters)));
 
@@ -117,7 +143,8 @@ pub fn start(
         registry,
         counters,
         observer,
-        engine_ws: engine_ws_awal,
+        slot,
+        ready_timeout_ms,
     }
 }
 
@@ -125,14 +152,18 @@ async fn apply_loop(
     mut rx: UnboundedReceiver<ApplyRequest>,
     registry: Arc<Registry>,
     counters: Arc<CaptchaCounters>,
-    engine_ws: String,
+    slot: Arc<Slot>,
+    ready_timeout_ms: u64,
 ) {
     while let Some(request) = rx.recv().await {
         let now = sekarang();
         let dibuat = registry.get(&request.id, now).map(|view| view.created_at);
 
-        let hasil = match Client::connect(&engine_ws).await {
-            Ok(mut client) => crate::handoff::apply(&mut client, &request).await,
+        let hasil = match alamat_mesin(Arc::clone(&slot), ready_timeout_ms).await {
+            Ok(alamat) => match Client::connect(&alamat).await {
+                Ok(mut client) => crate::handoff::apply(&mut client, &request).await,
+                Err(err) => Err(err),
+            },
             Err(err) => Err(err),
         };
         let hasil = match hasil {
@@ -170,10 +201,18 @@ async fn probe_loop(
     registry: Arc<Registry>,
     counters: Arc<CaptchaCounters>,
     rate: Arc<Mutex<RateState>>,
-    engine_ws: String,
+    slot: Arc<Slot>,
+    ready_timeout_ms: u64,
 ) {
     while let Some(probe) = rx.recv().await {
-        let dom = match run_probe(&engine_ws, &probe).await {
+        let alamat = match alamat_mesin(Arc::clone(&slot), ready_timeout_ms).await {
+            Ok(alamat) => alamat,
+            Err(err) => {
+                tracing::warn!(target_id = %probe.target_id, %err, "mesin tidak bisa dipakai untuk probe");
+                continue;
+            }
+        };
+        let dom = match run_probe(&alamat, &probe).await {
             Ok(dom) => dom,
             Err(err) => {
                 // Probe yang gagal TIDAK membatalkan kecurigaan: tanpa bukti

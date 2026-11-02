@@ -47,10 +47,19 @@ async fn upgrade_browser(ws: WebSocketUpgrade, State(state): State<Arc<ProxyStat
             }
         });
     }
+    // Mesin bawaan mungkin sedang tidur (di-reap karena menganggur). Klien
+    // yang menyambung adalah pemakaian nyata, jadi mesinnya dibangunkan dulu;
+    // menyambung ke port yang tidak ada akan terlihat oleh klien sebagai
+    // kegagalan acak yang tidak bisa dia pahami.
+    let hidup = match state.bangunkan(None, crate::engines::BOOT_TIMEOUT_MS).await {
+        Ok(hidup) => hidup,
+        Err(err) => return err.into_response(),
+    };
     upgrade(
         ws,
-        state.engine().web_socket_url().to_owned(),
+        hidup.engine.web_socket_url().to_owned(),
         state.observer.clone(),
+        Some(hidup.slot),
     )
 }
 
@@ -67,17 +76,14 @@ async fn upgrade_page(
     // yang kita iklankan di `/json/list`. Tanpa prefiks, halaman dianggap milik
     // mesin bawaan, sehingga URL lama tetap bekerja.
     let (mesin, upstream) = crate::engines::pecah_id(id);
-    let engine = match mesin {
-        Some(mesin) => match state.engines.get(mesin) {
-            Some(engine) => engine,
-            None => {
-                return CdpError::Upstream(format!("mesin '{mesin}' tidak terpasang"))
-                    .into_response();
-            }
-        },
-        None => state.engine(),
+    let hidup = match state
+        .bangunkan(mesin, crate::engines::BOOT_TIMEOUT_MS)
+        .await
+    {
+        Ok(hidup) => hidup,
+        Err(err) => return err.into_response(),
     };
-    let port = engine.info().devtools_port;
+    let port = hidup.engine.info().devtools_port;
     if upstream.is_empty() || port == 0 {
         return CdpError::Upstream("target halaman tidak bisa dipetakan ke mesin".to_owned())
             .into_response();
@@ -86,15 +92,24 @@ async fn upgrade_page(
         ws,
         format!("ws://127.0.0.1:{port}/devtools/page/{upstream}"),
         state.observer.clone(),
+        Some(hidup.slot),
     )
 }
 
+/// Menyambungkan klien ke mesin, sambil menandai sesi di slotnya.
+///
+/// [`crate::SesiSlot`] ditahan hidup selama tugas penerusan berjalan, jadi
+/// hitungan sesi naik tepat saat koneksi terbentuk dan turun saat koneksi
+/// berakhir, termasuk saat klien memutus sepihak. Reap tidak akan mematikan
+/// mesin yang sedang dipakai.
 fn upgrade(
     ws: WebSocketUpgrade,
     engine_url: String,
     observer: Option<Arc<dyn crate::FrameObserver>>,
+    slot: Option<Arc<engine::Slot>>,
 ) -> Response {
     ws.on_upgrade(move |socket| async move {
+        let _sesi = slot.map(crate::SesiSlot::buka);
         match proxy_with_observer(socket, engine_url, observer).await {
             Ok(stats) => tracing::info!(
                 to_engine = stats.to_engine,

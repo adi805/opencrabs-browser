@@ -15,28 +15,23 @@
 //! Mencetak seluruh blok per mesin akan menggandakan penghitung yang sebenarnya
 //! hanya punya satu nilai, dan dashboard akan melaporkan dua kali kejadian.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::get;
 use cdp::EnginePool;
-use lifecycle::{Counters, Machine, State};
+use engine::{Keadaan, Slot};
+use lifecycle::{Counters, State};
 use policy::counters::CaptchaCounters;
 
 /// Gauge HIDUP: PSS dibaca saat permintaan datang, bukan disimpan dari
 /// pembacaan terakhir. Angka yang disimpan akan terlihat masuk akal di
 /// dashboard sambil salah.
-pub fn router(
-    pool: EnginePool,
-    counters: Arc<Counters>,
-    captcha: Arc<CaptchaCounters>,
-    machine: Arc<Mutex<Machine>>,
-) -> Router {
+pub fn router(pool: EnginePool, counters: Arc<Counters>, captcha: Arc<CaptchaCounters>) -> Router {
     let handler = move || {
         let pool = pool.clone();
         let counters = Arc::clone(&counters);
         let captcha = Arc::clone(&captcha);
-        let machine = Arc::clone(&machine);
 
         async move {
             let mut body = String::with_capacity(2048);
@@ -50,22 +45,24 @@ pub fn router(
                 // tabel transisi daemon: tabel itu satu untuk seluruh daemon
                 // (idle reap per mesin belum ada), jadi memakainya di sini
                 // akan mengklaim semua mesin berada di fase yang sama.
-                for (id, engine) in pool.engines() {
-                    let state = if engine.is_running() {
-                        State::Ready
-                    } else {
-                        State::Stopped
-                    };
-                    let pss = engine.process_id().and_then(read_pss_bytes);
+                for (id, slot) in pool.slots() {
+                    let state = state_slot(slot);
+                    let pss = slot
+                        .hidup()
+                        .and_then(|engine| engine.process_id())
+                        .and_then(read_pss_bytes);
                     body.push_str(&counters.render_engine(id, state, pss));
                 }
             } else {
                 // Satu mesin: label tetap `kind` seperti sebelum M4, supaya
                 // dashboard yang sudah ada tidak pecah karena rename label.
-                let engine = pool.default_engine();
-                let state = machine.lock().map_or(State::Stopped, |guard| guard.state());
-                let pss = engine.process_id().and_then(read_pss_bytes);
-                body.push_str(&counters.render_engine(engine.kind(), state, pss));
+                let slot = pool.default_slot();
+                let state = state_slot(slot);
+                let pss = slot
+                    .hidup()
+                    .and_then(|engine| engine.process_id())
+                    .and_then(read_pss_bytes);
+                body.push_str(&counters.render_engine(slot.kind(), state, pss));
             }
 
             body.push_str(&counters.render_global());
@@ -79,6 +76,25 @@ pub fn router(
     };
 
     Router::new().route("/metrics", get(handler))
+}
+
+/// State metrik satu slot.
+///
+/// Diambil dari slot, bukan dari tabel transisi daemon: tabel itu satu untuk
+/// seluruh daemon, jadi memakainya per mesin akan mengklaim semua mesin berada
+/// di fase yang sama. Yang bisa dibedakan slot: hidup (`Ready`), sengaja
+/// ditidurkan (`Stopped`), dan belum pernah dinyalakan (`Cold`).
+///
+/// Mesin yang mati di luar kendali juga dilaporkan `Stopped`: prosesnya memang
+/// tidak ada, dan itu satu-satunya pernyataan yang benar di sini. Yang **tidak**
+/// diklaim adalah siapa yang mematikannya, karena `browser_engine_state` tidak
+/// punya label untuk itu.
+fn state_slot(slot: &Slot) -> State {
+    match slot.keadaan() {
+        Keadaan::Hidup => State::Ready,
+        Keadaan::Tidur | Keadaan::Mati => State::Stopped,
+        Keadaan::BelumPernah => State::Cold,
+    }
 }
 
 /// PSS total satu proses, dibaca dari `/proc/<pid>/smaps_rollup`.

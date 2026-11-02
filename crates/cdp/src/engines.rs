@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use engine::Engine;
+use engine::{Engine, Slot};
 
 /// Pemisah antara id mesin dan id milik mesin di `/json/list`.
 ///
@@ -27,6 +27,10 @@ use engine::Engine;
 /// dipakai penulis, jadi tidak bisa bertabrakan. Id mesin sendiri dilarang
 /// memuat karakter ini.
 pub const PEMISAH: char = '~';
+
+/// Batas waktu boot yang dipakai jalur protokol kalau pemanggil tidak
+/// menyebutkan angka lain.
+pub const BOOT_TIMEOUT_MS: u64 = 20_000;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PoolError {
@@ -50,77 +54,122 @@ impl PoolError {
 
 /// Mesin-mesin yang bisa dipakai klien, plus satu yang jadi bawaan.
 ///
+/// Yang disimpan adalah [`Slot`], bukan mesin yang sedang hidup: mesin boleh
+/// tidur (di-reap karena menganggur) lalu dibangunkan lagi saat ada yang
+/// memakainya, dan pool tetap menyebut id yang sama sepanjang daemon hidup.
+/// Menyimpan `Arc<dyn Engine>` akan membekukan "mesin ini hidup selamanya"
+/// dan itu yang membuat reap idle mustahil.
+///
 /// Urutannya `BTreeMap` supaya `/json/list` dan metrik keluar dengan urutan
 /// yang sama setiap kali. Urutan yang berubah-ubah membuat dua tangkapan
 /// metrik tidak bisa dibandingkan tanpa berpikir.
 #[derive(Clone, Default)]
 pub struct EnginePool {
     default: String,
-    engines: BTreeMap<String, Arc<dyn Engine>>,
+    slots: BTreeMap<String, Arc<Slot>>,
 }
 
 impl std::fmt::Debug for EnginePool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EnginePool")
             .field("default", &self.default)
-            .field("engines", &self.engines.keys().collect::<Vec<_>>())
+            .field("slots", &self.slots.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
 impl EnginePool {
-    /// Pool satu mesin. Id-nya diambil dari `kind`, dan untuk satu mesin itu
-    /// sudah cukup: tidak ada mesin lain yang bisa tertukar dengannya.
+    /// Pool satu mesin dari mesin yang **sudah hidup**.
+    ///
+    /// Dipakai jalur lama dan test: resepnya diambil dari mesin itu sendiri,
+    /// jadi kalau mesinnya nanti di-reap, slot ini tetap bisa
+    /// menyalakannya kembali dengan argumen dan profil yang sama.
     #[must_use]
     pub fn single(engine: Arc<dyn Engine>) -> Self {
         let id = engine.kind().to_owned();
-        let mut engines = BTreeMap::new();
-        engines.insert(id.clone(), engine);
-        Self {
-            default: id,
-            engines,
-        }
+        let slot = Arc::new(Slot::siap(
+            id.clone(),
+            engine.kind().to_owned(),
+            engine.spec().clone(),
+            Arc::new(engine::PenggerakShell),
+            engine,
+            0,
+        ));
+        let mut slots = BTreeMap::new();
+        slots.insert(id.clone(), slot);
+        Self { default: id, slots }
     }
 
-    /// Pool banyak mesin dengan satu mesin bawaan.
+    /// Pool dari mesin-mesin yang **sudah hidup**.
     ///
-    /// Semua id divalidasi di sini, bukan saat dipakai: id yang salah baru
-    /// terlihat sebagai URL aneh di `/json/list` beberapa lapis kemudian, dan
-    /// menelusurinya dari sana jauh lebih mahal daripada menolak di pintu.
+    /// Bentuk yang dipakai daemon saat boot: mesin sudah dinyalakan lebih dulu
+    /// (lihat `browserd::daemon`), lalu diserahkan ke sini. Setiap mesin
+    /// dibungkus [`Slot::siap`], jadi mulai sekarang pool boleh mematikannya
+    /// dan menyalakannya lagi tanpa kehilangan id-nya.
     pub fn new(
         default: impl Into<String>,
         engines: BTreeMap<String, Arc<dyn Engine>>,
     ) -> Result<Self, PoolError> {
-        if engines.is_empty() {
+        let slots = engines
+            .into_iter()
+            .map(|(id, engine)| {
+                let slot = Arc::new(Slot::siap(
+                    id.clone(),
+                    engine.kind().to_owned(),
+                    engine.spec().clone(),
+                    Arc::new(engine::PenggerakShell),
+                    engine,
+                    // Dicap "sekarang", bukan 0: nol berarti "terakhir dipakai
+                    // 1970", sehingga mesin yang baru saja dinyalakan langsung
+                    // dianggap menganggur berjam-jam dan di-reap pada putaran
+                    // pertama. Mesin yang baru boot memang boleh di-reap, tapi
+                    // setelah `idle_reap`, bukan seketika.
+                    engine::slot::detik_sekarang(),
+                ));
+                (id, slot)
+            })
+            .collect::<BTreeMap<String, Arc<Slot>>>();
+        Self::dari_slot(default, slots)
+    }
+
+    /// Pool dari slot, termasuk slot yang mesinnya sedang tidur.
+    ///
+    /// Ini bentuk yang dipakai kalau daemon tidak menyalakan mesin apa pun
+    /// saat boot: mesin lahir saat klien pertama datang.
+    pub fn dari_slot(
+        default: impl Into<String>,
+        slots: BTreeMap<String, Arc<Slot>>,
+    ) -> Result<Self, PoolError> {
+        if slots.is_empty() {
             return Err(PoolError::Kosong);
         }
-        for id in engines.keys() {
+        for id in slots.keys() {
             if !id_sah(id) {
                 return Err(PoolError::IdTidakSah(id.clone()));
             }
         }
         let default = default.into();
-        if !engines.contains_key(&default) {
+        if !slots.contains_key(&default) {
             return Err(PoolError::BawaanTidakAda(default));
         }
-        Ok(Self { default, engines })
+        Ok(Self { default, slots })
     }
 
     #[must_use]
-    pub fn get(&self, id: &str) -> Option<&Arc<dyn Engine>> {
-        self.engines.get(id)
+    pub fn get(&self, id: &str) -> Option<&Arc<Slot>> {
+        self.slots.get(id)
     }
 
-    /// Mesin bawaan.
+    /// Slot mesin bawaan.
     ///
     /// Dipakai endpoint discovery (`/json/version`) dan pesan yang tidak
-    /// menyebut mesin sama sekali. Pool selalu punya minimal satu mesin, jadi
+    /// menyebut mesin sama sekali. Pool selalu punya minimal satu slot, jadi
     /// ini tidak bisa `None`.
     #[must_use]
-    pub fn default_engine(&self) -> &Arc<dyn Engine> {
-        self.engines
+    pub fn default_slot(&self) -> &Arc<Slot> {
+        self.slots
             .get(&self.default)
-            .expect("pool selalu punya mesin bawaan; dibangun lewat new/single")
+            .expect("pool selalu punya slot bawaan; dibangun lewat baru/single")
     }
 
     #[must_use]
@@ -129,21 +178,59 @@ impl EnginePool {
     }
 
     pub fn ids(&self) -> impl Iterator<Item = &String> {
-        self.engines.keys()
+        self.slots.keys()
     }
 
-    pub fn engines(&self) -> impl Iterator<Item = (&String, &Arc<dyn Engine>)> {
-        self.engines.iter()
+    pub fn slots(&self) -> impl Iterator<Item = (&String, &Arc<Slot>)> {
+        self.slots.iter()
+    }
+
+    /// Semua slot dibangunkan bersamaan.
+    ///
+    /// `pastikan` mem-poll port dan berkas `DevToolsActivePort`, jadi setiap
+    /// boot dijalankan di `spawn_blocking`: menjalankannya langsung di thread
+    /// async akan menahan reactor selama belasan detik dan ikut menahan
+    /// `/json/version` milik klien lain.
+    ///
+    /// Hasilnya memuat kegagalan per mesin, bukan `Result` tunggal: satu mesin
+    /// yang tidak mau bangun tidak boleh menyembunyikan tab yang hidup di
+    /// mesin lain.
+    pub async fn bangun_semua(
+        &self,
+        timeout_ms: u64,
+    ) -> Vec<(String, Result<Arc<dyn Engine>, String>)> {
+        let sekarang = engine::slot::detik_sekarang();
+        let mut tugas = Vec::with_capacity(self.slots.len());
+        for (id, slot) in &self.slots {
+            let id = id.clone();
+            let slot = Arc::clone(slot);
+            tugas.push(tokio::spawn(async move {
+                let hasil =
+                    tokio::task::spawn_blocking(move || slot.pastikan(timeout_ms, sekarang))
+                        .await
+                        .map_err(|err| format!("tugas boot gagal: {err}"))
+                        .and_then(|hasil| hasil.map_err(|err| err.to_string()));
+                (id, hasil)
+            }));
+        }
+        let mut hasil = Vec::with_capacity(tugas.len());
+        for tugas in tugas {
+            match tugas.await {
+                Ok(pair) => hasil.push(pair),
+                Err(err) => tracing::warn!(%err, "tugas boot mesin dibatalkan"),
+            }
+        }
+        hasil
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.engines.len()
+        self.slots.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.engines.is_empty()
+        self.slots.is_empty()
     }
 
     /// Lebih dari satu mesin berarti penerusan harus lewat multiplex. Satu
@@ -151,7 +238,7 @@ impl EnginePool {
     /// jalur itu yang dipakai produksi hari ini.
     #[must_use]
     pub fn is_multi(&self) -> bool {
-        self.engines.len() > 1
+        self.slots.len() > 1
     }
 }
 
@@ -185,14 +272,41 @@ mod tests {
     use super::*;
     use testing::FakeEngine;
 
+    /// Penggerak yang selalu gagal: uji pool tidak boleh menyalakan proses.
+    struct TakBisaNyalakan;
+
+    impl engine::slot::Penggerak for TakBisaNyalakan {
+        fn nyalakan(
+            &self,
+            _spec: &engine::LaunchSpec,
+            _timeout_ms: u64,
+        ) -> Result<Arc<dyn Engine>, engine::EngineError> {
+            Err(engine::EngineError::BinaryMissing(
+                std::path::PathBuf::from("/tidak/ada"),
+            ))
+        }
+    }
+
     fn mesin(port: u16) -> Arc<dyn Engine> {
         Arc::new(FakeEngine::at_port(port))
     }
 
-    fn peta(items: &[(&str, u16)]) -> BTreeMap<String, Arc<dyn Engine>> {
+    fn slot(id: &str, port: u16) -> Arc<Slot> {
+        let engine = mesin(port);
+        Arc::new(Slot::siap(
+            id.to_owned(),
+            engine.kind().to_owned(),
+            engine.spec().clone(),
+            Arc::new(TakBisaNyalakan),
+            engine,
+            1000,
+        ))
+    }
+
+    fn peta(items: &[(&str, u16)]) -> BTreeMap<String, Arc<Slot>> {
         items
             .iter()
-            .map(|(id, port)| ((*id).to_owned(), mesin(*port)))
+            .map(|(id, port)| ((*id).to_owned(), slot(id, *port)))
             .collect()
     }
 
@@ -202,16 +316,34 @@ mod tests {
         assert_eq!(pool.default_id(), "fake");
         assert_eq!(pool.len(), 1);
         assert!(!pool.is_multi());
-        assert_eq!(pool.default_engine().info().devtools_port, 41234);
+        assert_eq!(
+            pool.default_slot().info().expect("info").devtools_port,
+            41234
+        );
     }
 
     #[test]
     fn pool_dua_mesin_memilih_yang_benar() {
-        let pool = EnginePool::new("a", peta(&[("a", 40001), ("b", 40002)])).expect("pool sah");
+        let pool =
+            EnginePool::dari_slot("a", peta(&[("a", 40001), ("b", 40002)])).expect("pool sah");
         assert!(pool.is_multi());
         assert_eq!(pool.len(), 2);
-        assert_eq!(pool.get("a").expect("ada").info().devtools_port, 40001);
-        assert_eq!(pool.get("b").expect("ada").info().devtools_port, 40002);
+        assert_eq!(
+            pool.get("a")
+                .expect("ada")
+                .info()
+                .expect("info")
+                .devtools_port,
+            40001
+        );
+        assert_eq!(
+            pool.get("b")
+                .expect("ada")
+                .info()
+                .expect("info")
+                .devtools_port,
+            40002
+        );
         assert!(pool.get("c").is_none());
         assert_eq!(
             pool.ids().cloned().collect::<Vec<_>>(),
@@ -222,7 +354,7 @@ mod tests {
 
     #[test]
     fn bawaan_yang_tidak_ada_ditolak() {
-        let err = EnginePool::new("z", peta(&[("a", 40001)])).expect_err("harus ditolak");
+        let err = EnginePool::dari_slot("z", peta(&[("a", 40001)])).expect_err("harus ditolak");
         assert_eq!(err, PoolError::BawaanTidakAda("z".to_owned()));
         assert!(err.to_string().contains('z'));
     }
@@ -230,7 +362,7 @@ mod tests {
     #[test]
     fn daftar_kosong_ditolak() {
         assert_eq!(
-            EnginePool::new("a", BTreeMap::new()).expect_err("harus ditolak"),
+            EnginePool::dari_slot("a", BTreeMap::new()).expect_err("harus ditolak"),
             PoolError::Kosong
         );
     }
@@ -238,16 +370,83 @@ mod tests {
     #[test]
     fn id_dengan_pemisah_atau_spasi_ditolak() {
         for buruk in ["a~b", "a b", "a/b", ""] {
-            let err = EnginePool::new(buruk, peta(&[(buruk, 40001)]))
+            let err = EnginePool::dari_slot(buruk, peta(&[(buruk, 40001)]))
                 .expect_err("id buruk harus ditolak");
             assert_eq!(err, PoolError::IdTidakSah(buruk.to_owned()));
         }
         for baik in ["chrome_shell", "chrome-shell2", "A1"] {
             assert!(
-                EnginePool::new(baik, peta(&[(baik, 40001)])).is_ok(),
+                EnginePool::dari_slot(baik, peta(&[(baik, 40001)])).is_ok(),
                 "id '{baik}' seharusnya sah"
             );
         }
+    }
+
+    /// Penggerak yang mencatat berapa kali dipanggil dan menghasilkan mesin
+    /// baru di port tetap. Dipakai membuktikan mesin yang tidur benar-benar
+    /// dibangunkan, bukan cuma dilaporkan.
+    struct PenggerakHitung {
+        dipanggil: Arc<std::sync::atomic::AtomicU32>,
+        port: u16,
+    }
+
+    impl engine::slot::Penggerak for PenggerakHitung {
+        fn nyalakan(
+            &self,
+            _spec: &engine::LaunchSpec,
+            _timeout_ms: u64,
+        ) -> Result<Arc<dyn Engine>, engine::EngineError> {
+            self.dipanggil
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Arc::new(FakeEngine::at_port(self.port)) as Arc<dyn Engine>)
+        }
+    }
+
+    #[tokio::test]
+    async fn slot_tidur_dibangunkan_sekali_saat_dibutuhkan() {
+        let dipanggil = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mesin_awal: Arc<dyn Engine> = Arc::new(FakeEngine::at_port(40001));
+        let slot = Arc::new(Slot::siap(
+            "a".to_owned(),
+            "fake".to_owned(),
+            mesin_awal.spec().clone(),
+            Arc::new(PenggerakHitung {
+                dipanggil: Arc::clone(&dipanggil),
+                port: 40001,
+            }),
+            Arc::clone(&mesin_awal),
+            1000,
+        ));
+        let mut slots = BTreeMap::new();
+        slots.insert("a".to_owned(), slot);
+        let pool = EnginePool::dari_slot("a", slots).expect("pool sah");
+
+        // Mesin ditidurkan seperti setelah reap: proses berhenti, resep tinggal.
+        pool.default_slot().matikan().expect("berhenti");
+        assert_eq!(
+            pool.default_slot().keadaan(),
+            engine::slot::Keadaan::Tidur,
+            "setelah dimatikan slot harus berstatus tidur, bukan mati"
+        );
+        assert_eq!(dipanggil.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let hasil = pool.bangun_semua(1000).await;
+        assert_eq!(hasil.len(), 1);
+        assert!(hasil[0].1.is_ok(), "mesin tidur harus bangun");
+        assert_eq!(
+            dipanggil.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "boot kedua tidak boleh terjadi tanpa alasan"
+        );
+
+        // Panggilan kedua memakai mesin yang sudah hidup: tidak ada boot baru.
+        let lagi = pool.bangun_semua(1000).await;
+        assert!(lagi[0].1.is_ok());
+        assert_eq!(
+            dipanggil.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "mesin yang sudah hidup tidak boleh dinyalakan ulang"
+        );
     }
 
     #[test]

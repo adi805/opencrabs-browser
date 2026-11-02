@@ -48,6 +48,15 @@ pub struct DaemonSection {
     /// berarti `chrome_shell`, lalu id terkecil. Lihat
     /// [`FileConfig::engine_default`].
     pub engine_default: Option<String>,
+    /// Berapa detik mesin boleh menganggur sebelum dimatikan. `0` berarti
+    /// tidak pernah. Bawaan 60 detik, sama dengan `ReaperConfig::default()`
+    /// di crate `lifecycle`: dua angka berbeda di dua tempat akan membuat
+    /// perilaku daemon bergantung pada mana yang dibaca lebih dulu.
+    ///
+    /// Mesin yang dimatikan di sini **bukan** mesin yang hilang: resepnya
+    /// (`LaunchSpec`) tetap dipegang `Slot`, jadi permintaan berikutnya
+    /// menyalakannya lagi tanpa me-restart daemon.
+    pub idle_reap_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -194,6 +203,16 @@ impl FileConfig {
                 || home().join(".opencrabs/browser-daemon/control.token"),
                 |raw| expand_home(raw),
             )
+    }
+
+    /// Berapa detik mesin boleh menganggur sebelum di-reap. `None` berarti
+    /// tidak pernah: `0` di config adalah cara operator mematikan fitur ini,
+    /// dan itu harus terbaca sebagai "mati", bukan "batas nol detik".
+    #[must_use]
+    pub fn idle_reap_secs(&self) -> Option<u64> {
+        self.daemon
+            .as_ref()
+            .and_then(|daemon| daemon.idle_reap_secs)
     }
 
     /// Batas handoff dari `[captcha]`, atau bawaan dokumen 03 §3.1.

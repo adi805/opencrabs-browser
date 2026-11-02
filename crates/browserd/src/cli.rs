@@ -197,6 +197,12 @@ pub struct ServeArgs {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
+    /// Matikan mesin yang menganggur selama N detik. `0` mematikan fitur.
+    ///
+    /// Menimpa `[daemon] idle_reap_secs` di config.
+    #[arg(long)]
+    pub idle_reap_secs: Option<u64>,
+
     /// Lepas dari terminal dan menulis log ke berkas.
     #[arg(long)]
     pub detach: bool,

@@ -11,12 +11,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use cdp::{EnginePool, ProxyState};
-use engine::{Engine, ShellEngine, discover_shell};
+use control::Registry;
+use engine::{Engine, Keadaan, ShellEngine, Slot, discover_shell};
+use lifecycle::reaper::{ReapReason, ReapReport, ReaperConfig, idle_reap_due};
 use lifecycle::{Counters, Event, Machine};
 use tokio::net::TcpListener;
 
@@ -62,7 +64,8 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     // mesin per sesi, jadi probe ke mesin lain belum punya alamat yang benar.
     // Batas ini tercatat di README supaya tidak dikira sudah per mesin.
     let wired = wiring::start(
-        pool.default_engine().web_socket_url().to_owned(),
+        Arc::clone(pool.default_slot()),
+        args.ready_timeout_ms,
         limits_handoff(&file),
         control::RegistryLimits::default(),
     );
@@ -76,16 +79,42 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         pool.clone(),
         Arc::clone(&counters),
         Arc::clone(&wired.counters),
-        Arc::clone(&machine),
     ));
+
+    // Loop reap dijalankan hanya kalau operator memintanya. `0` di config
+    // berarti mesin dibiarkan hidup selama daemon hidup, dan itu pilihan yang
+    // sah untuk host yang lebih suka membayar memori daripada waktu boot.
+    match ambang_reap(&args, &file) {
+        Some(idle_reap) => {
+            let cfg = ReaperConfig {
+                idle_reap,
+                ..ReaperConfig::default()
+            };
+            tracing::info!(
+                idle_reap_secs = idle_reap.as_secs(),
+                "loop reap menganggur aktif"
+            );
+            tokio::spawn(loop_reap(
+                pool.clone(),
+                Arc::clone(&counters),
+                Arc::clone(&wired.registry),
+                cfg,
+            ));
+        }
+        None => tracing::warn!(
+            "reap mesin menganggur dimatikan (idle_reap_secs = 0): memori tidak akan kembali sendiri"
+        ),
+    }
 
     let listener = TcpListener::bind(&bind)
         .await
         .with_context(|| format!("bind {bind} gagal; port dipakai proses lain?"))?;
 
-    for (id, engine) in pool.engines() {
-        let pss_mb = engine
-            .process_id()
+    for (id, slot) in pool.slots() {
+        let hidup = slot.hidup();
+        let pss_mb = hidup
+            .as_ref()
+            .and_then(|engine| engine.process_id())
             .and_then(metrics::read_pss_bytes)
             .map_or_else(
                 || "?".to_string(),
@@ -93,9 +122,11 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
             );
         tracing::info!(
             mesin = %id,
-            kind = engine.kind(),
-            pid = ?engine.process_id(),
-            http = %engine.http_base(),
+            kind = slot.kind(),
+            pid = ?hidup.as_ref().and_then(|engine| engine.process_id()),
+            http = %hidup
+                .as_ref()
+                .map_or_else(|| "(tidak hidup)".to_owned(), |engine| engine.http_base()),
             pss_mb = %pss_mb,
             "mesin siap"
         );
@@ -137,12 +168,7 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     apply_event(&machine, Event::Reap);
 
     tracing::info!(mesin = pool.len(), "mematikan semua mesin");
-    hentikan_semua(
-        pool.engines()
-            .map(|(_, engine)| Arc::clone(engine))
-            .collect(),
-    )
-    .await;
+    matikan_semua(pool.slots().map(|(_, slot)| Arc::clone(slot)).collect()).await;
     tracing::info!("semua mesin dimatikan");
 
     apply_event(&machine, Event::Reaped);
@@ -181,11 +207,19 @@ async fn pasang_control(file: &FileConfig, wired: &Wired) -> Result<()> {
         // Probe disuntikkan dari sini karena hanya daemon yang tahu alamat
         // WebSocket mesin. Router kontrol tetap tidak tahu cara bicara CDP.
         probe: Some(std::sync::Arc::new({
-            let engine_ws = wired.engine_ws.clone();
+            // Slot, bukan alamat WebSocket. Mesin yang sudah di-reap punya port
+            // baru setelah lahir lagi, jadi alamat yang diambil sekali saat
+            // boot akan menunjuk port mati. Karena itu alamatnya dibaca di sini,
+            // setelah mesin dipastikan hidup.
+            let slot = Arc::clone(&wired.slot);
+            let timeout_ms = wired.ready_timeout_ms;
             move |target_id: String| {
-                let engine_ws = engine_ws.clone();
+                let slot = Arc::clone(&slot);
                 Box::pin(async move {
-                    crate::wiring::probe_target(&engine_ws, &target_id)
+                    let alamat = crate::wiring::alamat_mesin(slot, timeout_ms)
+                        .await
+                        .map_err(|err| format!("mesin tidak bisa dipakai untuk probe: {err:#}"))?;
+                    crate::wiring::probe_target(&alamat, &target_id)
                         .await
                         .map_err(|err| format!("probe gagal: {err}"))
                 })
@@ -328,6 +362,194 @@ async fn hentikan_semua(engines: Vec<Arc<dyn Engine>>) {
             Ok(Ok(())) => tracing::info!(kind, "mesin berhenti"),
             Ok(Err(err)) => tracing::warn!(kind, %err, "mesin tidak berhenti bersih"),
             Err(err) => tracing::warn!(kind, %err, "task penghentian gagal"),
+        }
+    }
+}
+
+/// Berapa detik mesin boleh menganggur sebelum di-reap. `None` = tidak pernah.
+///
+/// `--idle-reap-secs` menang atas `[daemon] idle_reap_secs`; `0` di keduanya
+/// berarti fitur ini mati. Bawaannya 60 detik, angka yang sama dengan
+/// [`ReaperConfig::default`] supaya perilaku daemon tidak bergantung pada
+/// bagian mana yang dibaca lebih dulu.
+fn ambang_reap(args: &ServeArgs, file: &FileConfig) -> Option<Duration> {
+    match args
+        .idle_reap_secs
+        .or_else(|| file.idle_reap_secs())
+        .unwrap_or(DEFAULT_IDLE_REAP_SECS)
+    {
+        0 => None,
+        detik => Some(Duration::from_secs(detik)),
+    }
+}
+
+const DEFAULT_IDLE_REAP_SECS: u64 = 60;
+
+/// Jarak antar pemeriksaan menganggur.
+///
+/// Bukan `ReaperConfig::poll` (250 ms): jeda itu untuk menunggu proses benar-
+/// benar hilang setelah sinyal, bukan untuk mengintip slot. Dengan ambang satu
+/// menit, memeriksa 4 kali per detik hanya membakar CPU tanpa satu pun klien
+/// merasakannya. Lima detik tidak terasa, dan tetap jauh lebih rapat daripada
+/// ambangnya.
+const TICK_REAP: Duration = Duration::from_secs(5);
+
+/// Loop reap: satu putaran tiap [`TICK_REAP`] selama daemon hidup.
+///
+/// Jam dibaca di sini, bukan di dalam predikat, supaya predikatnya tetap murni
+/// dan bisa diuji tanpa tidur.
+async fn loop_reap(
+    pool: EnginePool,
+    counters: Arc<Counters>,
+    registry: Arc<Registry>,
+    cfg: ReaperConfig,
+) {
+    let mut ticker = tokio::time::interval(TICK_REAP);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        ticker.tick().await;
+        let sekarang = unix_seconds().max(0) as u64;
+        // Handoff yang belum dijawab menahan reap. Registry belum menyimpan
+        // mesin per handoff, jadi satu handoff menahan **semua** mesin: terlalu
+        // luas memang, tapi arah kelirunya aman (memori ditahan), sedangkan
+        // arah sebaliknya menghapus captcha yang sedang dijawab orang.
+        let pending = registry.pending(sekarang).len();
+        for id in putaran_reap(&pool, &counters, pending, &cfg, sekarang).await {
+            tracing::info!(mesin = %id, "mesin di-reap karena menganggur");
+        }
+    }
+}
+
+/// Satu putaran pemeriksaan, tanpa timer dan tanpa jaringan.
+///
+/// Dipisah dari [`loop_reap`] supaya bisa diuji langsung: menguji loop berarti
+/// menunggu, dan menunggu di test berarti test yang lambat dan kadang merah.
+///
+/// Yang dikembalikan hanya id mesin yang benar-benar berhenti. Mesin yang gagal
+/// dimatikan dikembalikan ke slotnya, jadi putaran berikutnya mencoba lagi
+/// alih-alih meninggalkan proses tanpa pemilik.
+pub async fn putaran_reap(
+    pool: &EnginePool,
+    counters: &Counters,
+    handoff_pending: usize,
+    cfg: &ReaperConfig,
+    sekarang: u64,
+) -> Vec<String> {
+    let mut dimatikan = Vec::new();
+
+    for (id, slot) in pool.slots() {
+        // Mesin yang tidur atau sudah mati tidak punya proses untuk dimatikan.
+        // `keadaan` sekaligus membuang pegangan ke proses yang sudah hilang.
+        if !matches!(slot.keadaan(), Keadaan::Hidup) {
+            continue;
+        }
+
+        let sesi = slot.sesi();
+        let diam = slot.diam(sekarang);
+        if idle_reap_due(sesi, handoff_pending, diam, cfg).is_none() {
+            continue;
+        }
+
+        // Pengambilan dilakukan di dalam kunci yang sama dengan pemeriksaan
+        // sesi: klien yang datang di antara dua panggilan itu tidak boleh
+        // kehilangan mesinnya hanya karena reap sudah memutuskan lebih dulu.
+        let Some(engine) = slot.ambil_kalau_diam(sekarang, cfg.idle_reap) else {
+            continue;
+        };
+
+        match matikan_satu(&engine, ReapReason::Idle, cfg).await {
+            Ok(report) => {
+                counters.record_reap(&report);
+                if report.outcome.released() {
+                    tracing::info!(
+                        mesin = %id,
+                        sesi,
+                        diam_secs = diam.as_secs(),
+                        laporan = %report,
+                        "reap selesai"
+                    );
+                    dimatikan.push(id.clone());
+                } else {
+                    // Sinyal sudah dikirim dan prosesnya masih ada: mesin
+                    // dikembalikan ke slot supaya tidak berubah menjadi proses
+                    // yatim yang tidak pernah diurus siapa pun.
+                    slot.kembalikan(engine);
+                    tracing::error!(
+                        mesin = %id,
+                        laporan = %report,
+                        "proses mesin bertahan setelah SIGKILL; mesin dikembalikan ke slot"
+                    );
+                }
+            }
+            Err(err) => {
+                slot.kembalikan(engine);
+                tracing::warn!(mesin = %id, %err, "reap ditunda; mesin dikembalikan ke slot");
+            }
+        }
+    }
+
+    dimatikan
+}
+
+/// Menjalankan protokol reap terhadap satu mesin.
+///
+/// Sinyalnya dikirim lewat [`crate::reap::PgidGroup`] atas **pid mesin**, yang
+/// di sini sama dengan pgid-nya karena [`ShellEngine`] melahirkan anaknya dengan
+/// `process_group(0)`. Urutan `SIGTERM -> tunggu -> SIGKILL` tidak ditulis ulang
+/// di sini: itu milik `lifecycle::reaper`, dan mengulangnya berarti punya dua
+/// versi protokol yang bisa berbeda diam-diam.
+///
+/// Laporan yang dikembalikan berisi sinyal yang **benar-benar** dikirim, jadi
+/// `browser_reap_signal_total` tidak diisi tebakan.
+async fn matikan_satu(
+    engine: &Arc<dyn Engine>,
+    alasan: ReapReason,
+    cfg: &ReaperConfig,
+) -> Result<ReapReport, String> {
+    let engine = Arc::clone(engine);
+    let cfg = *cfg;
+
+    tokio::task::spawn_blocking(move || -> Result<ReapReport, String> {
+        let Some(pid) = engine.process_id() else {
+            // Tanpa pid tidak ada yang bisa disinyalir. Mengarang laporan di
+            // sini akan membuat metrik reap menghitung sesuatu yang tidak
+            // pernah terjadi, jadi putarannya lebih baik ditunda.
+            return Err("pid mesin tidak terbaca; reap ditunda".to_owned());
+        };
+
+        let group = crate::reap::PgidGroup::new(pid);
+        let report =
+            lifecycle::reaper::reap(&group, &cfg, alasan).map_err(|err| err.to_string())?;
+
+        if report.outcome.released() {
+            // Pegangan `ShellEngine` masih menyimpan `Child`. Tanpa `stop`,
+            // `is_running` bisa menjawab "hidup" untuk proses yang sudah mati,
+            // dan slot akan terus mencoba mematikannya.
+            if let Err(err) = engine.stop() {
+                tracing::warn!(pid, %err, "menyinkronkan pegangan mesin setelah reap gagal");
+            }
+        }
+
+        Ok(report)
+    })
+    .await
+    .map_err(|err| format!("task reap gagal: {err}"))?
+}
+
+/// Mematikan semua mesin milik daemon, termasuk yang tidur.
+///
+/// Lewat [`Slot::matikan`], bukan daftar pegangan yang dikumpulkan lebih dulu:
+/// mesin yang baru selesai boot di antara pengumpulan dan penghentian tetap
+/// ikut mati, karena pengambilan mesin terjadi di dalam slot.
+async fn matikan_semua(slots: Vec<Arc<Slot>>) {
+    for slot in slots {
+        let id = slot.id().to_owned();
+        match tokio::task::spawn_blocking(move || slot.matikan()).await {
+            Ok(Ok(true)) => tracing::info!(mesin = %id, "mesin dimatikan"),
+            Ok(Ok(false)) => tracing::debug!(mesin = %id, "mesin sudah tidur"),
+            Ok(Err(err)) => tracing::warn!(mesin = %id, %err, "mesin tidak berhenti bersih"),
+            Err(err) => tracing::warn!(mesin = %id, %err, "task penghentian gagal"),
         }
     }
 }
@@ -666,8 +888,32 @@ mod tests {
             ready_timeout_ms: 15_000,
             extra_arg: vec!["--mute-audio".to_owned()],
             config: None,
+            idle_reap_secs: None,
             detach: false,
         }
+    }
+
+    #[test]
+    fn idle_reap_secs_nol_mematikan_fitur_bukan_menjadi_batas_nol() {
+        // `0` adalah cara operator mematikan reap. Kalau angka itu diperlakukan
+        // sebagai ambang, batasnya jadi nol detik dan setiap mesin dimatikan
+        // segera setelah klien terakhir pergi.
+        let mut args = args();
+        assert_eq!(
+            ambang_reap(&args, &FileConfig::default()),
+            Some(Duration::from_secs(60)),
+            "tanpa petunjuk, bawaannya 60 detik"
+        );
+
+        args.idle_reap_secs = Some(0);
+        assert_eq!(ambang_reap(&args, &FileConfig::default()), None);
+
+        args.idle_reap_secs = Some(7);
+        assert_eq!(
+            ambang_reap(&args, &FileConfig::default()),
+            Some(Duration::from_secs(7)),
+            "CLI menang atas bawaan"
+        );
     }
 
     #[test]

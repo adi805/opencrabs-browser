@@ -74,9 +74,27 @@ pub async fn proxy_multiplex(
 
     let mut kanal: BTreeMap<String, mpsc::Sender<TsMessage>> = BTreeMap::new();
     let mut tugas: Vec<JoinHandle<()>> = Vec::new();
-    for (id, engine) in pool.engines() {
+    // Sesi ditandai di setiap mesin yang benar-benar dipakai koneksi ini.
+    // Tanpa ini, loop reap melihat nol sesi dan mematikan mesin di tengah sesi
+    // yang sedang berjalan.
+    let mut sesi: Vec<crate::SesiSlot> = Vec::new();
+    // Semua mesin dibangunkan lebih dulu: pipa disambungkan ke URL milik
+    // proses yang **sekarang** hidup, dan port-nya bisa berubah antar boot.
+    for (id, hasil) in pool.bangun_semua(crate::engines::BOOT_TIMEOUT_MS).await {
+        let engine = match hasil {
+            Ok(engine) => engine,
+            Err(err) => {
+                // Mesin yang tidak mau bangun dilewati, bukan menggagalkan
+                // seluruh sesi: tab di mesin lain masih bisa dipakai.
+                tracing::warn!(mesin = %id, %err, "mesin dilewati: gagal dinyalakan");
+                continue;
+            }
+        };
         let (tx, rx) = mpsc::channel::<TsMessage>(ANTREAN);
         kanal.insert(id.clone(), tx);
+        sesi.push(crate::SesiSlot::buka(Arc::clone(
+            pool.get(&id).expect("id berasal dari pool yang sama"),
+        )));
         tugas.push(tokio::spawn(pipa_mesin(
             id.clone(),
             engine.web_socket_url().to_owned(),
@@ -217,6 +235,7 @@ pub async fn proxy_multiplex(
         tugas.abort();
     }
     let _ = klien_tx.send(AxumMessage::Close(None)).await;
+    drop(sesi);
     Ok(stats)
 }
 
