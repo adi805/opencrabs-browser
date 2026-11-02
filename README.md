@@ -148,14 +148,13 @@ Aturan yang berlaku saat ada lebih dari satu mesin:
 - Pemilihan mesin per host belum otomatis. `policy` menentukan **jenis** mesin (`shell` atau penuh); pemetaan host ke **instance** tertentu belum ada, jadi semua permintaan yang tidak menyebut mesin berakhir di mesin bawaan.
 - `/json/new` selalu membuat tab di mesin bawaan. Endpoint itu tidak punya tempat untuk menyebut mesin; pakai `Target.createTarget` dengan `openCrabsOptions`.
 - Probe handoff (port kontrol) masih menembak mesin bawaan saja. Kalau tantangan muncul di halaman mesin lain, probe-nya tidak melihat halaman itu; yang dilaporkan adalah apa yang ada di mesin bawaan.
-- Idle reap per mesin belum ada: tabel transisi daemon masih satu, dan `/metrics` melaporkan state tiap mesin dari hidup/matinya proses.
 - Satu klien websocket berbicara ke semua mesin lewat satu antrean per mesin (256 pesan). Kalau antrean penuh, perintah ditolak dengan galat, bukan dibuang diam-diam.
 
 Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
 
 | Bukti | Hasil |
 |---|---|
-| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 293 test (dihitung ulang 2 Nov 2026 setelah M4) |
+| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 312 test (dihitung ulang 2 Nov 2026 setelah idle reap) |
 | `cargo xtask doctor` | exit 0 |
 | `node bench/cdp-smoke.mjs` | 6/6 lulus |
 | Klien nyata (OpenCrabs `browser_navigate`) lewat daemon | `https://example.com` → "Example Domain" |
@@ -164,6 +163,7 @@ Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
 | Browser produksi di `:9222` | tidak disentuh selama pengujian |
 | Bukti M4: dua mesin palsu, satu daemon | `cargo test -p cdp --test discovery` 7 lulus, `-p cdp --test multiplex` 8 lulus |
 | Bukti M4: dua `chrome-headless-shell` nyata | `cargo test -p browserd --test m4_proof` 1 lulus: judul tab tidak tertukar, tutup tab kanan tidak memengaruhi tab kiri |
+| Bukti M1: reap lalu bangun lagi | `cargo test -p browserd --test idle_reap` 5 lulus (mesin palsu, HTTP sungguhan) dan `--test idle_proof` 1 lulus (`chrome-headless-shell` sungguhan, PSS turun 12,2 MB, daemon tidak restart) |
 | Bukti M4: `/metrics` dua mesin | `cargo test -p browserd --test m4_metrics` 2 lulus: label per mesin, blok global tetap satu |
 | CI GitHub, run pertama (2 Nov 2026) | `success` dalam **1m9s**, cold cache, runner `rustc 1.98.1`, 36 test lulus (9/14/11/2 per crate) |
 | Build rilis di GitHub (run 41386053917) | `success` total 70s, `cargo build --release` selesai **43.36s**, `target` 267 MB |
@@ -175,6 +175,45 @@ Yang **belum** diukur dan tidak diklaim: hit rate cache setelah beberapa run, da
 Catatan untuk yang membaca angka biner di atas: 1,28 MB itu **daemon**, bukan browser. Mesin (Chrome) tetap biner terpisah di sistem, dan total jejak RAM-nya yang nanti dijaga oleh budget di M1.
 
 Satu koreksi terhadap paket desain: batas disk runner diperkirakan 14 GB, yang terukur 85 GB tersedia. Penghematan disk (`CARGO_INCREMENTAL=0`, `df -h` sebelum dan sesudah) tetap dipakai karena murah, tapi batas 14 GB itu tidak lagi jadi alasan membatasi arsitektur.
+
+## Lifecycle: mesin tidur saat menganggur
+
+Mesin yang tidak dipakai tidak perlu terus hidup. Dengan `--idle-reap-secs N` (atau `[daemon] idle_reap_secs = N`) daemon memeriksa tiap 5 detik: mesin tanpa sesi terbuka yang tidak disentuh selama N detik dimatikan lewat `SIGTERM` ke group prosesnya, lalu `SIGKILL` setelah tenggangnya. `0` (bawaan) mematikan fitur ini.
+
+Yang membuat ini bukan sekadar "mematikan proses": daemon menyimpan **resep** mesinnya (`binary`, `args`, `port`, `user_data_dir`), bukan cuma pegangan ke proses. Mesin yang di-reap bisa lahir lagi saat ada yang memakainya, di port baru, tanpa me-restart daemon dan tanpa menyentuh config.
+
+| Kejadian | Perilaku |
+|---|---|
+| Menganggur melewati ambang, tanpa sesi, tanpa handoff tertunda | `SIGTERM` ke group proses, 5 detik, lalu `SIGKILL`; slot jadi `tidur` |
+| Ada sesi WebSocket terbuka | tidak di-reap, seberapa lama pun kliennya diam |
+| Ada handoff yang belum dijawab | tidak di-reap (registry handoff belum menyimpan mesin, jadi satu handoff menahan semua mesin; arah kelirunya aman, memori yang ditahan) |
+| Mesin menolak mati sesudah `SIGKILL` | dikembalikan ke slot, dicoba lagi di putaran berikutnya, `warn` di log |
+| `/json/version` | dijawab dari info yang sudah dicatat; **tidak** membangunkan mesin |
+| `/json/list`, `/json/new`, `/json/protocol`, `/json/activate`, `/json/close` | membangunkan mesin yang ditanya (di mode multiplex: semua) sebelum diteruskan |
+| `/healthz` | `state` membedakan `hidup`, `tidur` (sehat), `mati` (kegagalan), `belum_pernah` |
+| `/metrics` | `browser_engine_state` melaporkan state slot, bukan tebakan dari pid |
+
+`tidur` sengaja dihitung **sehat**: daemon yang sedang berhemat bukan gangguan, dan alarm yang menyala tiap kali reap bekerja akan diabaikan orang.
+
+Diukur 2 November 2026 dengan satu `chrome-headless-shell` sungguhan dan ambang 10 detik (`cargo test -p browserd --test idle_proof -- --nocapture`):
+
+| Yang diukur | Hasil |
+|---|---|
+| PSS total (daemon + mesin) sebelum reap | 26,4 MB |
+| PSS total sesudah reap, daemon yang sama | 14,1 MB (turun 12,2 MB) |
+| Mesin pada 3,0 detik sesudah sentuhan terakhir (sebelum ambang) | masih hidup, PSS 12,3 MB |
+| Waktu reap sesudah sentuhan terakhir | 10,1 detik |
+| `/proc/<pid>` mesin sesudah reap | bersih |
+| `/json/list` sesudah reap | mesin baru: pid 643979 -> 644068, PSS 12,1 MB |
+| `Runtime.evaluate` `6 * 7` di tab mesin baru | `42` |
+
+PSS, bukan RSS: RSS menjumlahkan halaman bersama (biner, font, pustaka) berkali-kali, jadi dua angka RSS tidak boleh dijumlahkan dan penurunannya akan terlihat lebih besar dari yang nyata.
+
+Batas yang jujur:
+
+- Ambang dihitung dari sentuhan terakhir pada slot, dan handoff **belum per mesin**: satu handoff tertunda menahan reap untuk semua mesin.
+- `/json/list` membangunkan mesin yang ditanya. Klien yang cuma ingin melihat daftar tetap membayar satu boot; itu disengaja, karena daftar kosong lebih menyesatkan daripada satu boot.
+- Tab tidak dipulihkan sesudah reap. Store M2 menjaga profil dan cookie; tab hidup di memori, dan setelah mesin mati tab itu memang sudah tidak ada.
 
 ## Peta milestone
 
