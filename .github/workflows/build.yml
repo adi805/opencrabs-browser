@@ -1,0 +1,97 @@
+name: Build
+
+# Jalur C (dokumen 06 §0): biner rilis.
+#
+# Repo ini publik, jadi runner standar tidak memakai kuota. Konsekuensinya
+# build berat (rilis, arsitektur kedua, e2e Chrome bersih) dikerjakan di sini,
+# bukan di laptop 4 core. Angka memori tetap diukur di laptop: PSS di runner
+# adalah PSS mesin orang lain (dokumen 08 §1 batas 2).
+#
+# Belum ada tag sampai M2 selesai (dokumen 08 §5), jadi jalur ini dipakai
+# lewat workflow_dispatch lebih dulu.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Profil cargo yang dibangun"
+        type: choice
+        options: [release, dev]
+        default: release
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "4"
+
+jobs:
+  build:
+    name: build x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+
+      - name: Disk sebelum build
+        run: df -h /
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build
+        run: cargo build --locked --package browserd --profile ${{ inputs.profile || 'release' }}
+
+      - name: Ukuran target sebelum dibersihkan
+        if: always()
+        run: du -sh target 2>/dev/null || true
+
+      - name: Disk sesudah build
+        if: always()
+        run: df -h /
+
+      - name: Paketkan
+        id: paket
+        run: |
+          set -eu
+          PROFILE="${{ inputs.profile || 'release' }}"
+          VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          BIN="target/${PROFILE}/browserd"
+          test -x "$BIN"
+          strip "$BIN" || true
+          NAME="browserd-${VERSION}-x86_64-unknown-linux-gnu"
+          tar -C "target/${PROFILE}" -czf "${NAME}.tar.gz" browserd
+          sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          ls -l "${NAME}.tar.gz"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.paket.outputs.name }}
+          path: |
+            ${{ steps.paket.outputs.name }}.tar.gz
+            ${{ steps.paket.outputs.name }}.tar.gz.sha256
+          retention-days: 14
+
+      - name: Rilis (hanya untuk tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          NAME="${{ steps.paket.outputs.name }}"
+          gh release create "$GITHUB_REF_NAME" \
+            "${NAME}.tar.gz" "${NAME}.tar.gz.sha256" \
+            --title "browserd $GITHUB_REF_NAME" \
+            --notes "Biner x86_64-unknown-linux-gnu. Checksum disertakan; verifikasi dengan \`sha256sum -c\`."

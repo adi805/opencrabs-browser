@@ -1,0 +1,65 @@
+name: CI
+
+# Jalur A (dokumen 06 §0): gerbang cepat di setiap push dan PR.
+# Isinya persis sama dengan `cargo xtask check` di laptop, supaya hijau lokal
+# dan hijau di sini artinya hal yang sama.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental menulis puluhan MB ke disk runner 14 GB tanpa mempercepat
+  # build sekali pakai (dokumen 08 §1 batas 1).
+  CARGO_INCREMENTAL: "0"
+  # .cargo/config.toml memaksa jobs = 2 untuk laptop 4 core. Runner punya
+  # 4 core sendiri, jadi di sini dilonggarkan.
+  CARGO_BUILD_JOBS: "4"
+
+jobs:
+  gate:
+    name: gate (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain dipin oleh rust-toolchain.toml, bukan action yang bergerak
+      # sendiri (dokumen 08 §3).
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          cargo -V
+
+      - name: Disk sebelum build
+        run: df -h /
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
+
+      # Kehabisan disk harus terlihat sebagai kegagalan yang jelas, bukan galat
+      # linker yang membingungkan.
+      - name: Disk sesudah build
+        if: always()
+        run: df -h /
