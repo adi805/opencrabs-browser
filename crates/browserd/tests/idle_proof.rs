@@ -340,9 +340,18 @@ fn jalankan_uji(daemon: &mut Child, cdp_port: u16) {
         panic!("mesin tidak di-reap dalam {BATAS:?} setelah sentuhan terakhir: {kabar:?}")
     });
     let umur = disentuh.elapsed();
+    // Kelonggaran ukur 250 ms, dan arahnya dijelaskan supaya tidak jadi pintu
+    // belakang: cap waktu "terakhir dipakai" ditulis daemon saat ia menangani
+    // permintaan, yaitu SEBELUM responsnya sampai ke stopwatch test ini. Jadi
+    // stopwatch selalu mulai sedikit lebih telat daripada jam daemon, dan
+    // selisihnya adalah latensi localhost, bukan reap yang terlalu cepat.
+    // 250 ms jauh di atas latensi itu dan jauh di bawah tick reap 5 detik,
+    // jadi tidak ada reap-terlalu-cepat yang bisa lolos lewat celah ini.
+    const TOLERANSI_UKUR: Duration = Duration::from_millis(250);
+    let ambang_ukur = Duration::from_secs(AMBANG_SECS) - TOLERANSI_UKUR;
     assert!(
-        umur >= Duration::from_secs(AMBANG_SECS),
-        "reap terjadi sebelum ambang: {umur:?} < {AMBANG_SECS} s"
+        umur >= ambang_ukur,
+        "reap terjadi sebelum ambang: {umur:?} < {ambang_ukur:?}"
     );
     eprintln!(
         "reap: {:.1} s setelah sentuhan terakhir, state = {}",

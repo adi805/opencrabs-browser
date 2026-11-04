@@ -54,11 +54,19 @@ pub struct PenggerakShell;
 /// Satu-satunya tempat jam sistem dibaca. Logika [`Slot`] menerima waktu sebagai
 /// parameter supaya uji bisa memajukan waktu tanpa tidur, dan supaya
 /// keputusan "sudah menganggur berapa lama" bisa diuji tanpa menunggu.
+///
+/// Satuannya milidetik, bukan detik, dan itu bukan kerapian belaka: [`Slot::diam`]
+/// menghitung selisih dua cap waktu yang sama-sama dipotong ke bawah, jadi
+/// resolusi detik membuat hasilnya **melebihkan** waktu menganggur sampai satu
+/// detik penuh. Mesin yang baru diam 9,9 detik terlihat sudah lewat ambang 10
+/// detik, lalu di-reap terlalu awal. Milidetik menutup celah itu sampai satu
+/// milidetik, dan arah kelirunya berbalik jadi aman (reap terlambat, bukan
+/// terlalu cepat).
 #[must_use]
-pub fn detik_sekarang() -> u64 {
+pub fn ms_sekarang() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Penggerak for PenggerakShell {
@@ -120,7 +128,7 @@ struct Isi {
     /// Hitungan ini yang menahan reap: mesin yang sedang dipakai tidak boleh
     /// dimatikan, seberapa lama pun kliennya diam.
     sesi: usize,
-    /// Detik epoch saat mesin terakhir dipakai.
+    /// Milidetik epoch saat mesin terakhir dipakai.
     terakhir: u64,
     /// Mesin ditidurkan oleh kita, bukan mati sendiri. Tanpa pembeda ini,
     /// mesin yang sengaja di-reap terlihat sama dengan mesin yang crash, dan
@@ -271,7 +279,7 @@ impl Slot {
                 id: self.id.clone(),
                 sebab: err.to_string(),
             })?;
-        let lama_boot = mulai.elapsed().as_secs();
+        let lama_boot = mulai.elapsed().as_millis() as u64;
 
         {
             let mut isi = self.kunci();
@@ -323,7 +331,7 @@ impl Slot {
         if isi.sesi > 0 {
             return Duration::ZERO;
         }
-        Duration::from_secs(sekarang.saturating_sub(isi.terakhir))
+        Duration::from_millis(sekarang.saturating_sub(isi.terakhir))
     }
 
     /// Mengambil mesin **hanya kalau** memang layak dimatikan sekarang.
@@ -342,7 +350,7 @@ impl Slot {
         if isi.sesi > 0 {
             return None;
         }
-        if Duration::from_secs(sekarang.saturating_sub(isi.terakhir)) < ambang {
+        if Duration::from_millis(sekarang.saturating_sub(isi.terakhir)) < ambang {
             return None;
         }
         isi.tidur = true;
@@ -520,14 +528,15 @@ mod tests {
             "palsu",
             LaunchSpec::new(PathBuf::from("/palsu"), PathBuf::from("/tmp/palsu")),
             Arc::new(PenggerakLambat) as Arc<dyn Penggerak>,
-            5000,
+            1_000_000,
         ));
         // Jam semu, bukan jam asli: yang diuji adalah apakah waktu boot ikut
         // dihitung, bukan seberapa cepat host menjalankan test ini. Boot di
-        // sini memakan 1,2 detik, jadi `terakhir` wajib bergeser minimal satu
-        // detik dari 1000. Dengan bug lama, `diam(1001)` sudah 1 detik.
-        slot.pastikan(5000, 1000).expect("boot lambat");
-        let diam = slot.diam(1001);
+        // sini memakan 1,2 detik, jadi `terakhir` wajib bergeser minimal 1 200
+        // milidetik dari 1 000 000. Dengan bug lama, cap waktunya tetap di
+        // 1 000 000, sehingga `diam(1_001_000)` sudah satu detik penuh.
+        slot.pastikan(5000, 1_000_000).expect("boot lambat");
+        let diam = slot.diam(1_001_000);
         assert!(
             diam < Duration::from_secs(1),
             "mesin yang baru selesai boot dianggap menganggur {diam:?}; \
@@ -544,7 +553,7 @@ mod tests {
             "palsu",
             LaunchSpec::new(PathBuf::from("/palsu"), PathBuf::from("/tmp/palsu")),
             Arc::clone(&penggerak) as Arc<dyn Penggerak>,
-            1000,
+            1_000_000,
         );
         (Arc::new(slot), penggerak)
     }
@@ -560,8 +569,8 @@ mod tests {
     #[test]
     fn pastikan_menyalakan_sekali_lalu_memakai_yang_sama() {
         let (slot, penggerak) = slot_uji();
-        let pertama = slot.pastikan(1000, 1000).expect("boot pertama");
-        let kedua = slot.pastikan(1000, 1001).expect("boot kedua");
+        let pertama = slot.pastikan(1000, 1_000_000).expect("boot pertama");
+        let kedua = slot.pastikan(1000, 1_001_000).expect("boot kedua");
         assert!(
             Arc::ptr_eq(&pertama, &kedua),
             "mesin hidup tidak boleh diganti"
@@ -573,7 +582,7 @@ mod tests {
     #[test]
     fn mesin_yang_dimatikan_bangkit_dengan_alamat_baru() {
         let (slot, penggerak) = slot_uji();
-        assert!(slot.pastikan(1000, 1000).is_ok());
+        assert!(slot.pastikan(1000, 1_000_000).is_ok());
         assert!(slot.matikan().expect("berhenti"));
         assert!(slot.hidup().is_none(), "sesudah mati tidak boleh ada mesin");
         assert!(
@@ -581,7 +590,7 @@ mod tests {
             "fakta terakhir tetap disimpan supaya /json/version bisa dijawab"
         );
 
-        let lagi = slot.pastikan(1000, 2000).expect("boot kedua");
+        let lagi = slot.pastikan(1000, 2_000_000).expect("boot kedua");
         assert_eq!(penggerak.boot.load(Ordering::SeqCst), 2);
         assert_eq!(
             lagi.info().devtools_port,
@@ -616,9 +625,9 @@ mod tests {
             "palsu",
             LaunchSpec::new(PathBuf::from("/palsu"), PathBuf::from("/tmp/palsu")),
             Arc::new(PenggerakBangkai(Arc::clone(&tempat))),
-            1000,
+            1_000_000,
         );
-        let _ = slot.pastikan(1000, 1000).expect("boot");
+        let _ = slot.pastikan(1000, 1_000_000).expect("boot");
         assert!(
             slot.hidup().is_none(),
             "mesin yang prosesnya hilang tidak boleh dilaporkan hidup"
@@ -628,25 +637,29 @@ mod tests {
     #[test]
     fn sesi_terbuka_menahan_reap() {
         let (slot, _) = slot_uji();
-        assert!(slot.pastikan(1000, 1000).is_ok());
-        slot.buka_sesi(1000);
+        assert!(slot.pastikan(1000, 1_000_000).is_ok());
+        slot.buka_sesi(1_000_000);
         assert_eq!(slot.sesi(), 1);
-        assert_eq!(slot.diam(9999), Duration::ZERO, "ada sesi berarti dipakai");
+        assert_eq!(
+            slot.diam(9_999_000),
+            Duration::ZERO,
+            "ada sesi berarti dipakai"
+        );
         assert!(
-            slot.ambil_kalau_diam(9999, Duration::from_secs(1))
+            slot.ambil_kalau_diam(9_999_000, Duration::from_secs(1))
                 .is_none(),
             "mesin dengan sesi tidak boleh diambil"
         );
 
-        slot.tutup_sesi(2000);
+        slot.tutup_sesi(2_000_000);
         assert_eq!(slot.sesi(), 0);
-        assert_eq!(slot.diam(2000), Duration::ZERO);
+        assert_eq!(slot.diam(2_000_000), Duration::ZERO);
         assert!(
-            slot.ambil_kalau_diam(2000, Duration::from_secs(1))
+            slot.ambil_kalau_diam(2_000_000, Duration::from_secs(1))
                 .is_none()
         );
         assert!(
-            slot.ambil_kalau_diam(2002, Duration::from_secs(1))
+            slot.ambil_kalau_diam(2_002_000, Duration::from_secs(1))
                 .is_some()
         );
     }
@@ -654,21 +667,21 @@ mod tests {
     #[test]
     fn tutup_sesi_tidak_pernah_negatif() {
         let (slot, _) = slot_uji();
-        slot.tutup_sesi(1000);
-        slot.tutup_sesi(1000);
+        slot.tutup_sesi(1_000_000);
+        slot.tutup_sesi(1_000_000);
         assert_eq!(slot.sesi(), 0);
     }
 
     #[test]
     fn ambil_kalau_diam_mengosongkan_slot_sekali_saja() {
         let (slot, _) = slot_uji();
-        assert!(slot.pastikan(1000, 1000).is_ok());
-        slot.sentuh(1000);
-        let diambil = slot.ambil_kalau_diam(1100, Duration::from_secs(60));
+        assert!(slot.pastikan(1000, 1_000_000).is_ok());
+        slot.sentuh(1_000_000);
+        let diambil = slot.ambil_kalau_diam(1_100_000, Duration::from_secs(60));
         assert!(diambil.is_some());
         assert!(slot.hidup().is_none());
         assert!(
-            slot.ambil_kalau_diam(1200, Duration::from_secs(60))
+            slot.ambil_kalau_diam(1_200_000, Duration::from_secs(60))
                 .is_none(),
             "putaran reap kedua tidak boleh mendapat mesin yang sama"
         );
@@ -677,14 +690,14 @@ mod tests {
     #[test]
     fn sentuh_menunda_reap() {
         let (slot, _) = slot_uji();
-        assert!(slot.pastikan(1000, 1000).is_ok());
-        slot.sentuh(1090);
+        assert!(slot.pastikan(1000, 1_000_000).is_ok());
+        slot.sentuh(1_090_000);
         assert!(
-            slot.ambil_kalau_diam(1100, Duration::from_secs(60))
+            slot.ambil_kalau_diam(1_100_000, Duration::from_secs(60))
                 .is_none()
         );
         assert!(
-            slot.ambil_kalau_diam(1160, Duration::from_secs(60))
+            slot.ambil_kalau_diam(1_160_000, Duration::from_secs(60))
                 .is_some()
         );
     }
@@ -703,7 +716,7 @@ mod tests {
         for _ in 0..8 {
             let slot = Arc::clone(&slot);
             tugas.push(std::thread::spawn(move || {
-                slot.pastikan(1000, 1000)
+                slot.pastikan(1000, 1_000_000)
                     .expect("boot")
                     .info()
                     .devtools_port
@@ -735,9 +748,9 @@ mod tests {
             "palsu",
             LaunchSpec::new(PathBuf::from("/tidak/ada"), PathBuf::from("/tmp/palsu")),
             Arc::new(SelaluGagal),
-            1000,
+            1_000_000,
         );
-        let Err(err) = slot.pastikan(10, 1000) else {
+        let Err(err) = slot.pastikan(10, 1_000_000) else {
             panic!("penggerak yang selalu gagal tidak boleh melaporkan sukses");
         };
         assert!(

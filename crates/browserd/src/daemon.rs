@@ -504,6 +504,11 @@ async fn loop_reap(
             idle_reap,
             ..ReaperConfig::default()
         };
+        // Dua jam, dua satuan, dan itu disengaja: `putaran_reap` membandingkan
+        // cap waktu mesin yang satuannya milidetik, sedangkan TTL handoff dan
+        // lease masih dihitung dalam detik. Menyamakan keduanya ke detik
+        // mengembalikan bug reap-terlalu-awal sampai satu detik penuh.
+        let sekarang_ms = engine::slot::ms_sekarang();
         let sekarang = unix_seconds().max(0) as u64;
         // Handoff yang belum dijawab menahan reap. Registry belum menyimpan
         // mesin per handoff, jadi satu handoff menahan **semua** mesin: terlalu
@@ -518,7 +523,7 @@ async fn loop_reap(
             let gudang = leases.lock().unwrap_or_else(|err| err.into_inner());
             Penahan::dari_gudang(pending, &gudang, sekarang)
         };
-        for id in putaran_reap(&pool, &counters, penahan, &cfg, sekarang).await {
+        for id in putaran_reap(&pool, &counters, penahan, &cfg, sekarang_ms).await {
             tracing::info!(mesin = %id, "mesin di-reap karena menganggur");
         }
     }
@@ -625,7 +630,7 @@ async fn pulihkan_mesin(slot: Arc<Slot>, ready_timeout_ms: u64) -> Result<(), St
     .map_err(|err| format!("task penghentian gagal: {err}"))??;
 
     tokio::task::spawn_blocking(move || {
-        let sekarang = unix_seconds().max(0) as u64;
+        let sekarang = engine::slot::ms_sekarang();
         slot.pastikan(ready_timeout_ms, sekarang)
             .map(|_| ())
             .map_err(|err| err.to_string())

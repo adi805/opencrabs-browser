@@ -81,12 +81,11 @@ pub struct Wired {
 /// menahan reactor yang juga melayani proxy CDP.
 pub async fn alamat_mesin(slot: Arc<Slot>, timeout_ms: u64) -> Result<String> {
     let id = slot.id().to_owned();
-    let engine = tokio::task::spawn_blocking(move || {
-        slot.pastikan(timeout_ms, engine::slot::detik_sekarang())
-    })
-    .await
-    .with_context(|| format!("tugas boot mesin '{id}' panik"))?
-    .with_context(|| format!("mesin '{id}' tidak bisa dinyalakan"))?;
+    let engine =
+        tokio::task::spawn_blocking(move || slot.pastikan(timeout_ms, engine::slot::ms_sekarang()))
+            .await
+            .with_context(|| format!("tugas boot mesin '{id}' panik"))?
+            .with_context(|| format!("mesin '{id}' tidak bisa dinyalakan"))?;
     Ok(engine.web_socket_url().to_owned())
 }
 

@@ -110,7 +110,7 @@ impl ProxyState {
             }
         };
         let slot_id = id.clone();
-        let sekarang = engine::slot::detik_sekarang();
+        let sekarang = engine::slot::ms_sekarang();
         let untuk_boot = Arc::clone(&slot);
         let hasil = tokio::task::spawn_blocking(move || untuk_boot.pastikan(timeout_ms, sekarang))
             .await
@@ -152,7 +152,7 @@ pub struct SesiSlot {
 impl SesiSlot {
     #[must_use]
     pub fn buka(slot: Arc<Slot>) -> Self {
-        slot.buka_sesi(engine::slot::detik_sekarang());
+        slot.buka_sesi(engine::slot::ms_sekarang());
         Self { slot }
     }
 
@@ -164,7 +164,7 @@ impl SesiSlot {
 
 impl Drop for SesiSlot {
     fn drop(&mut self) {
-        self.slot.tutup_sesi(engine::slot::detik_sekarang());
+        self.slot.tutup_sesi(engine::slot::ms_sekarang());
     }
 }
 

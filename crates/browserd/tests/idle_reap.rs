@@ -45,9 +45,15 @@ const PID_AMAN: u32 = 0x7fff_fff0;
 /// Waktu dasar test, sengaja kecil supaya jelas semua jam di sini karangan.
 /// `Slot` menerima waktu sebagai parameter, dan itu yang membuat test ini tidak
 /// perlu tidur sedetik pun.
-const T0: u64 = 1_000_000;
+const T0: u64 = 1_000_000_000;
 
-/// Ambang reap yang dipakai seluruh test.
+/// Satu detik dalam milidetik. `Slot` menerima cap waktu epoch bersatuan
+/// milidetik, sedangkan ambang di test ini ditulis dalam detik supaya enak
+/// dibaca; `MS` yang menyambungkan keduanya, dan salah satuan di sini akan
+/// terlihat sebagai test yang merah tanpa alasan yang jelas.
+const MS: u64 = 1000;
+
+/// Ambang reap yang dipakai seluruh test, dalam detik.
 const AMBANG: u64 = 60;
 
 /// Penggerak palsu: mencatat berapa kali mesin dinyalakan, dan mengembalikan
@@ -215,8 +221,14 @@ async fn mesin_menganggur_dimatikan_setelah_ambang_bukan_sebelumnya() {
     assert_eq!(slot.keadaan(), Keadaan::Hidup);
 
     // Satu detik sebelum ambang: belum boleh disentuh.
-    let dimatikan =
-        putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + AMBANG - 1).await;
+    let dimatikan = putaran_reap(
+        &pool,
+        &counters,
+        Penahan::kosong(),
+        &cfg(),
+        T0 + AMBANG * MS - MS,
+    )
+    .await;
     assert!(
         dimatikan.is_empty(),
         "mesin dimatikan sebelum ambangnya habis: {dimatikan:?}"
@@ -225,7 +237,14 @@ async fn mesin_menganggur_dimatikan_setelah_ambang_bukan_sebelumnya() {
     assert_eq!(mesin.stop_calls(), 0, "stop dipanggil sebelum ambang habis");
 
     // Tepat di ambang: baru boleh.
-    let dimatikan = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + AMBANG).await;
+    let dimatikan = putaran_reap(
+        &pool,
+        &counters,
+        Penahan::kosong(),
+        &cfg(),
+        T0 + AMBANG * MS,
+    )
+    .await;
     assert_eq!(dimatikan, vec!["kiri".to_owned()]);
     assert_eq!(slot.keadaan(), Keadaan::Tidur);
     assert_eq!(mesin.stop_calls(), 1, "stop harus dipanggil sekali");
@@ -236,7 +255,7 @@ async fn mesin_menganggur_dimatikan_setelah_ambang_bukan_sebelumnya() {
         &counters,
         Penahan::kosong(),
         &cfg(),
-        T0 + AMBANG * 10,
+        T0 + AMBANG * 10 * MS,
     )
     .await;
     assert!(lagi.is_empty(), "mesin tidur di-reap dua kali: {lagi:?}");
@@ -254,7 +273,7 @@ async fn mesin_dengan_sesi_terbuka_tidak_dimatikan() {
     slot.buka_sesi(T0);
 
     // Sejam menganggur pun tidak cukup selama sesinya masih terbuka.
-    let dimatikan = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + 3600).await;
+    let dimatikan = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + 3600 * MS).await;
     assert!(
         dimatikan.is_empty(),
         "mesin dengan sesi terbuka ikut dimatikan: {dimatikan:?}"
@@ -264,8 +283,8 @@ async fn mesin_dengan_sesi_terbuka_tidak_dimatikan() {
 
     // Setelah sesi ditutup, jam diamnya mulai dari nol lagi, bukan dari T0:
     // klien yang baru saja pergi tidak boleh langsung kehilangan mesinnya.
-    slot.tutup_sesi(T0 + 3600);
-    let belum = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + 3600).await;
+    slot.tutup_sesi(T0 + 3600 * MS);
+    let belum = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + 3600 * MS).await;
     assert!(belum.is_empty(), "reap terlalu cepat setelah sesi ditutup");
 
     let dimatikan = putaran_reap(
@@ -273,7 +292,7 @@ async fn mesin_dengan_sesi_terbuka_tidak_dimatikan() {
         &counters,
         Penahan::kosong(),
         &cfg(),
-        T0 + 3600 + AMBANG,
+        T0 + 3600 * MS + AMBANG * MS,
     )
     .await;
     assert_eq!(dimatikan, vec!["kiri".to_owned()]);
@@ -288,7 +307,14 @@ async fn handoff_yang_belum_dijawab_menahan_reap() {
     let pool = pool_satu("kiri", &slot);
     let counters = Counters::new();
 
-    let dimatikan = putaran_reap(&pool, &counters, Penahan::handoff(1), &cfg(), T0 + 3600).await;
+    let dimatikan = putaran_reap(
+        &pool,
+        &counters,
+        Penahan::handoff(1),
+        &cfg(),
+        T0 + 3600 * MS,
+    )
+    .await;
     assert!(
         dimatikan.is_empty(),
         "mesin dimatikan padahal ada handoff menunggu: {dimatikan:?}"
@@ -296,7 +322,7 @@ async fn handoff_yang_belum_dijawab_menahan_reap() {
     assert_eq!(mesin.stop_calls(), 0);
 
     // Handoff-nya selesai: mesin kembali layak di-reap.
-    let dimatikan = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + 3600).await;
+    let dimatikan = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + 3600 * MS).await;
     assert_eq!(dimatikan, vec!["kiri".to_owned()]);
 }
 
@@ -312,7 +338,14 @@ async fn mesin_kedua_tidak_ikut_mati() {
 
     kanan.buka_sesi(T0);
 
-    let dimatikan = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + AMBANG).await;
+    let dimatikan = putaran_reap(
+        &pool,
+        &counters,
+        Penahan::kosong(),
+        &cfg(),
+        T0 + AMBANG * MS,
+    )
+    .await;
     assert_eq!(dimatikan, vec!["kiri".to_owned()]);
     assert_eq!(kiri.keadaan(), Keadaan::Tidur);
     assert_eq!(kanan.keadaan(), Keadaan::Hidup);
@@ -330,7 +363,14 @@ async fn json_list_membangunkan_mesin_yang_sudah_di_reap() {
     let counters = Counters::new();
 
     // Reap dulu, baru minta tab: itu urutan yang terjadi di produksi.
-    let dimatikan = putaran_reap(&pool, &counters, Penahan::kosong(), &cfg(), T0 + AMBANG).await;
+    let dimatikan = putaran_reap(
+        &pool,
+        &counters,
+        Penahan::kosong(),
+        &cfg(),
+        T0 + AMBANG * MS,
+    )
+    .await;
     assert_eq!(dimatikan, vec!["kiri".to_owned()]);
     assert_eq!(slot.keadaan(), Keadaan::Tidur);
     assert_eq!(penggerak.boots(), 0, "reap menyalakan mesin baru");
@@ -378,12 +418,12 @@ async fn lease_hidup_menahan_reap_dan_kedaluwarsa_tidak() {
     let counters = Counters::new();
     let mut gudang = lifecycle::Gudang::baru(1);
     gudang
-        .pegang("sesi-a", "tab-lease", 3600, T0)
+        .pegang("sesi-a", "tab-lease", 3600 * MS, T0)
         .expect("pegang");
 
-    let penahan = Penahan::dari_gudang(0, &gudang, T0 + 3600);
+    let penahan = Penahan::dari_gudang(0, &gudang, T0 + 3600 * MS);
     assert_eq!(penahan.lease, 1);
-    let dimatikan = putaran_reap(&pool, &counters, penahan, &cfg(), T0 + 3600).await;
+    let dimatikan = putaran_reap(&pool, &counters, penahan, &cfg(), T0 + 3600 * MS).await;
     assert!(
         dimatikan.is_empty(),
         "mesin di-reap padahal lease masih hidup: {dimatikan:?}"
@@ -392,7 +432,7 @@ async fn lease_hidup_menahan_reap_dan_kedaluwarsa_tidak() {
 
     // Satu detik sesudah kedaluwarsa: lease berhenti menahan, mesin ikut
     // aturan idle biasa.
-    let sekarang = T0 + 3600 + AMBANG;
+    let sekarang = T0 + 3600 * MS + AMBANG * MS;
     let penahan = Penahan::dari_gudang(0, &gudang, sekarang);
     assert_eq!(penahan.lease, 0, "lease kedaluwarsa masih dihitung");
     let dimatikan = putaran_reap(&pool, &counters, penahan, &cfg(), sekarang).await;

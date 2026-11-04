@@ -139,7 +139,7 @@ impl EnginePool {
                     // dianggap menganggur berjam-jam dan di-reap pada putaran
                     // pertama. Mesin yang baru boot memang boleh di-reap, tapi
                     // setelah `idle_reap`, bukan seketika.
-                    engine::slot::detik_sekarang(),
+                    engine::slot::ms_sekarang(),
                 ));
                 (id, slot)
             })
@@ -259,7 +259,7 @@ impl EnginePool {
         &self,
         timeout_ms: u64,
     ) -> Vec<(String, Result<Arc<dyn Engine>, String>)> {
-        let sekarang = engine::slot::detik_sekarang();
+        let sekarang = engine::slot::ms_sekarang();
         let mut tugas = Vec::with_capacity(self.slots.len());
         for (id, slot) in &self.slots {
             let id = id.clone();
