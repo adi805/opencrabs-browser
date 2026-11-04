@@ -19,9 +19,10 @@ menyalin spesifikasi.
 - PRD version: 0.1.0 (draft)
 - Execution mode: native (belum ada build yang diminta untuk requirement baru)
 - Build authority: **belum ada**. PRD ini spesifikasi, bukan izin membangun.
-- Active milestone / next action: milestone 1 (mata dan tangan) dan milestone 2
-  (klasifikasi kegagalan + diagnostik) sudah **Done**, keduanya dibuktikan test
-  live. Berikutnya milestone 3 (ketahanan sesi) lalu 4 (audit terpadu).
+- Active milestone / next action: milestone 1 (mata dan tangan), milestone 2
+  (klasifikasi kegagalan + diagnostik), dan milestone 3 (ketahanan sesi +
+  mesin) sudah **Done**, ketiganya dibuktikan test live. Berikutnya milestone 4
+  (audit terpadu).
 - Otoritas build: owner memberi izin eksekusi penuh 3 November 2026.
 - Required unresolved input: tiga keputusan owner di PRD §2 Review Focus
   (batas anti-bot, tab paralel, `chrome_full`) mempengaruhi FR-001/FR-006/FR-004.
@@ -32,7 +33,7 @@ menyalin spesifikasi.
 |---|---|---|---|
 | 1 | §4 #1 Mata dan tangan | ✅ Done | Runtime `oc-mata.js` + `oc-tangan.js` disuntik ke setiap tab baru (`Page.addScriptToEvaluateOnNewDocument`), dan `crates/browserd/tests/mata_tangan.rs` membuktikan di mesin sungguhan: 14 kotak centang custom diklik sampai status halaman berubah, isi shadow DOM `closed` dan iframe se-asal terbaca, klik yang tertutup overlay dilaporkan gagal tanpa mengubah halaman. `cargo test -p browserd --test mata_tangan` = 2 passed |
 | 2 | §4 #2 Diagnostik + eskalasi | ✅ Done | `klasifikasi.rs` (6 kategori, bukti wajib, 12 test), `artefak.rs` (4 berkas + kuota, 6 test), `eskalasi.rs` (tunggu → ulang backoff maks 2 → ganti mesin → handoff, 10 test), routing host→mesin + `validasi()` aturan saat start, metrik `browser_open_failures_total{kategori}`. `crates/browserd/tests/diagnostik.rs` membuktikan di mesin sungguhan: normal → `Terbuka`/200, 403 bertanda tantangan → `BlokAntiBot`, 2FA → `ButuhManusia`, port mati → `Jaringan`. `cargo test -p browserd --test diagnostik` = 1 passed |
-| 3 | §4 #3 Ketahanan sesi + mesin | ⬜ Not Started | Keadaan awal terukur: `idle_reap_secs = 60` mematikan mesin tanpa klien, `max_tabs` dibaca saat start sehingga ubah angka = restart |
+| 3 | §4 #3 Ketahanan sesi + mesin | ✅ Done | `lifecycle::lease` (gudang lease per sesi, TTL wajib ditolak nol, batas dihitung dari lease yang masih hidup, 11 test), `browserd::reload` (SIGHUP menukar peta `max_tabs` tanpa restart; config rusak = batas lama dipertahankan, 4 test), `browserd::anggaran` (supervisor PSS per mesin, pemulihan dijanjikan < 30 detik dan 31 detik dihitung terlambat, 8 test), `cdp` gagal-tertutup untuk mesin tak dikenal + gagal-terbuka untuk metrik gagal dibaca. Bukti live di `crates/browserd/tests/sesi_live.rs` (4 test): handoff dijawab melanjutkan tab yang sama (`window.__sesi` selamat), handoff dibatalkan melepas tab, SIGHUP mengubah `max_tabs` 3 → 1 → 4 dengan pid tetap, config rusak saat reload mempertahankan batas lama. Handoff membawa judul, PNG di `<store_db>/handoff/`, dan selector `#challenge-form` |
 | 4 | §4 #4 Audit terpadu | ⬜ Not Started | Gate yang sudah ada: `cargo xtask check` exit 0 di HEAD `f13fb01` |
 
 ## Resume And Changes
@@ -91,6 +92,103 @@ menyalin spesifikasi.
   `cargo test --workspace` = 15 suite, 0 failed.
 - Yang **belum** terukur di milestone 2: efektivitas `stealth_hosts` per host,
   dan laju deteksi anti-bot pada host nyata selain tiga situs di atas.
+
+- 2026-11-04 11:54 WIB — Milestone 3 selesai, dan tiga dari empat jalurnya
+  lahir dari kegagalan yang sama: daemon yang harus dimatikan untuk mengubah
+  satu angka adalah daemon yang akan dimatikan pada waktu yang salah.
+- Lease menahan reap (AC-009, AC-012, AC-013). `lifecycle::lease` menyimpan
+  lease murni di memori dengan waktu disuntik, jadi aturan kedaluwarsa diuji
+  tanpa menunggu. Tiga keputusan yang menentukan perilakunya: `pegang` menolak
+  TTL nol (lease tanpa batas waktu tidak bisa dibedakan dari kebocoran), batas
+  per sesi dihitung dari lease yang masih HIDUP bukan total sepanjang masa, dan
+  `ganti_batas` tidak mencabut lease yang sudah ada. `Lease::hidup` inklusif di
+  detik kedaluwarsa supaya "15 menit" berarti 15 menit. Bukti di reap:
+  `crates/browserd/tests/idle_reap.rs::lease_hidup_menahan_reap_dan_kedaluwarsa_tidak`.
+- SIGHUP mengganti batas tanpa restart (AC-010, AC-011). `browserd::reload`
+  memuat config, memvalidasi, lalu menukar peta `max_tabs` di `EnginePool` yang
+  dipakai bersama semua klon (`Arc<RwLock<..>>`), dan `loop_reap` membaca
+  `idle_reap` ulang tiap tick 5 detik sehingga SIGHUP bisa MENYALAKAN reap yang
+  tadinya mati. Config rusak tidak mengubah apa pun: batas lama dipertahankan
+  dan alasannya dicatat, tidak jatuh ke tanpa batas. `--idle-reap-secs` dari
+  CLI tetap menang bahkan sesudah reload, karena flag itu perintah operator untuk
+  proses ini.
+- Anggaran memori memulihkan mesin, bukan mematikan daemon (AC-016, AC-017).
+  Supervisor membaca PSS per grup proses (bukan RSS), dan saat melewati ambang
+  keras mesin dimatikan lalu dinyalakan lagi lewat `spawn_blocking` sementara
+  daemon tetap melayani. Janji 30 detik dicatat jujur: pemulihan 31 detik
+  dihitung TERLAMBAT lewat counter `pulih_terlambat`, bukan berhasil.
+  Pengukuran yang gagal dibiarkan terbuka dengan peringatan, karena supervisor
+  yang mematikan mesin karena tidak bisa membaca `/proc` lebih berbahaya
+  daripada tidak ada supervisor. `[budget]` yang hanya menulis sebagian ambang
+  ditolak dengan nama bagian dan kunci yang kurang, bukan diterima dengan nilai
+  karangan.
+- Arah gagal dipilih sadar (AC-020): tujuan tak dikenal = gagal-TERTUTUP
+  (galat -32602 menyebut mesin yang diminta; menebak mesin lain akan mengirim
+  perintah ke tab yang bukan milik pemanggil), metrik gagal dibaca =
+  gagal-TERBUKA (menolak tab baru hanya karena metrik gagal dibaca akan
+  mematikan daemon yang sehat).
+- Handoff manusia membawa konteks siap jawab (AC-014): judul lewat
+  `Runtime.evaluate` dibatasi 200 karakter, layar PNG asli di
+  `<store_db>/handoff/` dengan nama berkas yang menyebut detik dan id target
+  yang sudah disanitasi (id berisi `/` tidak boleh menulis di luar direktori
+  itu), dan selector hanya ekspresi yang benar-benar dicari `JS_DETECT`;
+  sinyal teks menjawab `None` daripada mengarang selector. Base64 didekode
+  sendiri tanpa dependensi baru karena masukan tidak sah harus jadi error,
+  bukan PNG rusak yang ditampilkan sebagai bukti. Semua pengambilan
+  gagal-terbuka: handoff tetap dibuat tanpa field yang gagal, dan berkas layar
+  yang tidak jadi dirujuk dihapus lagi.
+- Bukti live di `crates/browserd/tests/sesi_live.rs` (4 test, 2,91 detik):
+  `handoff_dijawab_melanjutkan_tab_yang_sama` membuktikan `window.__sesi`
+  selamat dari handoff ke jawaban operator (tab yang SAMA, bukan tab baru),
+  `handoff_dibatalkan_melepas_tab_dan_mesin_siap_lagi`,
+  `sighup_mengubah_batas_tab_tanpa_restart` (3 → 1 → 4 dengan pid tidak
+  berubah), dan `config_rusak_saat_reload_mempertahankan_batas_lama`.
+- Satu bug nyata ditemukan gerbang penuh, bukan oleh milestone ini:
+  `engine::slot::pastikan` menulis `terakhir` dengan `sekarang` yang diambil
+  SEBELUM mesin dinyalakan, jadi mesin yang baru selesai boot langsung terlihat
+  menganggur selama seluruh waktu boot-nya dan bisa di-reap tepat setelah
+  dipakai. Diperbaiki di `fix(engine)` dengan uji penggerak boot 1,2 detik.
+- Satu test live sempat flaky, dan penyebab pertamanya nyata:
+  `m4_proof::dua_mesin_nyata_tidak_saling_mengganggu` membaca `document.title`
+  sekali tepat saat `frameNavigated` datang, padahal event itu tanda navigasi
+  COMMIT bukan dokumen selesai diparse. Diganti retry berpagar waktu 5 detik.
+- Retry itu belum cukup, dan kegagalannya memang bukan satu. Di bawah
+  `cargo test --workspace` tiga uji berbeda gagal dengan bentuk yang sama
+  ("perintah CDP tidak dijawab", `Connection reset without closing handshake`)
+  padahal ketiganya lolos sendirian (`m4_proof` menunggu `Page.enable` 90 detik,
+  `mata_tangan` menunggu `Runtime.evaluate` 10 detik, `sesi_live` tidak
+  menemukan tangkapan layar). Log daemon yang disimpan saat gagal menunjuk
+  sebabnya: mesin `kiri` berhenti pada `06:11:09` padahal baru lahir `06:11:04`,
+  artinya prosesnya dibunuh, bukan lambat menjawab.
+- Pembunuhnya `earlyoom`. Sejak 12:00 tercatat 221 kill `chrome-headless` dan 71
+  kill `opencrabs` (yang terakhir ini yang membuat sesi agent restart
+  berulang-ulang di tengah gerbang). Pemicunya `oc-serve-embed.service`
+  (embedding server OpenCrabs) yang berputar di loop restart: `NRestarts=641`,
+  `Restart=always`, tiap siklus memuat model 200-800 MB lalu kena SIGTERM saat
+  swap menyentuh 0%. Loop itu menekan memori host, dan earlyoom memilih korban
+  berikutnya dari proses terbesar yang sedang jalan: mesin uji gue.
+- Dua langkah, karena sebabnya dua. Pertama, jejak memori uji live dikecilkan:
+  uji live sekarang diserialkan lewat kunci `flock` host-wide di
+  `crates/browserd/tests/common/mod.rs`, dipegang selama satu uji live
+  berjalan, jadi bukan lagi lima binary melahirkan Chromium bersamaan. Kuncinya
+  `std::fs::File::try_lock` (Rust 1.98): nol dependency baru, dan kernel
+  melepasnya kalau proses mati sehingga tidak ada kunci basi. Berkas kunci
+  ditaruh di direktori `target` build itu sendiri supaya checkout lain di host
+  yang sama tidak ikut mengantre. Kedua, loop `oc-serve-embed` dilaporkan ke
+  owner sebagai masalah host, bukan ditambal dari sisi uji.
+- Angka gerbang sesudah keduanya: `cargo fmt --all -- --check` rc 0,
+  `cargo clippy --workspace --all-targets -- -D warnings` rc 0, lalu
+  `cargo test --workspace --no-fail-fast`: 32 suite ok, 426 passed, 0 failed,
+  rc 0, dan **delta 0 kill earlyoom** selama run. Sebelum ini, run yang sama
+  dengan serialisasi aktif tapi host masih di tengah spiral tetap gagal tiga
+  target; jadi hijau ini datang dari memori yang sehat, bukan dari kebetulan.
+
+- Yang **belum** terukur di milestone 3, dan tidak diklaim: (1) `Gudang::pegang`
+  BELUM dipanggil dari jalur produksi mana pun; lease vs reap terbukti di test
+  (`idle_reap.rs`), tapi belum ada kode daemon yang benar-benar memegang lease
+  atas nama sesi. (2) TTL handoff 900 detik diuji dengan jam semu di
+  `control::registry`, tidak live. (3) `loop_anggaran` belum diuji end-to-end
+  dengan mesin sungguhan; pemulihan terbukti dengan mesin palsu.
 
 ## AI Agent Rules
 
