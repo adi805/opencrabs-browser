@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod budget;
+pub mod lease;
 pub mod metrics;
 pub mod reaper;
 pub mod state;
@@ -25,6 +26,7 @@ pub use budget::{
     SmapsRollup, parse_smaps_rollup, pgrp_from_stat, processes_in_group, pss_of_process,
     read_process_group,
 };
+pub use lease::{GalatLease, Gudang, Lease};
 pub use metrics::Counters;
 pub use reaper::{
     ProcessGroup, ReapOutcome, ReapReason, ReapReport, ReaperConfig, Signal, SignalError, Tab, reap,
