@@ -15,6 +15,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod handoff;
+pub mod klasifikasi;
 pub mod metrics;
 pub mod penanam;
 pub mod reap;
