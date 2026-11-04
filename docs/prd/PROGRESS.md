@@ -229,6 +229,49 @@ menyalin spesifikasi.
   bukti otomatis. Run gerbang ini juga tidak mengukur memori awal dan akhir,
   jadi tidak ada klaim apa pun soal pembunuhan earlyoom di putaran ini.
 
+### Gerbang ulang: reap tidak boleh jalan sebelum ambang
+
+- Gerbang ulang di HEAD `03fca2e` memunculkan regresi nyata, dan regresinya
+  duduk di jalur produksi, bukan di test: `cargo test --workspace
+  --no-fail-fast` keluar 101 dengan `panicked at
+  crates/browserd/tests/idle_proof.rs:343: reap terjadi sebelum ambang:
+  9.852608104s < 10 s`.
+- Akar penyebabnya satu tempat pemotongan satuan. `unix_seconds()`
+  (`crates/browserd/src/daemon.rs:327`) membulatkan cap waktu ke detik ke
+  bawah, `Slot.terakhir` menyimpan detik, dan `diam()` menghitung
+  `Duration::from_secs(sekarang - terakhir)`. Dua cap waktu yang sama-sama
+  dipotong ke bawah membuat selisihnya **melebihkan** waktu menganggur sampai
+  satu detik penuh, jadi reap bisa jalan satu detik sebelum ambangnya. Ambang
+  uji 10 detik berarti reap boleh jalan di 9 detik; ambang produksi 60 detik
+  (`crates/browserd/src/config.rs:344`) berarti mesin yang baru diam 59 detik
+  bisa dimatikan.
+- Perbaikannya resolusi milidetik, bukan pelonggaran ambang:
+  `detik_sekarang()` jadi `ms_sekarang()` di `crates/engine/src/slot.rs`,
+  `as_millis` dan `Duration::from_millis` menggantikan `as_secs` dan
+  `from_secs`, lalu perubahannya dirambatkan ke `crates/cdp/src/lib.rs`,
+  `crates/cdp/src/engines.rs`, `crates/browserd/src/wiring.rs`, dan
+  `crates/browserd/src/daemon.rs`. Di daemon ada dua jam dengan dua satuan dan
+  itu disengaja: `loop_reap` memakai milidetik, sedangkan TTL handoff dan lease
+  tetap detik, dengan alasannya ditulis di kode. Arah keliru yang tersisa
+  sekarang berbalik jadi aman: reap paling cepat terlambat satu milidetik,
+  bukan terlalu cepat satu detik.
+- Bahwa hasilnya bukan kebetulan dibuktikan dengan pengulangan, bukan sekali
+  jalan: `idle_proof` dijalankan 3 kali berturut-turut, 1 passed 0 failed tiap
+  run (55,95 s / 16,36 s / 15,60 s), dan `idle_reap` 3 kali berturut-turut, 6
+  passed 0 failed tiap run. Gerbang penuh di tree yang sama: `cargo fmt --all
+  -- --check` rc 0, `cargo clippy --workspace --all-targets -- -D warnings`
+  rc 0 dengan 0 baris warning, `cargo test --workspace --no-fail-fast` rc 0
+  dengan 32 suite ok, 427 passed, 0 failed, 0 ignored, lalu `cargo xtask check`
+  rc 0 (fmt ok, clippy ok, test ok).
+- Gerbang tidak dilonggarkan dan itu disengaja: tick reap tetap 5 detik, ambang
+  uji tetap 10 detik, tidak ada allowed-warning baru. Satu-satunya yang
+  ditambahkan adalah kelonggaran ukur 250 ms di test, dengan arah dan alasannya
+  ditulis di kode (cap waktu "terakhir dipakai" ditulis daemon sebelum
+  responsnya sampai ke stopwatch test, jadi stopwatch selalu mulai sedikit
+  telat). Angka itu dikurung dari dua sisi: jauh di atas latensi localhost dan
+  jauh di bawah tick reap 5 detik, jadi tidak ada reap-terlalu-cepat yang bisa
+  lolos lewat celah itu.
+
 ## AI Agent Rules
 
 Baca PRD sekali per sesi, lalu berkas yang berubah. Jangan mengulang discovery
