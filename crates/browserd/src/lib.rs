@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod artefak;
 pub mod cdp_client;
 pub mod challenge;
 pub mod cli;
