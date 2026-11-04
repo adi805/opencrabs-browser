@@ -1481,6 +1481,79 @@ binary = "/abs/shell"
             .is_ok()
         );
     }
+
+    /// AC-019: `browserd serve` polos tidak boleh bisa menyentuh port browser
+    /// produksi.
+    ///
+    /// `Resolved::resolve` memakai `args.port` kalau tidak ada `--bind` dan
+    /// tidak ada `[daemon] bind`. Kalau angka bawaannya 9222, daemon
+    /// pengembangan merebut port browser produksi. Uji ini mengunci rantai itu
+    /// dari ujung ke ujung: argumen bawaan masuk, bind keluar. Bukan sekadar
+    /// mengecek konstanta `--port` di `cli.rs`, karena rantai itulah yang
+    /// benar-benar dipakai daemon saat start.
+    #[test]
+    fn bawaan_polos_bind_ke_port_pengembangan_bukan_port_produksi() {
+        let resolved = Resolved::resolve(&args(), &FileConfig::default()).expect("resolve bawaan");
+        assert_eq!(resolved.bind, "127.0.0.1:9224");
+        assert!(
+            !resolved.bind.ends_with(":9222"),
+            "bind bawaan menyentuh port browser produksi: {}",
+            resolved.bind
+        );
+        // Port debug mesin dibiarkan 0: mesin memilih sendiri dari
+        // `DevToolsActivePort`, jadi tidak ada angka tetap yang bisa
+        // bertabrakan dengan produksi.
+        assert!(
+            resolved.machines.iter().all(|mesin| mesin.port == 0),
+            "tanpa --engine-port, mesin memilih portnya sendiri"
+        );
+        assert!(
+            resolved.machines.iter().all(|mesin| mesin.port != 9222),
+            "port debug mesin tidak boleh 9222"
+        );
+    }
+
+    /// `[daemon]` yang ada tapi tanpa `bind` tetap memakai port pengembangan:
+    /// kehadiran seksi itu tidak boleh memindahkan bind ke angka lain.
+    #[test]
+    fn config_daemon_tanpa_bind_tetap_port_pengembangan() {
+        let file: FileConfig = toml::from_str("[daemon]\nengine_port = 0\n").expect("toml sah");
+        let resolved = Resolved::resolve(&args(), &file).expect("resolve");
+        assert_eq!(resolved.bind, "127.0.0.1:9224");
+    }
+
+    /// 9222 hanya boleh tercapai kalau operator menulisnya sendiri.
+    ///
+    /// Ini bukan aturan yang ditegakkan kode (operator bebas memilih bind), tapi
+    /// pengunci perilaku: satu-satunya jalan ke 9222 adalah `bind` yang ditulis
+    /// tangan, bukan bawaan yang lolos diam-diam.
+    #[test]
+    fn port_produksi_hanya_tercapai_lewat_bind_eksplisit() {
+        let file: FileConfig =
+            toml::from_str("[daemon]\nbind = \"127.0.0.1:9222\"\n").expect("toml sah");
+        let resolved = Resolved::resolve(&args(), &file).expect("resolve");
+        assert_eq!(
+            resolved.bind, "127.0.0.1:9222",
+            "operator yang menulis 9222 tetap dihormati"
+        );
+    }
+
+    /// Profil bawaan mesin hidup di direktori cache pengembangan, terpisah dari
+    /// profil browser produksi.
+    #[test]
+    fn profil_bawaan_mesin_ada_di_direktori_pengembangan() {
+        let mut args = args();
+        args.user_data_dir = None;
+        let resolved = Resolved::resolve(&args, &FileConfig::default()).expect("resolve");
+        let dir = &resolved.machines[0].user_data_dir;
+        let akar = config::home().join(".cache/opencrabs-browser");
+        assert!(
+            dir.starts_with(&akar),
+            "profil mesin ({}) harus di bawah {}",
+            dir.display(),
+            akar.display()
+        );
+    }
 }
 
 #[cfg(test)]
