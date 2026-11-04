@@ -275,9 +275,15 @@ async fn kirim_perintah(
             {
                 return Some(galat);
             }
-            if let Some(tx) = kanal.get(mesin) {
-                let _ = tx.send(TsMessage::Text(payload.clone().into())).await;
-            }
+            // Mesin yang tercatat di peta tapi tidak punya kanal berarti
+            // koneksinya putus di antara dua pesan. Perintahnya **dijawab
+            // galat**, bukan dibuang: ini sisi gagal-tertutup NFR-004, karena
+            // meneruskan perintah ke mesin lain berarti mengirim pekerjaan ke
+            // mesin yang tidak diminta klien.
+            let Some(tx) = kanal.get(mesin) else {
+                return Some(galat_mesin_tak_terhubung(payload, mesin));
+            };
+            let _ = tx.send(TsMessage::Text(payload.clone().into())).await;
         }
         Perintah::Gabung { klien_id, pesan } => {
             let hidup: Vec<&(String, String)> = pesan
@@ -358,6 +364,28 @@ fn id_klien(teks: &str) -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
+/// Jawaban untuk perintah yang menyebut mesin yang tidak punya koneksi hidup.
+///
+/// Klien yang menunggu balasan `id` yang tidak akan pernah datang akan
+/// timeout dengan pesan yang menyesatkan, dan tabnya terlihat "hilang" padahal
+/// permintaannya tidak pernah sampai ke mana pun.
+fn galat_mesin_tak_terhubung(payload: &str, mesin: &str) -> String {
+    let mut balasan = json!({
+        "error": {
+            "code": KODE_DITOLAK,
+            "message": format!(
+                "mesin '{mesin}' tidak terhubung ke daemon; perintah tidak diteruskan ke mesin lain                  karena itu bukan mesin yang diminta"
+            ),
+        }
+    });
+    if let Some(id) = id_klien(payload)
+        && let Some(obj) = balasan.as_object_mut()
+    {
+        obj.insert("id".into(), Value::from(id));
+    }
+    balasan.to_string()
+}
+
 /// Membalas pesan klien yang tidak bisa dirutekan.
 ///
 /// Dijawab, bukan didiamkan: klien yang menunggu balasan `id` yang tidak akan
@@ -425,4 +453,58 @@ async fn pipa_mesin(
 
     penulis.abort();
     let _ = mati.send(mesin).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use engine::Engine;
+    use serde_json::Value;
+    use testing::FakeEngine;
+
+    use super::*;
+    use crate::mux::peta::{KODE_DITOLAK, Perintah};
+
+    fn pool_satu_mesin() -> EnginePool {
+        let mesin: Arc<dyn Engine> = Arc::new(FakeEngine::new());
+        let mut engines = BTreeMap::new();
+        engines.insert("kiri".to_owned(), mesin);
+        EnginePool::new("kiri", engines).expect("pool")
+    }
+
+    // AC-020 sisi gagal-tertutup: mesin yang dikenal tapi kanalnya putus
+    // dijawab galat yang menyebut mesinnya. Sebelum ini perintahnya dibuang
+    // diam-diam dan klien menggantung sampai timeout-nya sendiri.
+    #[tokio::test]
+    async fn perintah_ke_mesin_tanpa_kanal_dijawab_galat_bukan_dibuang() {
+        let pool = pool_satu_mesin();
+        let kanal = BTreeMap::new();
+        let perintah = Perintah::Satu {
+            mesin: "kiri".to_owned(),
+            payload: r#"{"id":7,"method":"Target.closeTarget","params":{"targetId":"X"}}"#
+                .to_owned(),
+        };
+
+        let galat = kirim_perintah(
+            &perintah,
+            &pool,
+            &kanal,
+            &mut BTreeMap::new(),
+            &mut BTreeMap::new(),
+        )
+        .await
+        .expect("perintah tanpa kanal harus dijawab galat");
+
+        let nilai: Value = serde_json::from_str(&galat).expect("JSON");
+        assert_eq!(nilai["id"], 7, "id klien wajib dipantulkan: {nilai}");
+        assert_eq!(nilai["error"]["code"], KODE_DITOLAK);
+        let pesan = nilai["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            pesan.contains("kiri"),
+            "pesan harus menyebut mesin: {pesan}"
+        );
+        assert!(pesan.contains("tidak terhubung"), "pesan: {pesan}");
+    }
 }

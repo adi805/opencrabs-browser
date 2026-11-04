@@ -340,6 +340,32 @@ async fn hitungan_yang_tidak_terbaca_tidak_memblokir_tab() {
         "hitungan tidak terbaca harus gagal-terbuka, bukan menolak"
     );
 }
+// AC-020 arah kedua: mesin tujuan yang TIDAK DIKENAL harus ditolak, bukan
+// diteruskan ke mesin bawaan. Salah meneruskan di sini berarti `/json/close/x`
+// menutup tab di mesin yang salah, dan itu kehilangan pekerjaan, bukan sekadar
+// salah alamat.
+#[tokio::test]
+async fn mesin_tujuan_tidak_dikenal_ditolak_dan_tidak_diteruskan() {
+    let mesin = mesin(2).await;
+    let proxy = proxy_dua(mesin.port, None).await;
+
+    let (status, badan) = minta(proxy.port, "GET", "/json/close/asing~P1").await;
+    assert_eq!(status, 404, "mesin asing harus ditolak, dapat: {badan}");
+    assert!(
+        badan.contains("asing"),
+        "pesan harus menyebut mesin yang diminta: {badan}"
+    );
+    assert!(
+        badan.contains("a") && badan.contains("b"),
+        "pesan harus menyebut mesin yang benar-benar terpasang: {badan}"
+    );
+    assert_eq!(
+        mesin.halaman(),
+        2,
+        "permintaan ke mesin asing tidak boleh sampai ke mesin mana pun"
+    );
+}
+
 type Klien = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 
 async fn sambung(port: u16) -> Klien {
