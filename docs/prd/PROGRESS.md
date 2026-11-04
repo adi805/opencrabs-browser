@@ -1,11 +1,11 @@
 ---
 document_type: project-progress
-project: "OpenCrabs Browser — mesin buka-web"
+project: "OpenCrabs Browser: mesin buka-web"
 prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
 status: in-progress
 current_milestone: 4
 total_milestones: 4
-last_updated: "2026-11-04 20:17"
+last_updated: "2026-11-04 21:29"
 ---
 
 # OpenCrabs Browser Progress
@@ -36,17 +36,17 @@ menyalin spesifikasi.
 | 1 | §4 #1 Mata dan tangan | ✅ Done | Runtime `oc-mata.js` + `oc-tangan.js` disuntik ke setiap tab baru (`Page.addScriptToEvaluateOnNewDocument`), dan `crates/browserd/tests/mata_tangan.rs` membuktikan di mesin sungguhan: 14 kotak centang custom diklik sampai status halaman berubah, isi shadow DOM `closed` dan iframe se-asal terbaca, klik yang tertutup overlay dilaporkan gagal tanpa mengubah halaman. `cargo test -p browserd --test mata_tangan` = 2 passed |
 | 2 | §4 #2 Diagnostik + eskalasi | ✅ Done | `klasifikasi.rs` (6 kategori, bukti wajib, 12 test), `artefak.rs` (4 berkas + kuota, 6 test), `eskalasi.rs` (tunggu → ulang backoff maks 2 → ganti mesin → handoff, 10 test), routing host→mesin + `validasi()` aturan saat start, metrik `browser_open_failures_total{kategori}`. `crates/browserd/tests/diagnostik.rs` membuktikan di mesin sungguhan: normal → `Terbuka`/200, 403 bertanda tantangan → `BlokAntiBot`, 2FA → `ButuhManusia`, port mati → `Jaringan`. `cargo test -p browserd --test diagnostik` = 1 passed |
 | 3 | §4 #3 Ketahanan sesi + mesin | ✅ Done | `lifecycle::lease` (gudang lease per sesi, TTL wajib ditolak nol, batas dihitung dari lease yang masih hidup, 11 test), `browserd::reload` (SIGHUP menukar peta `max_tabs` tanpa restart; config rusak = batas lama dipertahankan, 4 test), `browserd::anggaran` (supervisor PSS per mesin, pemulihan dijanjikan < 30 detik dan 31 detik dihitung terlambat, 8 test), `cdp` gagal-tertutup untuk mesin tak dikenal + gagal-terbuka untuk metrik gagal dibaca. Bukti live di `crates/browserd/tests/sesi_live.rs` (4 test): handoff dijawab melanjutkan tab yang sama (`window.__sesi` selamat), handoff dibatalkan melepas tab, SIGHUP mengubah `max_tabs` 3 → 1 → 4 dengan pid tetap, config rusak saat reload mempertahankan batas lama. Handoff membawa judul, PNG di `<store_db>/handoff/`, dan selector `#challenge-form` |
-| 4 | §4 #4 Audit terpadu | ✅ Done | Audit 26 AC di `docs/prd/AUDIT-AC 041126-1718.md`: 24 VERIFIED, 2 UNVERIFIED (AC-007 routing per host, AC-019 isolasi port produksi), keduanya beralasan. Satu cacat ditemukan dan diperbaiki (`9ba1129`): default `--port` `browserd` menunjuk 9222, port browser produksi. Gerbang di tree yang sama dengan kode `9ba1129`: fmt rc 0, clippy rc 0 tanpa warning, `cargo test --workspace --no-fail-fast` 32 suite ok / 427 passed / 0 failed rc 0, `cargo xtask check` rc 0 |
+| 4 | §4 #4 Audit terpadu | ✅ Done | Audit 26 AC di `docs/prd/AUDIT-AC 041126-1718.md`: 24 VERIFIED, 2 UNVERIFIED (AC-007 routing per host, AC-019 isolasi port produksi), keduanya beralasan. Dua itu sudah ditutup di putaran berikutnya, jadi kini 26 VERIFIED, 0 UNVERIFIED. Satu cacat ditemukan dan diperbaiki (`9ba1129`): default `--port` `browserd` menunjuk 9222, port browser produksi. Gerbang di tree yang sama dengan kode `9ba1129`: fmt rc 0, clippy rc 0 tanpa warning, `cargo test --workspace --no-fail-fast` 32 suite ok / 427 passed / 0 failed rc 0, `cargo xtask check` rc 0 |
 
 ## Resume And Changes
 
-- 2026-11-04 06:31 — PRD dibuat dari percakapan 2–4 Nov 2026 dan bukti repo
+- 2026-11-04 06:31: PRD dibuat dari percakapan 2-4 Nov 2026 dan bukti repo
   (HEAD `f13fb01`, `max_tabs` sudah ditegakkan; browserd jalan di 9224 dengan
   `max_tabs = 6`; 9222 produksi tidak disentuh).
 - Bukti terukur yang dipakai di PRD: mesin kosong 26 MB PSS, 6 tab 187 MB PSS,
   `--single-process` 3 tab 522,8 MB lawan 858,8 MB, Firefox headless 896 MB idle
   tanpa `/json/version`, Lightpanda nol layout.
-- 2026-11-04 07:50 WIB — Milestone 1 selesai dan dibuktikan test live, bukan
+- 2026-11-04 07:50 WIB: Milestone 1 selesai dan dibuktikan test live, bukan
   klaim. Lima bug ditemukan justru oleh test itu sendiri, semuanya nyata:
   (1) axum menjawab `text/plain` sehingga Chromium membungkus fixture dalam
   `<pre>`; (2) `setAttribute` di dalam constructor custom element membuat
@@ -61,7 +61,7 @@ menyalin spesifikasi.
   sesudah `stop()`, dengan `Reaper` yang tetap membunuh group kalau assertion
   gagal di tengah jalan. Sebelum ini, run yang merah meninggalkan 15+ browser
   hantu dan memakan RAM sampai reboot.
-- 2026-11-04 08:05 WIB — Bukti di daemon yang **sedang jalan**, bukan cuma di
+- 2026-11-04 08:05 WIB: Bukti di daemon yang **sedang jalan**, bukan cuma di
   test: setelah `install -m755 target/debug/browserd ~/.opencrabs/bin/browserd`
   dan restart `opencrabs-browserd.service` (9224, produksi 9222 tidak disentuh),
   klien CDP biasa membuat tab baru lalu mendapat `typeof window.__oc ===
@@ -74,7 +74,7 @@ menyalin spesifikasi.
 - Yang **belum** terukur dan tidak diklaim: laju deteksi anti-bot pada host
   nyata, konsumsi `chrome_full` di xvfb, dan efektivitas lease tab.
 
-- 2026-11-04 16:39 WIB — Milestone 2 selesai dengan bukti, bukan klaim.
+- 2026-11-04 16:39 WIB: Milestone 2 selesai dengan bukti, bukan klaim.
   Tiga situs yang dulu gagal dibuka ulang lewat daemon 9224 dan hasilnya
   mengubah desain klasifikasi (detail di
   `docs/prd/BUKTI-BUKA-ULANG 041126-0857.md`): Google membalas **429** di
@@ -95,7 +95,7 @@ menyalin spesifikasi.
 - Yang **belum** terukur di milestone 2: efektivitas `stealth_hosts` per host,
   dan laju deteksi anti-bot pada host nyata selain tiga situs di atas.
 
-- 2026-11-04 11:54 WIB — Milestone 3 selesai, dan tiga dari empat jalurnya
+- 2026-11-04 11:54 WIB: Milestone 3 selesai, dan tiga dari empat jalurnya
   lahir dari kegagalan yang sama: daemon yang harus dimatikan untuk mengubah
   satu angka adalah daemon yang akan dimatikan pada waktu yang salah.
 - Lease menahan reap (AC-009, AC-012, AC-013). `lifecycle::lease` menyimpan
@@ -198,7 +198,9 @@ menyalin spesifikasi.
   di atas HEAD `7dffb6c`. Aturan statusnya satu, dan itu yang membuat angkanya
   bisa dipercaya: VERIFIED berarti ada perintah yang bisa dijalankan ulang
   orang lain dan lulus di gerbang itu; semua yang lain ditulis UNVERIFIED
-  dengan alasannya. Hasil: **24 VERIFIED, 2 UNVERIFIED**.
+  dengan alasannya. Hasil: **24 VERIFIED, 2 UNVERIFIED**. Keduanya sudah
+  ditutup setelah putaran itu, jadi angka terkini ada di bagian Routing host
+  dan Isolasi port produksi di bawah.
 - Dua yang tidak dinaikkan bukan karena kurang diperiksa, tapi karena
   buktinya memang belum ada. AC-007 (routing host ke mesin) logikanya lengkap
   dan teruji unit, tetapi nol pemanggil di luar `crates/policy/src/select.rs`;
@@ -304,8 +306,41 @@ menyalin spesifikasi.
   host. Kalau nanti dibutuhkan, jalurnya lewat parameter host eksplisit, bukan
   tebakan dari header.
 - Status audit berubah: AC-007 dari UNVERIFIED jadi VERIFIED dengan perintah
-  yang bisa dijalankan ulang. Sisa satu yang belum otomatis, AC-019 (isolasi
-  port produksi 9222), dan itu menunggu uji isolasi manual, bukan kode baru.
+  yang bisa dijalankan ulang.
+
+### Isolasi port produksi jadi uji otomatis (AC-019)
+
+- AC-019 satu-satunya yang tersisa UNVERIFIED, dan alasannya bukan kode hilang
+  tapi bukti yang cuma manual: di putaran sebelumnya isolasi diukur dengan
+  `/json/list` 9222 sebelum dan sesudah uji live, dicatat sebagai tabel di
+  dokumen audit, tanpa perintah yang bisa diulang orang lain.
+- Sekarang jadi `crates/browserd/tests/isolasi_port.rs`. Rantainya sama seperti
+  prosedur tangan: baca jumlah target 9222, nyalakan `browserd serve` di port
+  acak dengan profil sementara, buat satu tab sehingga mesin benar-benar lahir,
+  lalu baca ulang 9222 dan bandingkan. Port debug mesin dibaca dari
+  `DevToolsActivePort` yang mesin tulis sendiri, bukan dari angka yang diharap.
+- Satu aturan keras dipegang: 9222 hanya dibaca. Kalau browser produksi sedang
+  memakai port itu, browser tersebut tidak boleh diganggu, jadi yang
+  dibandingkan keadaannya, bukan isinya. Perubahan `None` menjadi `Some` tetap
+  tertangkap, karena daemon pengembangan yang menyerobot 9222 akan menyalakan
+  listener di sana.
+- Rantai `Resolved::resolve` dikunci duluan di tingkat unit, empat test di
+  `crates/browserd/src/daemon.rs`: bind bawaan mustahil berakhir `:9222`,
+  `[daemon]` tanpa `bind` tetap 9224, 9222 hanya tercapai lewat `bind` yang
+  ditulis operator, dan profil bawaan mesin ada di `.cache/opencrabs-browser`,
+  terpisah dari profil 9222. Test unit menahan regresi cepat; uji live menahan
+  regresi yang cuma kelihatan saat mesin sungguhan nyala.
+- Bukti: `cargo test -p browserd --lib daemon::tests` = 16 passed, 0 failed;
+  `cargo test -p browserd --test isolasi_port` = 1 passed, 0 failed, exit 0.
+  Uji live memakai `chrome-headless-shell` nyata, mesin dapat port 37107, bukan
+  9222, dan dilewati dengan pesan jelas kalau biner mesin tidak ada.
+- Gerbang penuh dijalankan di satu run (`cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo xtask check`,
+  `cargo test --workspace --no-fail-fast`): semuanya exit 0, 450 test passed, 0
+  failed, 0 panic, 34 suite 'test result: ok'. Tidak ada gerbang yang
+  dilonggarkan dan tidak ada allowed-warning baru.
+- Status audit berubah: AC-019 dari UNVERIFIED jadi VERIFIED. `docs/prd/AUDIT-AC`
+  sekarang 26 VERIFIED, 0 UNVERIFIED.
 
 ## AI Agent Rules
 
