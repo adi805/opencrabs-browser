@@ -16,17 +16,19 @@
 //! router **mustahil** menurut bentuknya. Akibatnya id yang tidak kita kenal
 //! bisa diteruskan tanpa risiko menutupi id router.
 //!
-//! Catatan jujur soal batas M4: pemilihan mesin otomatis per host belum ada di
-//! sini. Tanpa `openCrabsOptions`, pesan mendarat di mesin bawaan. Pemilihan
-//! berbasis `policy` baru punya arti setelah ada mesin dengan jenis berbeda
-//! (M5 `oxi`), karena `policy` memilih jenis, sedangkan peta ini memilih
-//! instance.
+//! Pemilihan mesin: `openCrabsOptions.engine` dari klien menang kalau ada, dan
+//! tanpa itu aturan host dari `policy` yang menentukan (lihat `mesin_untuk_host`).
+//! Aturan memilih **jenis** mesin, sedangkan peta ini memilih **instance**, jadi
+//! jenis diterjemahkan lewat `jenis_id`. Tanpa aturan yang berlaku, pesannya
+//! mendarat di mesin bawaan seperti sebelumnya.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::engines::{EnginePool, PEMISAH};
+use crate::{PemilihMesin, host_dari_url};
 
 /// Daemon menolak permintaan karena konfigurasi atau routing, bukan karena
 /// mesin. Pesannya wajib menyebut apa yang tersedia supaya bisa diperbaiki.
@@ -91,6 +93,13 @@ pub enum MuxError {
 
     #[error("mesin '{diminta}' tidak terpasang; yang ada: {tersedia}")]
     MesinTakAda { diminta: String, tersedia: String },
+
+    /// Aturan host menolak permintaan ini. Dipisah dari [`Self::MesinTakAda`]
+    /// bukan soal kode galat (keduanya `KODE_DITOLAK`) melainkan soal sebab:
+    /// yang harus diperbaiki ada di `[policy]`, bukan di nama mesin yang dikirim
+    /// klien.
+    #[error("routing host ditolak: {0}")]
+    Routing(String),
 }
 
 /// State satu koneksi klien.
@@ -101,6 +110,13 @@ pub enum MuxError {
 pub struct Peta {
     bawaan: String,
     semua: Vec<String>,
+    /// Aturan host ke mesin, kalau daemon menyambungkannya. `None` berarti
+    /// perilaku lama: semuanya mendarat di mesin bawaan.
+    pemilih: Option<Arc<dyn PemilihMesin>>,
+    /// Jenis mesin -> id instance pertama jenis itu, urut id. Ini yang
+    /// menerjemahkan keputusan `policy` (yang memilih **jenis**) jadi mesin yang
+    /// benar-benar ada (instance).
+    jenis_id: BTreeMap<String, String>,
     /// Id klien ke id mesin, per mesin. Kuncinya `(mesin, id_klien)` supaya satu
     /// id klien yang disiarkan ke semua mesin tetap dapat id berbeda di tiap
     /// mesin.
@@ -124,10 +140,21 @@ pub struct Peta {
 
 impl Peta {
     #[must_use]
-    pub fn baru(pool: &EnginePool) -> Self {
+    pub fn baru(pool: &EnginePool, pemilih: Option<Arc<dyn PemilihMesin>>) -> Self {
+        // Jenis -> instance pertama, urut id. Aturannya sengaja sama dengan
+        // `EnginePool::id_untuk_jenis`: dua jalur yang memilih instance berbeda
+        // untuk jenis yang sama adalah bug yang sulit dilihat.
+        let mut jenis_id: BTreeMap<String, String> = BTreeMap::new();
+        for (id, slot) in pool.slots() {
+            jenis_id
+                .entry(slot.kind().to_owned())
+                .or_insert_with(|| id.clone());
+        }
         Self {
             bawaan: pool.default_id().to_owned(),
             semua: pool.ids().cloned().collect(),
+            pemilih,
+            jenis_id,
             naik: HashMap::new(),
             turun: HashMap::new(),
             penghitung_naik: BTreeMap::new(),
@@ -206,7 +233,18 @@ impl Peta {
 
         // `Target.createTarget` adalah satu-satunya pesan yang memilih mesin.
         if method.as_deref() == Some("Target.createTarget") {
-            let mesin = self.pilih_mesin(opsi.engine.as_deref())?;
+            // Tanpa `openCrabsOptions.engine`, aturan `[policy.rules]` yang
+            // menentukan mesinnya. Host dibaca dari `params.url`, satu-satunya
+            // tempat host muncul di pesan ini.
+            let host = nilai
+                .get("params")
+                .and_then(|params| params.get("url"))
+                .and_then(Value::as_str)
+                .and_then(host_dari_url);
+            let mesin = match opsi.engine.as_deref() {
+                Some(diminta) => self.pilih_mesin(Some(diminta))?,
+                None => self.mesin_untuk_host(host.as_deref())?,
+            };
             if let Some(obj) = nilai.as_object_mut() {
                 self.pasang_id(obj, &mesin, id);
             }
@@ -452,6 +490,32 @@ impl Peta {
     }
 
     // ── pembantu ────────────────────────────────────────────────────────────
+
+    /// Mesin untuk sebuah host menurut aturan `policy`, atau mesin bawaan kalau
+    /// tidak ada aturan yang berlaku.
+    ///
+    /// Aturan yang **menolak** tidak diturunkan jadi mesin bawaan. Penolakan
+    /// biasanya berarti config menunjuk mesin yang tidak terpasang, dan
+    /// menggantinya diam-diam membuat tab muncul di mesin yang salah, jauh dari
+    /// penyebabnya.
+    fn mesin_untuk_host(&self, host: Option<&str>) -> Result<String, MuxError> {
+        let (Some(pemilih), Some(host)) = (self.pemilih.as_ref(), host) else {
+            return Ok(self.bawaan.clone());
+        };
+        match pemilih.jenis_untuk_host(host) {
+            Ok(None) => Ok(self.bawaan.clone()),
+            Ok(Some(keputusan)) => self.jenis_id.get(&keputusan.jenis).cloned().ok_or_else(|| {
+                MuxError::Routing(format!(
+                    "aturan {} memilih jenis {} tapi tidak ada instance jenis itu terpasang; \
+                         yang ada: {}",
+                    keputusan.aturan,
+                    keputusan.jenis,
+                    self.semua.join(", ")
+                ))
+            }),
+            Err(pesan) => Err(MuxError::Routing(pesan)),
+        }
+    }
 
     fn pilih_mesin(&self, diminta: Option<&str>) -> Result<String, MuxError> {
         match diminta {

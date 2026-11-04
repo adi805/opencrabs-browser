@@ -37,8 +37,9 @@ async fn upgrade_browser(ws: WebSocketUpgrade, State(state): State<Arc<ProxyStat
     if state.engines.is_multi() {
         let pool = state.engines.clone();
         let observer = state.observer.clone();
+        let pemilih = state.pemilih.clone();
         return ws.on_upgrade(move |socket| async move {
-            match crate::mux::proxy_multiplex(socket, pool, observer).await {
+            match crate::mux::proxy_multiplex(socket, pool, observer, pemilih).await {
                 Ok(stats) => tracing::info!(
                     to_engine = stats.to_engine,
                     from_engine = stats.from_engine,

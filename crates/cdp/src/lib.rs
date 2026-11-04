@@ -48,6 +48,32 @@ pub trait FrameObserver: Send + Sync {
     fn observe(&self, payload: &str);
 }
 
+/// Satu keputusan routing per host dari lapisan `policy`.
+///
+/// Yang dibawa cuma nama jenis mesin (`chrome-shell`, `chrome-full`, `oxi`) dan
+/// nama aturan yang menang: crate ini tidak tahu isi `[policy]`, dan tidak perlu
+/// tahu. Aturan yang menang ikut dikembalikan supaya pertanyaan "kenapa mesin
+/// ini" bisa dijawab di log tanpa membaca kode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingHost {
+    pub jenis: String,
+    pub aturan: String,
+}
+
+/// Pemilihan mesin per host, dan pemiliknya `policy`.
+///
+/// Trait ini ada supaya crate protokol tetap tidak menyimpan satu aturan pun:
+/// dia hanya bertanya "host ini jenis mesin apa". `Ok(None)` berarti tidak ada
+/// aturan yang berlaku, dan pemanggil memakai mesin bawaannya.
+///
+/// `Err` berarti aturan **menolak** permintaan itu (mis. host stealth sementara
+/// `chrome-full` tidak terpasang). Penolakan wajib sampai ke klien apa adanya;
+/// menggantinya dengan mesin bawaan adalah fallback senyap, dan itu dilarang di
+/// seluruh repo ini.
+pub trait PemilihMesin: Send + Sync {
+    fn jenis_untuk_host(&self, host: &str) -> Result<Option<RoutingHost>, String>;
+}
+
 /// Yang dibutuhkan lapisan protokol untuk melayani klien.
 ///
 /// `public_ws_url` adalah URL yang **kita** iklankan ke klien. URL milik mesin
@@ -60,6 +86,9 @@ pub struct ProxyState {
     /// `None` berarti tidak ada yang mengamati: perilaku persis sama dengan
     /// sebelum fitur ini ada.
     pub observer: Option<Arc<dyn FrameObserver>>,
+    /// Aturan host ke mesin dari `policy`. `None` berarti tidak ada routing
+    /// yang tersambung: perilaku persis sama dengan sebelum fitur ini ada.
+    pub pemilih: Option<Arc<dyn PemilihMesin>>,
 }
 
 impl ProxyState {
@@ -73,6 +102,7 @@ impl ProxyState {
             engines: pool,
             public_ws_url: public_ws_url.into(),
             observer: None,
+            pemilih: None,
         }
     }
 
@@ -126,6 +156,14 @@ impl ProxyState {
         self.observer = Some(observer);
         self
     }
+
+    /// Aturan host ke mesin. Tanpa ini semua permintaan mendarat di mesin
+    /// bawaan, persis seperti sebelum `policy` tersambung ke jalur nyata.
+    #[must_use]
+    pub fn with_pemilih(mut self, pemilih: Arc<dyn PemilihMesin>) -> Self {
+        self.pemilih = Some(pemilih);
+        self
+    }
 }
 
 /// Mesin yang sudah dipastikan hidup, plus slot pemiliknya.
@@ -171,4 +209,76 @@ impl Drop for SesiSlot {
 /// Router lengkap: discovery HTTP plus endpoint websocket.
 pub fn router(state: Arc<ProxyState>) -> Router {
     targets::discovery_router(Arc::clone(&state)).merge(passthrough::ws_router(state))
+}
+
+/// Host dari sebuah URL, untuk dicocokkan dengan `[policy.rules]`.
+///
+/// Sengaja tanpa parser URL: yang dibutuhkan cuma otoritas (`skema://` sampai
+/// `/`, `?`, atau `#`), dan aturan host selalu ditulis tanpa port maupun
+/// userinfo. Hasilnya huruf kecil tanpa titik di ujung, jadi `HTTP://Toko.Test./`
+/// menghadapi aturan yang sama dengan `http://toko.test/x`.
+///
+/// `None` untuk URL yang memang tidak punya host (`about:blank`, `data:`,
+/// `file:`). Itu berarti tidak ada yang dicocokkan, bukan host kosong yang bisa
+/// tidak sengaja cocok dengan aturan.
+#[must_use]
+pub fn host_dari_url(url: &str) -> Option<String> {
+    let sesudah_skema = url.split_once("://")?.1;
+    let otoritas = sesudah_skema
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let tanpa_userinfo = otoritas.rsplit_once('@').map_or(otoritas, |(_, host)| host);
+    // IPv6 ditulis dalam kurung siku (`[::1]:9224`); memotong di titik dua
+    // pertama akan mengubahnya jadi `[`.
+    let host = match tanpa_userinfo.strip_prefix('[') {
+        Some(sisa) => sisa.split_once(']').map_or(sisa, |(host, _)| host),
+        None => tanpa_userinfo
+            .split_once(':')
+            .map_or(tanpa_userinfo, |(host, _)| host),
+    };
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+#[cfg(test)]
+mod uji_host_dari_url {
+    use super::host_dari_url;
+
+    #[test]
+    fn mengambil_host_tanpa_skema_port_dan_userinfo() {
+        assert_eq!(
+            host_dari_url("http://toko.test/halaman?x=1"),
+            Some("toko.test".to_owned())
+        );
+        assert_eq!(
+            host_dari_url("https://Toko.Test:8443/"),
+            Some("toko.test".to_owned())
+        );
+        assert_eq!(
+            host_dari_url("http://user:rahasia@toko.test/x"),
+            Some("toko.test".to_owned())
+        );
+        assert_eq!(
+            host_dari_url("HTTP://toko.test./"),
+            Some("toko.test".to_owned())
+        );
+        assert_eq!(
+            host_dari_url("wss://toko.test"),
+            Some("toko.test".to_owned())
+        );
+        assert_eq!(
+            host_dari_url("http://[::1]:9224/json"),
+            Some("::1".to_owned())
+        );
+    }
+
+    #[test]
+    fn url_tanpa_host_bukan_host_kosong() {
+        assert_eq!(host_dari_url("about:blank"), None);
+        assert_eq!(host_dari_url("data:text/html,<p>x</p>"), None);
+        assert_eq!(host_dari_url("file:///tmp/x.html"), None);
+        assert_eq!(host_dari_url(""), None);
+        assert_eq!(host_dari_url("http://"), None);
+    }
 }

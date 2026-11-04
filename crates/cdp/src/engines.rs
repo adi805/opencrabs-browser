@@ -237,6 +237,24 @@ impl EnginePool {
         &self.default
     }
 
+    /// Id instance pertama yang jenisnya `jenis`.
+    ///
+    /// `policy` memilih **jenis** mesin (`chrome-shell`, `chrome-full`, `oxi`),
+    /// sedangkan lapisan protokol memilih **instance** (`kiri`, `kanan`). Fungsi
+    /// ini jembatan antara keduanya, dan sengaja memilih yang pertama dalam
+    /// urutan `BTreeMap`: dua instance sejenis tidak boleh bergantian tanpa
+    /// alasan yang bisa dibaca di log.
+    ///
+    /// `None` berarti tidak ada satu pun instance jenis itu terpasang. Pemanggil
+    /// wajib melaporkannya sebagai penolakan, bukan diam-diam memakai mesin lain.
+    #[must_use]
+    pub fn id_untuk_jenis(&self, jenis: &str) -> Option<&str> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.kind() == jenis)
+            .map(|(id, _)| id.as_str())
+    }
+
     pub fn ids(&self) -> impl Iterator<Item = &String> {
         self.slots.keys()
     }

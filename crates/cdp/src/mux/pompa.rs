@@ -64,9 +64,10 @@ pub async fn proxy_multiplex(
     client: WebSocket,
     pool: EnginePool,
     observer: Option<Arc<dyn FrameObserver>>,
+    pemilih: Option<Arc<dyn crate::PemilihMesin>>,
 ) -> Result<Stats, CdpError> {
     let (mut klien_tx, mut klien_rx) = client.split();
-    let mut peta = Peta::baru(&pool);
+    let mut peta = Peta::baru(&pool, pemilih);
     let mut stats = Stats::default();
 
     // Satu kanal masuk per mesin, plus satu kanal keluar bersama.

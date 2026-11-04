@@ -23,7 +23,7 @@ fn pool(ids: &[(&str, u16)], bawaan: &str) -> EnginePool {
 }
 
 fn dua() -> Peta {
-    Peta::baru(&pool(&[("a", 40001), ("b", 40002)], "a"))
+    Peta::baru(&pool(&[("a", 40001), ("b", 40002)], "a"), None)
 }
 
 /// Satu balasan `Perintah::Satu`, dipastikan bentuknya.
@@ -341,5 +341,145 @@ fn pesan_bukan_json_ditolak_bukan_ditelan() {
         peta.terjemahkan_klien("[1,2,3]")
             .expect_err("harus ditolak"),
         MuxError::BukanObjek
+    );
+}
+
+// ── AC-007: routing host ke mesin ───────────────────────────────────────────
+
+/// Pool dua instance dengan **jenis** berbeda, seperti daemon nyata yang
+/// menjalankan `chrome_shell` dan `chrome_full` bersamaan.
+fn pool_dua_jenis() -> EnginePool {
+    let mut slots = BTreeMap::new();
+    for (id, jenis, port) in [
+        ("shell", "chrome-shell", 40011_u16),
+        ("full", "chrome-full", 40012),
+    ] {
+        let engine: Arc<dyn Engine> = Arc::new(testing::FakeEngine::at_port(port));
+        slots.insert(
+            id.to_owned(),
+            Arc::new(engine::Slot::siap(
+                id,
+                jenis,
+                engine.spec().clone(),
+                Arc::new(engine::PenggerakShell),
+                Arc::clone(&engine),
+                engine::slot::ms_sekarang(),
+            )),
+        );
+    }
+    EnginePool::dari_slot("shell", slots).expect("pool sah")
+}
+
+/// Pemilih tetap: mengembalikan satu jenis, atau satu penolakan.
+struct PemilihUji {
+    jenis: Option<&'static str>,
+    tolak: Option<&'static str>,
+}
+
+impl PemilihUji {
+    fn jenis(jenis: &'static str) -> Arc<dyn crate::PemilihMesin> {
+        Arc::new(Self {
+            jenis: Some(jenis),
+            tolak: None,
+        })
+    }
+
+    fn tolak(pesan: &'static str) -> Arc<dyn crate::PemilihMesin> {
+        Arc::new(Self {
+            jenis: None,
+            tolak: Some(pesan),
+        })
+    }
+
+    fn tanpa_aturan() -> Arc<dyn crate::PemilihMesin> {
+        Arc::new(Self {
+            jenis: None,
+            tolak: None,
+        })
+    }
+}
+
+impl crate::PemilihMesin for PemilihUji {
+    fn jenis_untuk_host(&self, _host: &str) -> Result<Option<crate::RoutingHost>, String> {
+        if let Some(pesan) = self.tolak {
+            return Err(pesan.to_owned());
+        }
+        Ok(self.jenis.map(|jenis| crate::RoutingHost {
+            jenis: jenis.to_owned(),
+            aturan: "host_rule".to_owned(),
+        }))
+    }
+}
+
+/// `Target.createTarget` seperti yang dikirim klien: url + opsi opsional.
+fn buka(peta: &mut Peta, url: &str, mesin: Option<&str>) -> Result<String, MuxError> {
+    let mut params = json!({"url": url});
+    if let Some(mesin) = mesin {
+        params["openCrabsOptions"] = json!({"engine": mesin});
+    }
+    let pesan = json!({"id": 1, "method": "Target.createTarget", "params": params}).to_string();
+    Ok(satu(peta.terjemahkan_klien(&pesan)?).0)
+}
+
+#[test]
+fn host_beraturan_mendarat_di_instance_jenis_yang_ditunjuk() {
+    let pool = pool_dua_jenis();
+    let mut peta = Peta::baru(&pool, Some(PemilihUji::jenis("chrome-full")));
+    assert_eq!(
+        buka(&mut peta, "http://toko.test/halaman", None),
+        Ok("full".to_owned()),
+        "chrome-full yang dipilih aturan harus mendarat di instance jenis itu"
+    );
+}
+
+#[test]
+fn tanpa_aturan_host_mesin_bawaan_yang_dipakai() {
+    let pool = pool_dua_jenis();
+    let mut peta = Peta::baru(&pool, Some(PemilihUji::tanpa_aturan()));
+    assert_eq!(
+        buka(&mut peta, "http://lain.test/", None),
+        Ok("shell".to_owned())
+    );
+
+    // Url yang tidak punya host (about:blank) tidak boleh mengubah apa pun:
+    // tidak ada yang bisa dicocokkan aturan.
+    assert_eq!(buka(&mut peta, "about:blank", None), Ok("shell".to_owned()));
+}
+
+#[test]
+fn permintaan_eksplisit_menang_atas_aturan_host() {
+    let pool = pool_dua_jenis();
+    let mut peta = Peta::baru(&pool, Some(PemilihUji::jenis("chrome-full")));
+    assert_eq!(
+        buka(&mut peta, "http://toko.test/", Some("shell")),
+        Ok("shell".to_owned()),
+        "mesin yang disebut klien tidak boleh ditimpa aturan"
+    );
+}
+
+#[test]
+fn aturan_ke_jenis_yang_tidak_terpasang_ditolak_bukan_diganti() {
+    let pool = pool_dua_jenis();
+    let mut peta = Peta::baru(&pool, Some(PemilihUji::jenis("oxi")));
+    let err = buka(&mut peta, "http://toko.test/", None).expect_err("oxi tidak ada di pool");
+    let MuxError::Routing(pesan) = err else {
+        panic!("harus penolakan routing, dapat: {err:?}");
+    };
+    assert!(pesan.contains("oxi"), "sebut jenisnya: {pesan}");
+    assert!(pesan.contains("full, shell"), "sebut yang ada: {pesan}");
+}
+
+#[test]
+fn penolakan_aturan_diteruskan_apa_adanya() {
+    let pool = pool_dua_jenis();
+    let mut peta = Peta::baru(
+        &pool,
+        Some(PemilihUji::tolak("host stealth butuh chrome-full")),
+    );
+    let err =
+        buka(&mut peta, "http://challenges.cloudflare.com/", None).expect_err("aturan menolak");
+    assert_eq!(
+        err,
+        MuxError::Routing("host stealth butuh chrome-full".to_owned())
     );
 }
