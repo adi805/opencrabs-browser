@@ -102,7 +102,15 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     let bind = resolved.bind.clone();
     let public_ws_url = format!("ws://{bind}/devtools/browser/{}", session_token());
     let state = Arc::new(
-        ProxyState::pool(pool.clone(), public_ws_url).with_observer(wired.observer.clone()),
+        ProxyState::pool(pool.clone(), public_ws_url)
+            .with_observer(wired.observer.clone())
+            // Aturan `[policy]` disambungkan di sini, satu tempat. Katalognya
+            // dibangun dari jenis mesin yang terpasang, sama seperti
+            // `validasi_policy` di atas: kemampuan ditentukan jenis, bukan id.
+            .with_pemilih(crate::routing::PemilihPolicy::dari_jenis(
+                file.policy(),
+                &jenis,
+            )),
     );
     let kegagalan = Arc::new(metrics::Kegagalan::baru());
     let app: Router = cdp::router(state).merge(metrics::router(

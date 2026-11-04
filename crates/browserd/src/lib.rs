@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod penanam;
 pub mod reap;
 pub mod reload;
+pub mod routing;
 pub mod runtime;
 pub mod selftest;
 pub mod storecmd;
