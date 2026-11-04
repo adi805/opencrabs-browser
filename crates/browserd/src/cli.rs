@@ -159,9 +159,10 @@ pub struct SelftestArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct ServeArgs {
-    /// Port data plane untuk klien CDP. Sengaja 9224 saat pengembangan supaya
-    /// browser produksi di 9222 tidak tersentuh.
-    #[arg(long, default_value_t = 9222)]
+    /// Port data plane untuk klien CDP. Default 9224, bukan 9222: 9222 adalah
+    /// port browser produksi di host ini, dan daemon pengembangan tidak boleh
+    /// bisa menyentuhnya bahkan kalau dijalankan tanpa flag apa pun.
+    #[arg(long, default_value_t = 9224)]
     pub port: u16,
 
     /// Alamat bind lengkap, menimpa `--port` dan config. Mis. `127.0.0.1:9224`.
@@ -206,4 +207,32 @@ pub struct ServeArgs {
     /// Lepas dari terminal dan menulis log ke berkas.
     #[arg(long)]
     pub detach: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default `--port` harus 9224, bukan 9222.
+    ///
+    /// Alasan: `Resolved::resolve` memakai `args.port` sebagai pilihan terakhir
+    /// kalau tidak ada `--bind` dan tidak ada `[daemon] bind` di config. Jadi
+    /// `browserd serve` polos akan bind ke angka ini. Kalau angkanya 9222,
+    /// daemon pengembangan menyentuh port browser produksi.
+    #[test]
+    fn default_port_adalah_9224_bukan_port_produksi() {
+        let cli = Cli::try_parse_from(["browserd", "serve"]).expect("CLI polos harus valid");
+        let Command::Serve(args) = cli.command else {
+            panic!("subcommand polos harus Serve");
+        };
+        assert_eq!(args.port, 9224, "default --port harus port pengembangan");
+        assert_ne!(
+            args.port, 9222,
+            "9222 adalah browser produksi, jangan dijadikan default"
+        );
+        assert!(
+            args.bind.is_none(),
+            "tanpa --bind, port di atas yang dipakai"
+        );
+    }
 }
