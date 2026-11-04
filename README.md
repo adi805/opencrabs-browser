@@ -134,8 +134,9 @@ Aturan yang berlaku saat ada lebih dari satu mesin:
 |---|---|
 | `Target.getTargets` | digabung dari semua mesin |
 | `Target.setDiscoverTargets` | disiarkan ke semua mesin, jawaban pertama yang dikembalikan |
-| `Target.createTarget` tanpa `openCrabsOptions.engine` | dibuat di mesin bawaan |
+| `Target.createTarget` tanpa `openCrabsOptions.engine` | mengikuti aturan `[policy.rules]` untuk host di `params.url`; tanpa aturan yang berlaku, dibuat di mesin bawaan |
 | `openCrabsOptions.engine = "<id>"` | dibuat di mesin itu; parameter dibuang sebelum diteruskan |
+| aturan host menunjuk jenis mesin yang tidak terpasang | ditolak `-32000` yang menyebut jenis dan id yang ada, bukan diam-diam memakai bawaan |
 | id mesin yang tidak terpasang | ditolak `-32000` dengan daftar mesin yang ada, bukan diam-diam memakai bawaan |
 | `sessionId` yang tidak dikenal | ditolak `-32001`, tidak ditelan |
 | satu mesin mati | sesinya menerima `Target.detachedFromTarget`, klien tetap tersambung |
@@ -145,8 +146,8 @@ Aturan yang berlaku saat ada lebih dari satu mesin:
 
 **Batas yang jujur, belum dikerjakan:**
 
-- Pemilihan mesin per host belum otomatis. `policy` menentukan **jenis** mesin (`shell` atau penuh); pemetaan host ke **instance** tertentu belum ada, jadi semua permintaan yang tidak menyebut mesin berakhir di mesin bawaan.
-- `/json/new` selalu membuat tab di mesin bawaan. Endpoint itu tidak punya tempat untuk menyebut mesin; pakai `Target.createTarget` dengan `openCrabsOptions`.
+- Aturan host memilih **jenis** mesin (`chrome-shell`/`chrome-full`), dan instance yang dipakai adalah instance **pertama** jenis itu menurut urut id. Memilih instance tertentu (dua mesin jenis sama, satu di antaranya ditunjuk namanya) belum ada.
+- `/json/new` selalu membuat tab di mesin bawaan. Endpoint itu hanya punya query mentah untuk URL dan tidak punya tempat untuk menyebut mesin; pakai `Target.createTarget` dengan `openCrabsOptions`, atau andalkan aturan host yang berlaku di jalur itu.
 - Probe handoff (port kontrol) masih menembak mesin bawaan saja. Kalau tantangan muncul di halaman mesin lain, probe-nya tidak melihat halaman itu; yang dilaporkan adalah apa yang ada di mesin bawaan.
 - Satu klien websocket berbicara ke semua mesin lewat satu antrean per mesin (256 pesan). Kalau antrean penuh, perintah ditolak dengan galat, bukan dibuang diam-diam.
 

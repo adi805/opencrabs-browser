@@ -5,7 +5,7 @@ prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
 status: in-progress
 current_milestone: 4
 total_milestones: 4
-last_updated: "2026-11-04 18:04"
+last_updated: "2026-11-04 20:17"
 ---
 
 # OpenCrabs Browser Progress
@@ -22,9 +22,9 @@ menyalin spesifikasi.
 - Active milestone / next action: milestone 1 (mata dan tangan), milestone 2
   (klasifikasi kegagalan + diagnostik), milestone 3 (ketahanan sesi + mesin),
   dan milestone 4 (audit terpadu) sudah **Done**. Audit 26 AC:
-  **24 VERIFIED, 2 UNVERIFIED** dengan alasan tertulis, gerbang penuh hijau.
-  Berikutnya: menutup AC-007 (routing host ke mesin) dan mengotomatiskan
-  AC-019, keduanya belum ada bukti otomatis.
+  **25 VERIFIED, 1 UNVERIFIED** dengan alasan tertulis, gerbang penuh hijau.
+  AC-007 (routing host ke mesin) sudah ditutup dengan test integrasi; sisa
+  mengotomatiskan AC-019 (isolasi port produksi 9222).
 - Otoritas build: owner memberi izin eksekusi penuh 3 November 2026.
 - Required unresolved input: tiga keputusan owner di PRD §2 Review Focus
   (batas anti-bot, tab paralel, `chrome_full`) mempengaruhi FR-001/FR-006/FR-004.
@@ -271,6 +271,41 @@ menyalin spesifikasi.
   telat). Angka itu dikurung dari dua sisi: jauh di atas latensi localhost dan
   jauh di bawah tick reap 5 detik, jadi tidak ada reap-terlalu-cepat yang bisa
   lolos lewat celah itu.
+
+### Routing host ke mesin tersambung di jalur nyata (AC-007)
+
+- Temuan awalnya bukan bug kode, tapi pemanggil yang hilang: `policy::select`,
+  `rule_for`, dan `host_matches` di `crates/policy/src/select.rs` nol pemanggil
+  di luar berkasnya sendiri, dan pembuatan target selalu jatuh ke mesin bawaan.
+  Logika aturannya benar, tapi tidak ada satu pun jalur nyata yang membacanya.
+- Tiga sambungan dipasang, satu per lapisan. Di `policy` ditambah
+  `select_untuk_host(host, &PolicySection, &Catalog)` yang mengembalikan
+  `Ok(None)` kalau tidak ada aturan yang cocok, plus 4 test unit. Di `cdp`
+  ditambah kontrak `PemilihMesin` dan `host_dari_url`, lalu cabang
+  `Target.createTarget` di `crates/cdp/src/mux/peta.rs` membaca aturan saat
+  klien tidak menyebut mesin eksplisit. Di `browserd` ada
+  `crates/browserd/src/routing.rs` berisi `PemilihPolicy` yang membungkus
+  `PolicySection` + katalog mesin, dan `crates/browserd/src/daemon.rs`
+  menyambungkannya lewat `ProxyState::pool(..).with_observer(..).with_pemilih(..)`.
+- Tiga sifat sengaja dipertahankan karena itu inti AC-007. Permintaan eksplisit
+  klien (`openCrabsOptions.engine`) menang atas aturan host; jenis yang dipilih
+  aturan tapi tidak terpasang dijawab `-32000` yang menyebut jenisnya, bukan
+  diam-diam diganti mesin bawaan; dan aturan yang menang dicatat lewat
+  `tracing::info!` supaya bisa dibaca dari log, bukan cuma benar di test.
+- Buktinya di dua tingkat. `cargo test -p browserd --test routing_host` = 4
+  passed, jalan lewat proxy axum nyata dengan dua mesin websocket palsu beda
+  jenis: aturan `toko.test -> chrome-full` mendarat di instance `full`,
+  permintaan eksplisit mendarat di mesin yang diminta klien, jenis tak terpasang
+  dijawab `-32000`, dan nol aturan memakai mesin bawaan. Test unit di
+  `crates/cdp/src/mux/peta/uji.rs` mengunci jalur penolakan dan jalur penugasan
+  di tingkat mux tanpa perlu soket.
+- Satu kemungkinan yang sengaja tidak ditutup: `/json/new` tetap selalu memakai
+  mesin bawaan, karena endpoint itu tidak membawa URL yang bisa dipetakan ke
+  host. Kalau nanti dibutuhkan, jalurnya lewat parameter host eksplisit, bukan
+  tebakan dari header.
+- Status audit berubah: AC-007 dari UNVERIFIED jadi VERIFIED dengan perintah
+  yang bisa dijalankan ulang. Sisa satu yang belum otomatis, AC-019 (isolasi
+  port produksi 9222), dan itu menunggu uji isolasi manual, bukan kode baru.
 
 ## AI Agent Rules
 
