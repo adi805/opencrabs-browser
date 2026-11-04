@@ -3,9 +3,9 @@ document_type: project-progress
 project: "OpenCrabs Browser — mesin buka-web"
 prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
 status: draft
-current_milestone: 0
+current_milestone: 2
 total_milestones: 4
-last_updated: "2026-11-04 06:31"
+last_updated: "2026-11-04 16:39"
 ---
 
 # OpenCrabs Browser Progress
@@ -19,9 +19,9 @@ menyalin spesifikasi.
 - PRD version: 0.1.0 (draft)
 - Execution mode: native (belum ada build yang diminta untuk requirement baru)
 - Build authority: **belum ada**. PRD ini spesifikasi, bukan izin membangun.
-- Active milestone / next action: milestone 1 (mata dan tangan) sudah **Done**.
-  Berikutnya milestone 2: klasifikasi kegagalan buka-web + diagnostik, lalu
-  milestone 3 (ketahanan sesi) dan 4 (audit terpadu).
+- Active milestone / next action: milestone 1 (mata dan tangan) dan milestone 2
+  (klasifikasi kegagalan + diagnostik) sudah **Done**, keduanya dibuktikan test
+  live. Berikutnya milestone 3 (ketahanan sesi) lalu 4 (audit terpadu).
 - Otoritas build: owner memberi izin eksekusi penuh 3 November 2026.
 - Required unresolved input: tiga keputusan owner di PRD §2 Review Focus
   (batas anti-bot, tab paralel, `chrome_full`) mempengaruhi FR-001/FR-006/FR-004.
@@ -31,7 +31,7 @@ menyalin spesifikasi.
 | # | PRD milestone reference | Status | Current evidence / remaining gap |
 |---|---|---|---|
 | 1 | §4 #1 Mata dan tangan | ✅ Done | Runtime `oc-mata.js` + `oc-tangan.js` disuntik ke setiap tab baru (`Page.addScriptToEvaluateOnNewDocument`), dan `crates/browserd/tests/mata_tangan.rs` membuktikan di mesin sungguhan: 14 kotak centang custom diklik sampai status halaman berubah, isi shadow DOM `closed` dan iframe se-asal terbaca, klik yang tertutup overlay dilaporkan gagal tanpa mengubah halaman. `cargo test -p browserd --test mata_tangan` = 2 passed |
-| 2 | §4 #2 Diagnostik + eskalasi | ⬜ Not Started | `policy.stealth_hosts` sudah dibaca tapi pemetaan host→instance belum ada; kegagalan buka-web belum pernah diklasifikasi |
+| 2 | §4 #2 Diagnostik + eskalasi | ✅ Done | `klasifikasi.rs` (6 kategori, bukti wajib, 12 test), `artefak.rs` (4 berkas + kuota, 6 test), `eskalasi.rs` (tunggu → ulang backoff maks 2 → ganti mesin → handoff, 10 test), routing host→mesin + `validasi()` aturan saat start, metrik `browser_open_failures_total{kategori}`. `crates/browserd/tests/diagnostik.rs` membuktikan di mesin sungguhan: normal → `Terbuka`/200, 403 bertanda tantangan → `BlokAntiBot`, 2FA → `ButuhManusia`, port mati → `Jaringan`. `cargo test -p browserd --test diagnostik` = 1 passed |
 | 3 | §4 #3 Ketahanan sesi + mesin | ⬜ Not Started | Keadaan awal terukur: `idle_reap_secs = 60` mematikan mesin tanpa klien, `max_tabs` dibaca saat start sehingga ubah angka = restart |
 | 4 | §4 #4 Audit terpadu | ⬜ Not Started | Gate yang sudah ada: `cargo xtask check` exit 0 di HEAD `f13fb01` |
 
@@ -70,6 +70,27 @@ menyalin spesifikasi.
   `cargo test -p browserd --lib` 70 passed.
 - Yang **belum** terukur dan tidak diklaim: laju deteksi anti-bot pada host
   nyata, konsumsi `chrome_full` di xvfb, dan efektivitas lease tab.
+
+- 2026-11-04 16:39 WIB — Milestone 2 selesai dengan bukti, bukan klaim.
+  Tiga situs yang dulu gagal dibuka ulang lewat daemon 9224 dan hasilnya
+  mengubah desain klasifikasi (detail di
+  `docs/prd/BUKTI-BUKA-ULANG 041126-0857.md`): Google membalas **429** di
+  `/sorry/index` dengan teks halaman kosong sehingga status + pola URL + frame
+  reCAPTCHA yang jadi bukti, `nowsecure.nl` memasang hCaptcha tanpa satu pun
+  event dokumen karena tab lahir sudah membawa URL (navigasi terjadi sebelum
+  `Network.enable`), dan host mati mendarat di `chrome-error://chromewebdata/`
+  yang ternyata bukti jaringan paling kuat.
+- Kode yang lahir dari bukti itu: `klasifikasi.rs` (6 kategori, `Bukti` wajib
+  membawa penyebab dan minimal satu kenyataan pendukung, 12 test),
+  `artefak.rs` (4 berkas per kegagalan plus kuota 20 percobaan / 64 MB, menolak
+  menulis di dalam work tree, 6 test), `eskalasi.rs` (tunggu jaringan tenang →
+  ulang dengan backoff maksimal 2 → ganti mesin → handoff, berhenti di langkah
+  pertama yang berhasil, 10 test), serta `validasi()` di `policy::select` yang
+  menolak aturan default ke mesin yang tidak terpasang.
+- Angka gerbang terakhir: `cargo xtask check` → fmt ok, clippy ok, test ok;
+  `cargo test --workspace` = 15 suite, 0 failed.
+- Yang **belum** terukur di milestone 2: efektivitas `stealth_hosts` per host,
+  dan laju deteksi anti-bot pada host nyata selain tiga situs di atas.
 
 ## AI Agent Rules
 
