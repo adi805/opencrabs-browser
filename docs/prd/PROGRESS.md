@@ -58,6 +58,14 @@ menyalin spesifikasi.
   sesudah `stop()`, dengan `Reaper` yang tetap membunuh group kalau assertion
   gagal di tengah jalan. Sebelum ini, run yang merah meninggalkan 15+ browser
   hantu dan memakan RAM sampai reboot.
+- 2026-11-04 08:05 WIB — Bukti di daemon yang **sedang jalan**, bukan cuma di
+  test: setelah `install -m755 target/debug/browserd ~/.opencrabs/bin/browserd`
+  dan restart `opencrabs-browserd.service` (9224, produksi 9222 tidak disentuh),
+  klien CDP biasa membuat tab baru lalu mendapat `typeof window.__oc ===
+  "object"`. `__oc.mata()` melihat tombolnya (`peran:"button"`, kotak 43x21,
+  `asal:"dom"`), dan `__oc.klik({nama:'Halo'})` menjawab `berubah` dengan jalur
+  `klik-native` sementara teks tombol di halaman benar benar menjadi
+  "sudah diklik".
 - Angka bukti: `cargo test -p browserd --test mata_tangan` 2 passed;
   `cargo test -p browserd --lib` 70 passed.
 - Yang **belum** terukur dan tidak diklaim: laju deteksi anti-bot pada host
