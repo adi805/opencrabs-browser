@@ -178,12 +178,18 @@ async fn evaluasi(sesi: &mut Sesi, sesi_id: &str, ekspresi: &str) -> Value {
     hasil["result"]["value"].clone()
 }
 
+mod common;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn mata_dan_tangan_bekerja_di_halaman_nyata() {
     let Some(binary) = discover_shell() else {
         eprintln!("dilewati: chrome-headless-shell tidak ditemukan di mesin ini");
         return;
     };
+    // Uji live diserialkan supaya tidak berebut CPU dengan uji live lain yang
+    // berjalan paralel. Alasan lengkapnya di `tests/common/mod.rs`.
+    let _kunci = common::kunci_live("mata_tangan");
+
     let profil = profil_sementara("utama");
     let spec = LaunchSpec::new(binary, profil.0.clone());
     let engine = ShellEngine::launch(spec, 20_000).expect("mesin harus siap dalam 20 detik");

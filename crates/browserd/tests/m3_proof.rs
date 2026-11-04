@@ -131,6 +131,8 @@ fn token_dari(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+mod common;
+
 #[test]
 fn alur_tantangan_sampai_handoff_dijawab() {
     let Some(biner) = biner_mesin() else {
@@ -140,6 +142,10 @@ fn alur_tantangan_sampai_handoff_dijawab() {
         );
         return;
     };
+
+    // Uji live diserialkan supaya tidak berebut CPU dengan uji live lain yang
+    // berjalan paralel. Alasan lengkapnya di `tests/common/mod.rs`.
+    let _kunci = common::kunci_live("m3_proof");
 
     let dir = direktori_uji();
     let control_port = port_kosong();

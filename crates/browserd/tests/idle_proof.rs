@@ -192,6 +192,8 @@ fn evaluasi(url: &str, ekspresi: &str) -> Option<Value> {
     })
 }
 
+mod common;
+
 #[test]
 fn pss_kembali_ke_baseline_lalu_mesin_hidup_lagi() {
     let Some(biner) = biner_mesin() else {
@@ -201,6 +203,10 @@ fn pss_kembali_ke_baseline_lalu_mesin_hidup_lagi() {
         );
         return;
     };
+
+    // Uji live diserialkan supaya tidak berebut CPU dengan uji live lain yang
+    // berjalan paralel. Alasan lengkapnya di `tests/common/mod.rs`.
+    let _kunci = common::kunci_live("idle_proof");
 
     let dir = direktori_uji();
     let cdp_port = port_kosong();

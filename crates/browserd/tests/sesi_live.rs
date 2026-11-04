@@ -38,6 +38,11 @@ use serde_json::{Value, json};
 /// sedang sibuk bisa jauh lebih lambat dari dugaan.
 const BATAS: Duration = Duration::from_secs(120);
 
+/// Batas satu balasan CDP. Terpisah dari [`BATAS`] karena artinya lain: `BATAS`
+/// menunggu keadaan yang berubah (handoff muncul, daemon siap), sedangkan ini
+/// menunggu satu perintah dijawab mesin yang mungkin masih lahir.
+const BATAS_PERINTAH: Duration = Duration::from_secs(60);
+
 /// TTL handoff yang dijanjikan `control::registry::HOLD_SECS`.
 ///
 /// Diperiksa sebagai selisih waktu, bukan sebagai konstanta yang diimpor:
@@ -521,10 +526,26 @@ async fn panggil(
         .await
         .ok()?;
     loop {
-        let pesan = tokio::time::timeout(Duration::from_secs(15), baca.next())
-            .await
-            .ok()??
-            .ok()?;
+        // Batas per perintah sengaja longgar: `Target.createTarget` ikut
+        // menunggu proses mesin lahir, dan di host yang sedang menjalankan
+        // beberapa Chromium sekaligus itu bisa jauh lebih lama daripada satu
+        // balasan protokol biasa. Batas yang terlalu ketat di sini bukan
+        // menemukan bug, cuma memindahkan beban host ke hasil uji.
+        let pesan = match tokio::time::timeout(BATAS_PERINTAH, baca.next()).await {
+            Ok(Some(Ok(pesan))) => pesan,
+            Ok(Some(Err(galat))) => {
+                eprintln!("CDP {method} (id {id}): soket gagal: {galat}");
+                return None;
+            }
+            Ok(None) => {
+                eprintln!("CDP {method} (id {id}): soket ditutup sebelum dijawab");
+                return None;
+            }
+            Err(_) => {
+                eprintln!("CDP {method} (id {id}): tidak dijawab dalam {BATAS_PERINTAH:?}");
+                return None;
+            }
+        };
         let Message::Text(teks) = pesan else { continue };
         let nilai: Value = serde_json::from_str(teks.as_str()).ok()?;
         if nilai.get("id") == Some(&json!(id)) {
@@ -541,12 +562,18 @@ fn lewati(tag: &str) -> bool {
     true
 }
 
+mod common;
+
 #[test]
 fn handoff_dijawab_melanjutkan_tab_yang_sama() {
     let Some(biner) = biner_mesin() else {
         lewati("handoff_dijawab_melanjutkan_tab_yang_sama");
         return;
     };
+    // Uji live diserialkan supaya tidak berebut CPU dengan uji live lain yang
+    // berjalan paralel. Alasan lengkapnya di `tests/common/mod.rs`.
+    let _kunci = common::kunci_live("sesi_live::jawab");
+
     let dir = direktori_uji("jawab");
     let (fixture_port, _fixture) = server_tantangan();
     let daemon = Daemon::nyalakan(&dir, &biner, 4);
@@ -671,6 +698,8 @@ fn handoff_dibatalkan_melepas_tab_dan_mesin_siap_lagi() {
         lewati("handoff_dibatalkan_melepas_tab_dan_mesin_siap_lagi");
         return;
     };
+    let _kunci = common::kunci_live("sesi_live::batal");
+
     let dir = direktori_uji("batal");
     let (fixture_port, _fixture) = server_tantangan();
     let daemon = Daemon::nyalakan(&dir, &biner, 4);
@@ -731,6 +760,8 @@ fn sighup_mengubah_batas_tab_tanpa_restart() {
         lewati("sighup_mengubah_batas_tab_tanpa_restart");
         return;
     };
+    let _kunci = common::kunci_live("sesi_live::sighup");
+
     let dir = direktori_uji("sighup");
     let mut daemon = Daemon::nyalakan(&dir, &biner, 3);
     let pid = daemon.child.id();
@@ -793,6 +824,8 @@ fn config_rusak_saat_reload_mempertahankan_batas_lama() {
         lewati("config_rusak_saat_reload_mempertahankan_batas_lama");
         return;
     };
+    let _kunci = common::kunci_live("sesi_live::rusak");
+
     let dir = direktori_uji("rusak");
     let mut daemon = Daemon::nyalakan(&dir, &biner, 1);
 

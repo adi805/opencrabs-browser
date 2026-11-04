@@ -465,6 +465,8 @@ fn tracing_langkah(langkah: &browserd::eskalasi::Langkah, kategori: Kategori) {
     eprintln!("eskalasi {}: {}", kategori, langkah.alasan(kategori));
 }
 
+mod common;
+
 #[test]
 fn tiga_halaman_tiga_kategori_dan_artefak() {
     let Some(biner) = biner_mesin() else {
@@ -474,6 +476,10 @@ fn tiga_halaman_tiga_kategori_dan_artefak() {
         );
         return;
     };
+
+    // Uji live diserialkan supaya tidak berebut CPU dengan uji live lain yang
+    // berjalan paralel. Alasan lengkapnya di `tests/common/mod.rs`.
+    let _kunci = common::kunci_live("diagnostik");
 
     let dir = direktori_uji();
     let cdp_port = port_kosong();

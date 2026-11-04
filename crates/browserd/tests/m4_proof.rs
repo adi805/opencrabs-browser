@@ -282,6 +282,31 @@ async fn evaluasi(tulis: &mut Tulis, baca: &mut Baca, id: i64, ekspresi: &str) -
         .map(str::to_owned)
 }
 
+/// Menunggu judul dokumen sampai nilainya diharapkan.
+///
+/// `Page.frameNavigated` datang saat navigasi **commit**, bukan saat dokumen
+/// selesai diparse: `document.title` masih kosong untuk sesaat. Membaca sekali
+/// membuat uji ini gagal hanya ketika host sedang sibuk (run workspace penuh),
+/// dan kegagalan yang bergantung pada beban adalah kegagalan yang tidak
+/// membuktikan apa pun. Batas waktunya tetap ada supaya judul yang tidak pernah
+/// muncul tetap menggagalkan uji, bukan menggantung.
+async fn tunggu_judul(tulis: &mut Tulis, baca: &mut Baca, id: i64, harap: &str) -> String {
+    let batas = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut terakhir = String::new();
+    let mut urutan = id;
+    while std::time::Instant::now() < batas {
+        if let Some(nilai) = evaluasi(tulis, baca, urutan, "document.title").await {
+            terakhir = nilai;
+            if terakhir == harap {
+                return terakhir;
+            }
+        }
+        urutan += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    terakhir
+}
+
 fn tulis_config(dir: &Path, biner: &Path, cdp_port: u16, control_port: u16) -> PathBuf {
     let config = dir.join("browser-daemon.toml");
     let isi = format!(
@@ -310,6 +335,8 @@ fn tulis_config(dir: &Path, biner: &Path, cdp_port: u16, control_port: u16) -> P
     config
 }
 
+mod common;
+
 #[test]
 fn dua_mesin_nyata_tidak_saling_mengganggu() {
     let Some(biner) = biner_mesin() else {
@@ -319,6 +346,12 @@ fn dua_mesin_nyata_tidak_saling_mengganggu() {
         );
         return;
     };
+
+    // Uji live diserialkan supaya tidak berebut CPU dengan uji live lain yang
+    // berjalan paralel. Alasan lengkapnya di `tests/common/mod.rs`. Flake yang
+    // diperbaiki: `Page.enable` sempat tidak dijawab sampai 90 detik ketika
+    // beberapa Chromium lahir bersamaan.
+    let _kunci = common::kunci_live("m4_proof");
 
     let dir = direktori_uji();
     let cdp_port = port_kosong();
@@ -457,13 +490,9 @@ fn dua_mesin_nyata_tidak_saling_mengganggu() {
 
             // Bukti isi: tiap tab memuat judul fixture-nya sendiri, bukan
             // judul tetangganya.
-            let judul_kiri = evaluasi(&mut tk, &mut bk, 51, "document.title")
-                .await
-                .expect("judul tab kiri");
+            let judul_kiri = tunggu_judul(&mut tk, &mut bk, 51, "FIXTURE-KIRI").await;
             assert_eq!(judul_kiri, "FIXTURE-KIRI", "tab kiri memuat halaman lain");
-            let judul_kanan = evaluasi(&mut tn, &mut bn, 61, "document.title")
-                .await
-                .expect("judul tab kanan");
+            let judul_kanan = tunggu_judul(&mut tn, &mut bn, 61, "FIXTURE-KANAN").await;
             assert_eq!(
                 judul_kanan, "FIXTURE-KANAN",
                 "tab kanan memuat halaman lain"
@@ -484,6 +513,14 @@ fn dua_mesin_nyata_tidak_saling_mengganggu() {
     });
 
     buang(&mut daemon);
+    // Kegagalan yang membuang log daemonnya adalah kegagalan yang tidak bisa
+    // dijelaskan. Log disalin dulu ke path tetap sebelum direktori uji (yang
+    // memuat profil Chromium besar) dibersihkan.
+    if hasil.is_err()
+        && let Ok(isi) = std::fs::read_to_string(dir.join("daemon.log"))
+    {
+        let _ = std::fs::write("/tmp/m4_proof_daemon_gagal.log", isi);
+    }
     // `OCB_KEEP=1` menahan direktori uji untuk diperiksa setelah lulus; bawaan
     // bersih supaya /tmp tidak menumpuk profil Chromium tiap run.
     if std::env::var("OCB_KEEP").is_err() {
