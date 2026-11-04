@@ -51,6 +51,20 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         .map_err(|err| anyhow::anyhow!("konfigurasi mesin tidak sah: {err}"))?
         .dengan_batas_tab(batas_tab(&resolved.machines));
 
+    // Aturan `[policy]` diperiksa terhadap mesin yang benar-benar terpasang
+    // SEBELUM daemon melayani. Aturan yang menunjuk mesin hilang adalah salah
+    // tulis config, dan salah tulis config harus gagal di sini dengan nama
+    // mesinnya, bukan nanti di satu host yang kebetulan cocok.
+    // Katalog dibangun dari JENIS mesin, bukan id-nya: id dipilih operator dan
+    // bebas (`kiri`, `kanan`), sedangkan yang menentukan kemampuan adalah
+    // jenisnya. Memakai id akan menolak config yang benar hanya karena mesinnya
+    // diberi nama lain.
+    let jenis = pool
+        .slots()
+        .map(|(_, slot)| slot.kind().to_owned())
+        .collect::<Vec<_>>();
+    validasi_policy(&file, &jenis)?;
+
     // Penanam dijalankan untuk SETIAP mesin, bukan hanya mesin bawaan. Klien
     // yang diarahkan ke mesin lain lewat policy harus mendapat mata dan tangan
     // yang sama; menyuntik satu mesin saja akan membuat kemampuan bergantung
@@ -902,6 +916,30 @@ fn find_setsid() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Tolak start kalau `[policy]` menunjuk mesin yang tidak terpasang.
+///
+/// Semua pelanggaran dilaporkan sekaligus: operator yang salah menulis tiga
+/// aturan cukup satu kali memperbaiki.
+fn validasi_policy(file: &FileConfig, terpasang: &[String]) -> Result<()> {
+    // `terpasang` berisi JENIS mesin yang hidup (mis. `shell`, `full`), bukan id.
+    let katalog = policy::Catalog::dari_mesin(terpasang.iter().map(String::as_str));
+    let aturan = file.policy();
+    match aturan.validasi(&katalog) {
+        Ok(()) => Ok(()),
+        Err(salah) => {
+            let daftar = salah
+                .iter()
+                .map(|satu| format!("  - {satu}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "[policy] tidak sah untuk mesin yang terpasang ({}):\n{daftar}",
+                terpasang.join(", ")
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1090,5 +1128,34 @@ binary = "/abs/shell"
     #[test]
     fn durasi_graceful_tidak_nol() {
         assert!(Duration::from_secs(1).as_secs() > 0);
+    }
+
+    #[test]
+    fn policy_config_ditolak_saat_start_dengan_nama_mesin() {
+        // Jalur yang benar-benar dipanggil daemon sebelum bind: aturan yang
+        // menunjuk mesin hilang harus menghentikan start, dan pesannya memuat
+        // nama mesin yang kurang.
+        let file: FileConfig = toml::from_str(
+            "[policy]\ndefault = \"chrome-shell\"\n[policy.rules]\n\"shop.example\" = \"chrome-full\"\n",
+        )
+        .expect("harus bisa diparse");
+
+        let err = validasi_policy(&file, &["chrome-shell".to_owned()])
+            .expect_err("chrome-full tidak terpasang");
+        let pesan = format!("{err:#}");
+        assert!(pesan.contains("chrome-full"), "{pesan}");
+        assert!(
+            pesan.contains("chrome-shell"),
+            "pesan harus menyebut mesin yang ada: {pesan}"
+        );
+
+        // Begitu chrome-full terpasang, start lolos.
+        assert!(
+            validasi_policy(
+                &file,
+                &["chrome-shell".to_owned(), "chrome-full".to_owned()]
+            )
+            .is_ok()
+        );
     }
 }

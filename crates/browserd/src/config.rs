@@ -354,6 +354,48 @@ default = "shell"
     }
 
     #[test]
+    fn policy_config_menolak_aturan_ke_mesin_yang_tidak_terpasang() {
+        // AC-008 pada tingkat config: yang salah dibaca dari berkas, dan
+        // pesannya harus menyebut mesin yang hilang supaya bisa dicari.
+        let text = r#"
+[policy]
+default = "shell"
+
+[policy.rules]
+"shop.example" = "chrome-full"
+"#;
+        let config: FileConfig = toml::from_str(text).expect("harus bisa diparse");
+        let katalog = policy::Catalog::dari_mesin(["chrome-shell"]);
+
+        let salah = config
+            .policy()
+            .validasi(&katalog)
+            .expect_err("chrome-full tidak terpasang");
+        let pesan = salah
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        assert!(pesan.contains("chrome-full"), "{pesan}");
+        assert!(
+            pesan.contains("shop.example") || pesan.contains("host_rule"),
+            "{pesan}"
+        );
+
+        // Begitu mesinnya ada di katalog, aturan yang sama sah: yang ditolak
+        // adalah mesin yang hilang, bukan aturannya.
+        assert!(
+            config
+                .policy()
+                .validasi(&policy::Catalog::dari_mesin([
+                    "chrome-shell",
+                    "chrome-full"
+                ]))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn bawaan_kontrol_loopback() {
         let config: FileConfig = toml::from_str("").expect("harus bisa diparse");
         assert_eq!(config.control_bind(), "127.0.0.1:9223");

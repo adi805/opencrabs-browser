@@ -121,6 +121,38 @@ impl Catalog {
     }
 }
 
+impl Catalog {
+    /// Katalog dari daftar mesin yang **benar-benar terpasang** di host ini.
+    ///
+    /// Kemampuan diisi dari apa yang sudah diuji untuk tiap jenis mesin, bukan
+    /// dari harapan: `chrome-headless-shell` lolos uji layout, script, cookie,
+    /// dan input di milestone 1. Jenis mesin yang tidak ada di daftar berarti
+    /// tidak terpasang (`None`), dan itu yang membuat aturan config yang
+    /// menunjuk mesin hilang bisa ditolak saat start, bukan saat klien pertama
+    /// datang.
+    #[must_use]
+    pub fn dari_mesin<'a>(ids: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut katalog = Self::default();
+        for id in ids {
+            let Some(kind) = EngineKind::parse(id) else {
+                continue;
+            };
+            let caps = Capabilities {
+                layout: true,
+                script: true,
+                cookies: true,
+                input: true,
+            };
+            match kind {
+                EngineKind::Shell => katalog.shell = Some(caps),
+                EngineKind::Full => katalog.full = Some(caps),
+                EngineKind::Oxi => katalog.oxi = Some(caps),
+            }
+        }
+        katalog
+    }
+}
+
 /// Satu permintaan yang butuh mesin.
 #[derive(Debug, Clone, Default)]
 pub struct Request {
@@ -274,6 +306,63 @@ impl PolicySection {
         self.stealth_hosts
             .iter()
             .any(|pattern| host_matches(pattern, host))
+    }
+}
+
+impl PolicySection {
+    /// Periksa seluruh isi `[policy]` terhadap mesin yang terpasang.
+    ///
+    /// Dijalankan **saat start**, bukan saat permintaan pertama: aturan yang
+    /// menunjuk mesin yang tidak ada adalah salah tulis config, dan salah tulis
+    /// config harus terlihat sebagai daemon yang menolak start dengan pesan
+    /// yang menyebut nama mesinnya. Kalau dibiarkan sampai permintaan datang,
+    /// satu host akan gagal jauh setelah operator lupa apa yang dia ubah.
+    ///
+    /// Semua pelanggaran dikumpulkan, bukan yang pertama saja: config dengan
+    /// tiga aturan salah butuh satu perbaikan, bukan tiga kali start.
+    ///
+    /// # Errors
+    ///
+    /// Mengembalikan daftar pelanggaran; kosong berarti aturan sah.
+    pub fn validasi(&self, catalog: &Catalog) -> Result<(), Vec<SelectError>> {
+        let mut salah = Vec::new();
+
+        match EngineKind::parse(&self.default) {
+            None => salah.push(SelectError::UnknownEngineName(self.default.clone())),
+            Some(kind) if catalog.capabilities(kind).is_none() => {
+                salah.push(SelectError::NotInstalled {
+                    kind,
+                    rule: RULE_DEFAULT,
+                });
+            }
+            Some(_) => {}
+        }
+
+        for (host, nama) in &self.rules {
+            match EngineKind::parse(nama) {
+                None => salah.push(SelectError::UnknownEngineName(nama.clone())),
+                Some(kind) if catalog.capabilities(kind).is_none() => {
+                    salah.push(SelectError::NotInstalled {
+                        kind,
+                        rule: RULE_CONFIG,
+                    });
+                }
+                Some(_) => {}
+            }
+            // Host kosong tidak akan pernah cocok dengan apa pun, jadi aturannya
+            // mati tanpa suara. Itu salah tulis juga, bukan sekadar tidak rapi.
+            if host.trim().is_empty() {
+                salah.push(SelectError::UnknownEngineName(nama.clone()));
+            }
+        }
+
+        for host in &self.stealth_hosts {
+            if catalog.full.is_none() {
+                salah.push(SelectError::StealthHostNeedsFull { host: host.clone() });
+            }
+        }
+
+        if salah.is_empty() { Ok(()) } else { Err(salah) }
     }
 }
 
@@ -792,5 +881,71 @@ cooldown_secs = 120
         assert!(root.policy.is_stealth_host("static.cloudflare.com"));
         assert_eq!(root.policy.rule_for("shop.example"), Some("chrome-full"));
         assert_eq!(root.captcha.handoff_per_host_hour, 3);
+    }
+
+    #[test]
+    fn katalog_dari_mesin_hanya_berisi_yang_terpasang() {
+        // Daemon membangun katalog dari mesin yang benar-benar dinyalakan.
+        let katalog = Catalog::dari_mesin(["chrome-shell"]);
+        assert!(katalog.shell.is_some());
+        assert!(
+            katalog.full.is_none(),
+            "full tidak dipasang, bukan diasumsikan"
+        );
+        let katalog = Catalog::dari_mesin(["chrome_shell", "chrome_full", "oxi", "ngawur"]);
+        assert!(katalog.shell.is_some());
+        assert!(katalog.full.is_some());
+        assert!(katalog.oxi.is_some());
+    }
+
+    #[test]
+    fn validasi_aturan_yang_menunjuk_mesin_hilang_menyebut_namanya() {
+        // AC-008: aturan yang menyebut mesin tidak terpasang ditolak saat
+        // start, dan pesannya menyebut mesin itu.
+        let policy = PolicySection {
+            default: "chrome-shell".to_owned(),
+            stealth_hosts: Vec::new(),
+            rules: BTreeMap::from([("shop.example".to_owned(), "chrome-full".to_owned())]),
+        };
+        let salah = policy
+            .validasi(&Catalog::dari_mesin(["chrome-shell"]))
+            .expect_err("aturan ke mesin hilang harus ditolak");
+        assert_eq!(salah.len(), 1);
+        let pesan = salah[0].to_string();
+        assert!(pesan.contains("chrome-full"), "{pesan}");
+        assert!(pesan.contains("host_rule"), "{pesan}");
+        assert!(pesan.contains("tidak terpasang"), "{pesan}");
+    }
+
+    #[test]
+    fn validasi_aturan_sah_lolos_dan_mesin_hilang_tidak_menghalangi() {
+        let policy = PolicySection {
+            default: "chrome-shell".to_owned(),
+            stealth_hosts: vec!["static.cloudflare.com".to_owned()],
+            rules: BTreeMap::from([("shop.example".to_owned(), "chrome-full".to_owned())]),
+        };
+        assert!(policy.validasi(&semua()).is_ok());
+
+        // Tanpa chrome-full, host stealth dan aturan host sama-sama dilaporkan
+        // dalam satu jalan, bukan satu per satu.
+        let salah = policy
+            .validasi(&Catalog::dari_mesin(["chrome-shell"]))
+            .expect_err("dua pelanggaran harus dilaporkan");
+        assert_eq!(salah.len(), 2, "{salah:?}");
+    }
+
+    #[test]
+    fn validasi_nama_mesin_salah_disebut_namanya() {
+        let policy = PolicySection {
+            default: "chrome-shel".to_owned(),
+            stealth_hosts: Vec::new(),
+            rules: BTreeMap::from([("a.example".to_owned(), "krome-full".to_owned())]),
+        };
+        let salah = policy
+            .validasi(&semua())
+            .expect_err("nama salah harus ditolak");
+        let pesan = format!("{salah:?}");
+        assert!(pesan.contains("chrome-shel"), "{pesan}");
+        assert!(pesan.contains("krome-full"), "{pesan}");
     }
 }
