@@ -99,10 +99,12 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     let state = Arc::new(
         ProxyState::pool(pool.clone(), public_ws_url).with_observer(wired.observer.clone()),
     );
+    let kegagalan = Arc::new(metrics::Kegagalan::baru());
     let app: Router = cdp::router(state).merge(metrics::router(
         pool.clone(),
         Arc::clone(&counters),
         Arc::clone(&wired.counters),
+        Arc::clone(&kegagalan),
     ));
 
     // Loop reap dijalankan hanya kalau operator memintanya. `0` di config

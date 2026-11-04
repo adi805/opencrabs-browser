@@ -48,6 +48,9 @@ pub struct Wired {
     /// Batas tunggu boot, dipakai [`alamat_mesin`] saat membangunkan mesin yang
     /// sedang tidur.
     pub ready_timeout_ms: u64,
+    /// Penghitung kegagalan buka-web. Dipakai jalur yang **benar-benar**
+    /// mengamati kegagalan (handoff tantangan), bukan diisi di dashboard.
+    pub kegagalan: Arc<crate::metrics::Kegagalan>,
 }
 
 /// Alamat WebSocket mesin, **dibaca saat dipakai**.
@@ -119,6 +122,7 @@ pub fn start(
         }),
     ));
     let counters = Arc::new(CaptchaCounters::new());
+    let kegagalan = Arc::new(crate::metrics::Kegagalan::baru());
     let (probe_tx, probe_rx) = unbounded_channel();
     let observer = Arc::new(ChallengeObserver::new(probe_tx, Arc::clone(&counters)));
     tokio::spawn(apply_loop(
@@ -130,12 +134,15 @@ pub fn start(
     ));
     tokio::spawn(probe_loop(
         probe_rx,
-        Arc::clone(&observer),
-        Arc::clone(&registry),
-        Arc::clone(&counters),
-        Arc::new(Mutex::new(RateState::new(handoff_limits))),
-        Arc::clone(&slot),
-        ready_timeout_ms,
+        ProbeDeps {
+            observer: Arc::clone(&observer),
+            registry: Arc::clone(&registry),
+            counters: Arc::clone(&counters),
+            rate: Arc::new(Mutex::new(RateState::new(handoff_limits))),
+            slot: Arc::clone(&slot),
+            ready_timeout_ms,
+            kegagalan: Arc::clone(&kegagalan),
+        },
     ));
     tokio::spawn(sweep_loop(Arc::clone(&registry), Arc::clone(&counters)));
 
@@ -145,6 +152,7 @@ pub fn start(
         observer,
         slot,
         ready_timeout_ms,
+        kegagalan,
     }
 }
 
@@ -195,15 +203,30 @@ async fn apply_loop(
     }
 }
 
-async fn probe_loop(
-    mut rx: UnboundedReceiver<Probe>,
+/// Yang dibutuhkan [`probe_loop`] di tiap putaran.
+///
+/// Dikelompokkan supaya tanda tangan fungsi tetap terbaca: delapan argumen
+/// sejenis membuat pemanggil mudah menukar dua di antaranya tanpa sadar.
+struct ProbeDeps {
     observer: Arc<ChallengeObserver>,
     registry: Arc<Registry>,
     counters: Arc<CaptchaCounters>,
     rate: Arc<Mutex<RateState>>,
     slot: Arc<Slot>,
     ready_timeout_ms: u64,
-) {
+    kegagalan: Arc<crate::metrics::Kegagalan>,
+}
+
+async fn probe_loop(mut rx: UnboundedReceiver<Probe>, deps: ProbeDeps) {
+    let ProbeDeps {
+        observer,
+        registry,
+        counters,
+        rate,
+        slot,
+        ready_timeout_ms,
+        kegagalan,
+    } = deps;
     while let Some(probe) = rx.recv().await {
         let alamat = match alamat_mesin(Arc::clone(&slot), ready_timeout_ms).await {
             Ok(alamat) => alamat,
@@ -255,6 +278,11 @@ async fn probe_loop(
             Ok(view) => {
                 observer.escalate(&probe.target_id, AVAILABLE);
                 counters.record(Kind::Challenge, Outcome::Detected);
+                // Halaman ini diamati tidak bisa dilewati mesin: itu kegagalan
+                // buka-web, dan satu-satunya jalur yang punya bukti cukup untuk
+                // mengatakannya. Angkanya diambil dari pengamatan, bukan dari
+                // definisi kategori.
+                kegagalan.catat(crate::klasifikasi::Kategori::BlokAntiBot);
                 tracing::info!(
                     id = %view.id,
                     host = %host,

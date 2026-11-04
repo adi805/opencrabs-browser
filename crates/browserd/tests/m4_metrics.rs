@@ -40,6 +40,10 @@ async fn rig() -> Rig {
         pool,
         Arc::new(Counters::new()),
         Arc::new(CaptchaCounters::new()),
+        // Nol karangan: test ini tidak mengukur kegagalan buka-web, jadi
+        // penghitungnya kosong dan blok `browser_open_failures_total` memang
+        // tidak boleh muncul.
+        Arc::new(browserd::metrics::Kegagalan::baru()),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

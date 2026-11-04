@@ -15,7 +15,9 @@
 //! Mencetak seluruh blok per mesin akan menggandakan penghitung yang sebenarnya
 //! hanya punya satu nilai, dan dashboard akan melaporkan dua kali kejadian.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::routing::get;
@@ -24,14 +26,22 @@ use engine::{Keadaan, Slot};
 use lifecycle::{Counters, State};
 use policy::counters::CaptchaCounters;
 
+use crate::klasifikasi::{Bukti, Hasil, Kategori, Kenyataan};
+
 /// Gauge HIDUP: PSS dibaca saat permintaan datang, bukan disimpan dari
 /// pembacaan terakhir. Angka yang disimpan akan terlihat masuk akal di
 /// dashboard sambil salah.
-pub fn router(pool: EnginePool, counters: Arc<Counters>, captcha: Arc<CaptchaCounters>) -> Router {
+pub fn router(
+    pool: EnginePool,
+    counters: Arc<Counters>,
+    captcha: Arc<CaptchaCounters>,
+    kegagalan: Arc<Kegagalan>,
+) -> Router {
     let handler = move || {
         let pool = pool.clone();
         let counters = Arc::clone(&counters);
         let captcha = Arc::clone(&captcha);
+        let kegagalan = Arc::clone(&kegagalan);
 
         async move {
             let mut body = String::with_capacity(2048);
@@ -66,6 +76,7 @@ pub fn router(pool: EnginePool, counters: Arc<Counters>, captcha: Arc<CaptchaCou
             }
 
             body.push_str(&counters.render_global());
+            body.push_str(&kegagalan.render());
             body.push_str(&captcha.render());
 
             (
@@ -76,6 +87,94 @@ pub fn router(pool: EnginePool, counters: Arc<Counters>, captcha: Arc<CaptchaCou
     };
 
     Router::new().route("/metrics", get(handler))
+}
+
+/// Penghitung kegagalan buka-web, satu seri per kategori.
+///
+/// Aturan yang dijaga di sini: **kategori yang belum pernah terukur tidak
+/// dirender.** Menulis `browser_open_failures_total{kategori="jaringan"} 0`
+/// untuk kategori yang belum pernah dihitung bukan laporan keadaan, itu klaim
+/// bahwa jaringan sudah diuji dan baik-baik saja. Dashboard yang menerima nol
+/// karangan akan menyimpulkan sehat tanpa ada yang pernah memeriksa.
+///
+/// Karena itu penghitung ini dimulai kosong dan setiap kategori baru muncul
+/// setelah kegagalan pertamanya benar-benar tercatat.
+#[derive(Debug, Default)]
+pub struct Kegagalan {
+    hitung: [AtomicU64; KATEGORI],
+}
+
+const KATEGORI: usize = 6;
+
+impl Kegagalan {
+    #[must_use]
+    pub fn baru() -> Self {
+        Self::default()
+    }
+
+    /// Catat satu kegagalan untuk kategori ini.
+    pub fn catat(&self, kategori: Kategori) {
+        self.hitung[indeks(kategori)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Catat hasil satu percobaan buka-web.
+    ///
+    /// Halaman yang **terbuka** tidak dihitung: penghitung ini mengukur
+    /// kegagalan, dan menambah angka untuk halaman sehat akan membuat judul
+    /// metriknya bohong. Bukti tanpa kategori juga tidak dihitung, karena
+    /// tidak ada label yang bisa dipakai.
+    pub fn catat_bukti(&self, bukti: &Bukti) {
+        self.catat(bukti.kategori);
+    }
+
+    /// Catat hasil klasifikasi satu percobaan, kalau memang gagal.
+    pub fn catat_kenyataan(&self, kenyataan: &Kenyataan) {
+        if let Hasil::Gagal(bukti) = crate::klasifikasi::nilai(kenyataan) {
+            self.catat(bukti.kategori);
+        }
+    }
+
+    /// Berapa kali kategori ini tercatat. `0` berarti belum pernah terukur,
+    /// bukan "tidak pernah gagal".
+    #[must_use]
+    pub fn jumlah(&self, kategori: Kategori) -> u64 {
+        self.hitung[indeks(kategori)].load(Ordering::Relaxed)
+    }
+
+    /// Blok metrik. Kategori tanpa catatan tidak muncul sama sekali.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let terukur = Kategori::SEMUA
+            .into_iter()
+            .filter(|kategori| self.jumlah(*kategori) > 0)
+            .collect::<Vec<_>>();
+        if terukur.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::with_capacity(256);
+        out.push_str("# TYPE browser_open_failures_total counter\n");
+        for kategori in terukur {
+            let _ = writeln!(
+                out,
+                "browser_open_failures_total{{kategori=\"{}\"}} {}",
+                kategori.as_str(),
+                self.jumlah(kategori)
+            );
+        }
+        out
+    }
+}
+
+const fn indeks(kategori: Kategori) -> usize {
+    match kategori {
+        Kategori::MesinMati => 0,
+        Kategori::MesinPenuh => 1,
+        Kategori::Jaringan => 2,
+        Kategori::ButuhManusia => 3,
+        Kategori::BlokAntiBot => 4,
+        Kategori::RenderLambat => 5,
+    }
 }
 
 /// State metrik satu slot.
@@ -114,7 +213,79 @@ pub fn read_pss_bytes(pid: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_pss_bytes;
+    use super::{Kegagalan, read_pss_bytes};
+    use crate::klasifikasi::{Bukti, Kategori, Kenyataan};
+
+    fn bukti(kategori: Kategori) -> Bukti {
+        let kenyataan = Kenyataan {
+            status_dokumen: Some(429),
+            ..Kenyataan::default()
+        };
+        Bukti::baru(kategori, vec!["status=429".to_owned()], &kenyataan)
+            .expect("sebab ada berarti bukti terbentuk")
+    }
+
+    #[test]
+    fn kategori_tak_terukur_tidak_dirender() {
+        // AC-018: hanya kategori yang pernah terukur yang muncul. Nol karangan
+        // untuk kategori yang belum pernah diperiksa bukan laporan keadaan.
+        let kegagalan = Kegagalan::baru();
+        assert_eq!(
+            kegagalan.render(),
+            "",
+            "belum ada yang terukur, blok kosong"
+        );
+
+        kegagalan.catat(Kategori::BlokAntiBot);
+        let blok = kegagalan.render();
+        assert!(blok.contains("# TYPE browser_open_failures_total counter"));
+        assert!(blok.contains("kategori=\"blok_anti_bot\"} 1"), "{blok}");
+        assert!(!blok.contains("kategori=\"jaringan\""), "{blok}");
+        assert_eq!(kegagalan.jumlah(Kategori::Jaringan), 0);
+    }
+
+    #[test]
+    fn catat_bukti_menambah_satu_per_kejadian() {
+        let kegagalan = Kegagalan::baru();
+        kegagalan.catat_bukti(&bukti(Kategori::Jaringan));
+        kegagalan.catat_bukti(&bukti(Kategori::Jaringan));
+        kegagalan.catat_bukti(&bukti(Kategori::RenderLambat));
+        assert_eq!(kegagalan.jumlah(Kategori::Jaringan), 2);
+        assert_eq!(kegagalan.jumlah(Kategori::RenderLambat), 1);
+
+        let blok = kegagalan.render();
+        let jaringan = blok
+            .lines()
+            .find(|baris| baris.contains("kategori=\"jaringan\""))
+            .expect("baris jaringan ada");
+        assert!(jaringan.ends_with(" 2"), "{jaringan}");
+    }
+
+    #[test]
+    fn halaman_terbuka_tidak_dihitung_sebagai_kegagalan() {
+        let kegagalan = Kegagalan::baru();
+        let kenyataan = Kenyataan {
+            status_dokumen: Some(200),
+            url_akhir: Some("https://contoh.test/".to_owned()),
+            dokumen_selesai: Some(true),
+            mesin_hidup: Some(true),
+            ..Kenyataan::default()
+        };
+        kegagalan.catat_kenyataan(&kenyataan);
+        assert_eq!(kegagalan.render(), "", "halaman terbuka bukan kegagalan");
+    }
+
+    #[test]
+    fn kenyataan_yang_gagal_tercatat_dengan_kategori_benar() {
+        let kegagalan = Kegagalan::baru();
+        let kenyataan = Kenyataan {
+            galat_jaringan: Some("net::ERR_NAME_NOT_RESOLVED".to_owned()),
+            mesin_hidup: Some(true),
+            ..Kenyataan::default()
+        };
+        kegagalan.catat_kenyataan(&kenyataan);
+        assert_eq!(kegagalan.jumlah(Kategori::Jaringan), 1);
+    }
 
     #[test]
     fn pss_proses_sendiri_terbaca() {
