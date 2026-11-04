@@ -22,6 +22,29 @@ pub struct FileConfig {
     pub policy: Option<policy::PolicySection>,
     #[serde(default)]
     pub captcha: Option<policy::CaptchaSection>,
+    /// Anggaran memori per mesin. Tidak adanya bagian ini berarti supervisor
+    /// anggaran dimatikan; angkanya tidak dikarang.
+    #[serde(default)]
+    pub budget: Option<BudgetSection>,
+}
+
+/// `[budget]` di berkas config.
+#[derive(Debug, Deserialize)]
+pub struct BudgetSection {
+    /// Ketiga ambang ini `Option` supaya `[budget]` yang setengah jadi tetap
+    /// bisa DIPARSE lalu ditolak dengan pesan yang menyebut kuncinya. Kalau
+    /// dibiarkan wajib, yang keluar cuma "missing field `high_mb`" tanpa
+    /// konteks bahwa yang salah adalah bagian `[budget]`.
+    pub soft_mb: Option<u64>,
+    pub high_mb: Option<u64>,
+    pub hard_mb: Option<u64>,
+    /// Jarak antar pembacaan PSS. Bawaan 1000 ms.
+    #[serde(default = "poll_ms_bawaan")]
+    pub poll_ms: u64,
+}
+
+const fn poll_ms_bawaan() -> u64 {
+    1000
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +243,29 @@ impl FileConfig {
             .and_then(|daemon| daemon.idle_reap_secs)
     }
 
+    /// Anggaran memori dari `[budget]`.
+    ///
+    /// `Ok(None)` = bagian itu tidak ada, dan supervisor anggaran tidak
+    /// dijalankan. Ambang yang terbalik (`soft >= high`) adalah salah tulis
+    /// config dan ditolak di sini, bukan dibetulkan diam-diam: `hard` yang
+    /// tidak pernah tercapai berarti mesin tidak pernah dipulihkan walau
+    /// memori habis.
+    pub fn budget(&self) -> Result<Option<lifecycle::budget::BudgetConfig>> {
+        let Some(bagian) = self.budget.as_ref() else {
+            return Ok(None);
+        };
+        let (Some(soft), Some(high), Some(hard)) = (bagian.soft_mb, bagian.high_mb, bagian.hard_mb)
+        else {
+            anyhow::bail!(
+                "[budget] tidak lengkap: butuh soft_mb, high_mb, dan hard_mb sekaligus; \
+                 supervisor yang hanya tahu satu ambang tidak bisa memutuskan kapan memulihkan"
+            );
+        };
+        lifecycle::budget::BudgetConfig::from_mb(soft, high, hard, bagian.poll_ms)
+            .map(Some)
+            .map_err(|err| anyhow::anyhow!("[budget] tidak sah: {err}"))
+    }
+
     /// Batas handoff dari `[captcha]`, atau bawaan dokumen 03 §3.1.
     #[must_use]
     pub fn captcha(&self) -> policy::CaptchaSection {
@@ -311,6 +357,67 @@ args = ["--no-sandbox", "--mute-audio"]
             binary.is_absolute(),
             "~ harus diperluas, dapat: {}",
             binary.display()
+        );
+    }
+
+    #[test]
+    fn anggaran_dibaca_dari_bagian_budget() {
+        let text = r#"
+[budget]
+soft_mb = 200
+high_mb = 400
+hard_mb = 700
+poll_ms = 500
+"#;
+        let config: FileConfig = toml::from_str(text).expect("harus bisa diparse");
+        let budget = config.budget().expect("sah").expect("ada");
+        assert_eq!(budget.soft_bytes, 200 * lifecycle::budget::MB);
+        assert_eq!(budget.hard_bytes, 700 * lifecycle::budget::MB);
+        assert_eq!(budget.poll_ms, 500);
+    }
+
+    #[test]
+    fn anggaran_setengah_jadi_ditolak_dengan_nama_bagiannya() {
+        // `[budget]` yang cuma menulis satu ambang adalah salah tulis, bukan
+        // "pakai bawaan": supervisor dengan satu ambang tidak punya titik
+        // pulih, jadi lebih baik menolak saat start daripada diam-diam tidak
+        // pernah memulihkan apa pun.
+        let text = r#"
+[budget]
+soft_mb = 600
+"#;
+        let config: FileConfig = toml::from_str(text).expect("harus bisa diparse");
+        let err = config.budget().expect_err("harus ditolak");
+        let pesan = err.to_string();
+        assert!(
+            pesan.contains("[budget]"),
+            "galat harus menyebut bagiannya: {pesan}"
+        );
+        assert!(
+            pesan.contains("high_mb") && pesan.contains("hard_mb"),
+            "galat harus menyebut ambang yang kurang: {pesan}"
+        );
+    }
+
+    #[test]
+    fn anggaran_tanpa_bagian_berarti_mati_bukan_nol() {
+        let config: FileConfig = toml::from_str("").expect("kosong sah");
+        assert!(config.budget().expect("sah").is_none());
+    }
+
+    #[test]
+    fn anggaran_terbalik_ditolak_dengan_nama_bagiannya() {
+        let text = r#"
+[budget]
+soft_mb = 800
+high_mb = 400
+hard_mb = 700
+"#;
+        let config: FileConfig = toml::from_str(text).expect("harus bisa diparse");
+        let err = config.budget().expect_err("harus ditolak");
+        assert!(
+            err.to_string().contains("[budget]"),
+            "galat harus menyebut bagiannya, dapat: {err}"
         );
     }
 

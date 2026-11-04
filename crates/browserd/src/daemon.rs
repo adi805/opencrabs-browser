@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
@@ -19,12 +19,14 @@ use cdp::{EnginePool, ProxyState};
 use control::Registry;
 use engine::{Engine, Keadaan, ShellEngine, Slot, discover_shell};
 use lifecycle::reaper::{ReapReason, ReapReport, ReaperConfig, idle_reap_due};
-use lifecycle::{Counters, Event, Machine};
+use lifecycle::{Counters, Event, Gudang, Machine};
 use tokio::net::TcpListener;
 
+use crate::anggaran::{Penjaga, ProcPengukur, Putusan};
 use crate::cli::ServeArgs;
 use crate::config::{self, FileConfig};
 use crate::metrics;
+use crate::reload::{self, Batas, Hasil, Hidup};
 use crate::{wiring, wiring::Wired};
 
 const DETACHED_ENV: &str = "OCB_BROWSERD_DETACHED";
@@ -107,30 +109,66 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         Arc::clone(&kegagalan),
     ));
 
-    // Loop reap dijalankan hanya kalau operator memintanya. `0` di config
-    // berarti mesin dibiarkan hidup selama daemon hidup, dan itu pilihan yang
-    // sah untuk host yang lebih suka membayar memori daripada waktu boot.
-    match ambang_reap(&args, &file) {
-        Some(idle_reap) => {
-            let cfg = ReaperConfig {
-                idle_reap,
-                ..ReaperConfig::default()
-            };
-            tracing::info!(
-                idle_reap_secs = idle_reap.as_secs(),
-                "loop reap menganggur aktif"
-            );
-            tokio::spawn(loop_reap(
-                pool.clone(),
-                Arc::clone(&counters),
-                Arc::clone(&wired.registry),
-                cfg,
-            ));
-        }
+    // Batas hidup: satu tempat yang dibaca jalur pembuatan tab dan loop reap.
+    // Nilai awalnya sama persis dengan yang ditegakkan saat boot, jadi tidak ada
+    // jendela waktu di mana daemon melayani dengan angka yang berbeda dari yang
+    // dilaporkan di log start.
+    let hidup = Arc::new(Hidup::baru(Batas::baru(
+        batas_tab(&resolved.machines),
+        ambang_reap(&args, &file),
+    )));
+
+    // Loop reap selalu dijalankan, termasuk saat reap dimatikan (`0`). Bedanya
+    // hanya perilaku: ambang `None` membuat putaran tidak memutus apa pun. Task
+    // yang tidak pernah ada tidak bisa dinyalakan lewat SIGHUP, dan justru itu
+    // gunanya reload: menyalakan pagar memori pada daemon yang sudah melayani.
+    match hidup.idle_reap() {
+        Some(idle_reap) => tracing::info!(
+            idle_reap_secs = idle_reap.as_secs(),
+            "loop reap menganggur aktif"
+        ),
         None => tracing::warn!(
             "reap mesin menganggur dimatikan (idle_reap_secs = 0): memori tidak akan kembali sendiri"
         ),
     }
+    tokio::spawn(loop_reap(
+        pool.clone(),
+        Arc::clone(&counters),
+        Arc::clone(&wired.registry),
+        Arc::clone(&wired.leases),
+        Arc::clone(&hidup),
+    ));
+
+    // Supervisor anggaran memori: hanya kalau operator menulis `[budget]`.
+    match file.budget() {
+        Ok(Some(cfg)) => {
+            tracing::info!(
+                soft_mb = cfg.soft_bytes / lifecycle::budget::MB,
+                high_mb = cfg.high_bytes / lifecycle::budget::MB,
+                hard_mb = cfg.hard_bytes / lifecycle::budget::MB,
+                poll_ms = cfg.poll_ms,
+                "supervisor anggaran memori aktif"
+            );
+            tokio::spawn(loop_anggaran(pool.clone(), cfg, args.ready_timeout_ms));
+        }
+        Ok(None) => {
+            tracing::info!("supervisor anggaran mati: [budget] tidak ada di config");
+        }
+        // Salah tulis ambang adalah config yang tidak sah, dan config yang
+        // tidak sah harus terlihat saat start. Dibiarkan jalan, `hard` yang
+        // tidak pernah tercapai membuat janji pemulihan jadi bohong.
+        Err(err) => return Err(err),
+    }
+
+    // SIGHUP = muat ulang batas. Sinyal ini dipilih karena `systemctl reload`
+    // memakai SIGHUP dan tidak membunuh proses: tab yang sedang dipakai tidak
+    // ikut mati hanya karena operator menaikkan satu angka di config.
+    dengar_sighup(
+        pool.clone(),
+        Arc::clone(&hidup),
+        config_path.clone(),
+        args.idle_reap_secs,
+    );
 
     let listener = TcpListener::bind(&bind)
         .await
@@ -405,8 +443,17 @@ async fn hentikan_semua(engines: Vec<Arc<dyn Engine>>) {
 /// [`ReaperConfig::default`] supaya perilaku daemon tidak bergantung pada
 /// bagian mana yang dibaca lebih dulu.
 fn ambang_reap(args: &ServeArgs, file: &FileConfig) -> Option<Duration> {
-    match args
-        .idle_reap_secs
+    ambang_dari(args.idle_reap_secs, file)
+}
+
+/// Aturan yang sama tanpa `ServeArgs`, supaya reload memakai satu sumber.
+///
+/// `--idle-reap-secs` tetap menang setelah reload: flag baris perintah adalah
+/// keputusan operator untuk proses INI, sedangkan berkas config bisa dibaca
+/// ulang. Kalau berkas menang, SIGHUP akan diam-diam membatalkan flag yang
+/// sudah diketik.
+fn ambang_dari(flag: Option<u64>, file: &FileConfig) -> Option<Duration> {
+    match flag
         .or_else(|| file.idle_reap_secs())
         .unwrap_or(DEFAULT_IDLE_REAP_SECS)
     {
@@ -434,22 +481,282 @@ async fn loop_reap(
     pool: EnginePool,
     counters: Arc<Counters>,
     registry: Arc<Registry>,
-    cfg: ReaperConfig,
+    leases: Arc<Mutex<Gudang>>,
+    hidup: Arc<Hidup>,
 ) {
     let mut ticker = tokio::time::interval(TICK_REAP);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         ticker.tick().await;
+        // Ambang dibaca ulang tiap putaran, bukan dibekukan saat spawn: SIGHUP
+        // menggantinya tanpa restart, dan angka yang disalin sekali akan membuat
+        // reload terlihat berhasil di log tapi tidak berlaku di loop ini.
+        // `None` = operator mematikan reap, jadi putaran ini tidak memutus apa
+        // pun tanpa harus mematikan task-nya.
+        let Some(idle_reap) = hidup.idle_reap() else {
+            continue;
+        };
+        let cfg = ReaperConfig {
+            idle_reap,
+            ..ReaperConfig::default()
+        };
         let sekarang = unix_seconds().max(0) as u64;
         // Handoff yang belum dijawab menahan reap. Registry belum menyimpan
         // mesin per handoff, jadi satu handoff menahan **semua** mesin: terlalu
         // luas memang, tapi arah kelirunya aman (memori ditahan), sedangkan
         // arah sebaliknya menghapus captcha yang sedang dijawab orang.
         let pending = registry.pending(sekarang).len();
-        for id in putaran_reap(&pool, &counters, pending, &cfg, sekarang).await {
+        // Lease dibaca di dalam kunci yang sama sekali saja, cukup untuk satu
+        // putaran: kalau lease dilepas sesudah pembacaan ini, putaran berikutnya
+        // (5 detik lagi) sudah melihatnya. Menahan lock selama pemutusan akan
+        // memblokir jalur yang sedang memegang tab.
+        let penahan = {
+            let gudang = leases.lock().unwrap_or_else(|err| err.into_inner());
+            Penahan::dari_gudang(pending, &gudang, sekarang)
+        };
+        for id in putaran_reap(&pool, &counters, penahan, &cfg, sekarang).await {
             tracing::info!(mesin = %id, "mesin di-reap karena menganggur");
         }
+    }
+}
+
+/// Supervisor anggaran: satu [`Penjaga`] per mesin, satu putaran per `poll_ms`.
+///
+/// Yang dijaga adalah janji AC-017: satu mesin yang menembus anggaran **tidak**
+/// membuat daemon keluar dan **tidak** menolak permintaan ke mesin lain. Karena
+/// itu pemulihan menunggu di dalam `spawn_blocking` untuk mesin itu saja; loop
+/// ini tidak memegang lock pool dan tidak menghentikan task lain.
+async fn loop_anggaran(
+    pool: EnginePool,
+    cfg: lifecycle::budget::BudgetConfig,
+    ready_timeout_ms: u64,
+) {
+    let pengukur = ProcPengukur;
+    let mut penjaga: BTreeMap<String, Penjaga> = pool
+        .ids()
+        .map(|id| (id.clone(), Penjaga::baru(cfg)))
+        .collect();
+
+    // Batas bawah 100 ms: `poll_ms = 1` akan memanggil `/proc` seribu kali per
+    // detik untuk membuktikan hal yang sama dengan satu kali per detik.
+    let jeda = Duration::from_millis(cfg.poll_ms.max(100));
+    let mut ticker = tokio::time::interval(jeda);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        ticker.tick().await;
+        for (id, slot) in pool.slots() {
+            // Mesin yang tidur tidak punya proses untuk diukur, dan itu bukan
+            // pelanggaran anggaran.
+            let Some(pid) = slot.hidup().and_then(|engine| engine.process_id()) else {
+                continue;
+            };
+
+            let putusan = match penjaga.get_mut(id) {
+                Some(penjaga) => penjaga.putaran(&pengukur, pid),
+                None => continue,
+            };
+
+            match putusan {
+                Putusan::Diam { .. } => {}
+                Putusan::TakTerukur { sebab } => tracing::warn!(
+                    mesin = %id,
+                    %sebab,
+                    "PSS tidak terbaca: mesin dibiarkan hidup (gagal-terbuka)"
+                ),
+                Putusan::Pulihkan { pss, sebab } => {
+                    if let Some(penjaga) = penjaga.get_mut(id) {
+                        penjaga.mulai_pulih(Instant::now());
+                    }
+                    tracing::warn!(
+                        mesin = %id,
+                        pid,
+                        pss_mb = pss / lifecycle::budget::MB,
+                        aksi = %sebab,
+                        "mesin menembus anggaran: dihentikan lalu dinyalakan ulang"
+                    );
+
+                    let hasil = pulihkan_mesin(Arc::clone(slot), ready_timeout_ms).await;
+                    let lama = penjaga
+                        .get_mut(id)
+                        .and_then(|penjaga| penjaga.selesai_pulih(Instant::now()));
+
+                    match (hasil, lama) {
+                        (Ok(()), Some(lama)) => tracing::info!(
+                            mesin = %id,
+                            pulih_ms = lama.as_millis(),
+                            dalam_batas = lama <= crate::anggaran::PEMULIHAN_MAKS,
+                            "mesin pulih"
+                        ),
+                        (Ok(()), None) => {
+                            tracing::warn!(mesin = %id, "mesin pulih tanpa jam tercatat")
+                        }
+                        (Err(err), _) => tracing::error!(
+                            mesin = %id,
+                            %err,
+                            "pemulihan gagal: daemon tetap melayani mesin lain"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Hentikan satu mesin lalu nyalakan ulang dari resep yang sama.
+///
+/// Kedua panggilan itu blocking (`matikan` menunggu proses benar-benar hilang,
+/// `pastikan` menunggu mesin siap menjawab), jadi dijalankan di
+/// `spawn_blocking`: menjalankannya langsung akan membekukan seluruh runtime
+/// dan justru melanggar janji "mesin lain tetap dilayani".
+async fn pulihkan_mesin(slot: Arc<Slot>, ready_timeout_ms: u64) -> Result<(), String> {
+    let untuk_henti = Arc::clone(&slot);
+    tokio::task::spawn_blocking(move || {
+        untuk_henti
+            .matikan()
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("task penghentian gagal: {err}"))??;
+
+    tokio::task::spawn_blocking(move || {
+        let sekarang = unix_seconds().max(0) as u64;
+        slot.pastikan(ready_timeout_ms, sekarang)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("task penyalakan gagal: {err}"))?
+}
+
+/// Membaca batas dari berkas config. `Err` berarti: pertahankan yang lama.
+///
+/// Sengaja hanya membaca berkas, tidak me-resolve ulang mesin. Reload adalah
+/// perubahan dua angka, bukan kesempatan menambah mesin: menyalakan mesin baru
+/// butuh proses baru, port baru, dan profil baru, dan itu bukan sesuatu yang
+/// boleh terjadi sebagai efek samping SIGHUP.
+fn muat_batas(path: &Path, idle_flag: Option<u64>) -> Result<Batas, String> {
+    let file = FileConfig::load(path).map_err(|err| format!("{err:#}"))?;
+    let peta = reload::batas_tab(
+        file.machines()
+            .map(|(id, mesin)| (id.as_str(), mesin.max_tabs)),
+    );
+    Ok(Batas::baru(peta, ambang_dari(idle_flag, &file)))
+}
+
+/// Memasang penangan SIGHUP yang menerapkan batas baru tanpa restart.
+///
+/// Sinyal, bukan endpoint HTTP: port kontrol menerima perintah dari klien, dan
+/// mengubah pagar memori bukan wewenang klien. SIGHUP juga yang dikirim
+/// `systemctl reload`, jadi jalur operator tetap satu perintah yang sama.
+#[cfg(unix)]
+fn dengar_sighup(pool: EnginePool, hidup: Arc<Hidup>, path: PathBuf, idle_flag: Option<u64>) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut hup = match signal(SignalKind::hangup()) {
+        Ok(hup) => hup,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "gagal memasang penangan SIGHUP: batas hanya bisa diubah lewat restart"
+            );
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        loop {
+            hup.recv().await;
+            let hasil = muat_batas(&path, idle_flag);
+            // Pool diperbarui hanya kalau pembacaan berhasil. Pada jalur gagal
+            // tidak ada satu pun nilai yang disentuh, jadi batas yang sedang
+            // ditegakkan tetap sama persis dengan sebelum sinyal datang.
+            if let Ok(batas) = &hasil {
+                let mesin = pool.ganti_batas_tab(batas.max_tabs.clone());
+                tracing::info!(
+                    mesin,
+                    config = %path.display(),
+                    "batas tab diganti dari config"
+                );
+            }
+            match hidup.terapkan(hasil) {
+                Hasil::Diterapkan { mesin, idle_reap } => tracing::info!(
+                    mesin,
+                    idle_reap_secs = idle_reap.map(|dur| dur.as_secs()),
+                    config = %path.display(),
+                    "config dimuat ulang tanpa restart"
+                ),
+                Hasil::Dipertahankan { sebab } => tracing::warn!(
+                    %sebab,
+                    config = %path.display(),
+                    "config gagal dibaca; batas lama dipertahankan"
+                ),
+            }
+        }
+    });
+}
+
+/// Tanpa sinyal POSIX tidak ada `reload`; daemon tetap jalan dengan batas boot.
+#[cfg(not(unix))]
+fn dengar_sighup(pool: EnginePool, hidup: Arc<Hidup>, path: PathBuf, idle_flag: Option<u64>) {
+    let _ = (pool, hidup, path, idle_flag);
+    tracing::warn!("platform ini tidak punya SIGHUP: batas hanya berubah lewat restart");
+}
+
+/// Apa yang sedang menahan mesin supaya tidak di-reap pada putaran ini.
+///
+/// Dipisah dari angka mentah supaya dua alasan yang berbeda tidak bisa
+/// tertukar diam-diam: handoff adalah manusia yang sedang menjawab captcha,
+/// lease adalah sesi yang masih memakai tabnya. Keduanya menahan mesin, tapi
+/// hanya satu yang boleh dibaca sebagai "ada pekerjaan berjalan" di log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Penahan {
+    /// Handoff yang belum dijawab pada detik ini.
+    pub handoff: usize,
+    /// Tab yang masih dipegang lease hidup.
+    pub lease: usize,
+}
+
+impl Penahan {
+    #[must_use]
+    pub const fn kosong() -> Self {
+        Self {
+            handoff: 0,
+            lease: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn handoff(handoff: usize) -> Self {
+        Self { handoff, lease: 0 }
+    }
+
+    #[must_use]
+    pub const fn baru(handoff: usize, lease: usize) -> Self {
+        Self { handoff, lease }
+    }
+
+    /// Membaca jumlah lease hidup dari gudang. Fungsi, bukan parameter angka,
+    /// supaya tidak ada pemanggil yang bisa lupa menyapu lease kedaluwarsa
+    /// lebih dulu: `target_ditahan` sudah menyaringnya.
+    #[must_use]
+    pub fn dari_gudang(handoff: usize, gudang: &Gudang, sekarang: u64) -> Self {
+        Self {
+            handoff,
+            lease: gudang.target_ditahan(sekarang).len(),
+        }
+    }
+
+    #[must_use]
+    pub const fn total(self) -> usize {
+        self.handoff + self.lease
+    }
+
+    #[must_use]
+    pub const fn ada(self) -> bool {
+        self.total() > 0
     }
 }
 
@@ -464,7 +771,7 @@ async fn loop_reap(
 pub async fn putaran_reap(
     pool: &EnginePool,
     counters: &Counters,
-    handoff_pending: usize,
+    penahan: Penahan,
     cfg: &ReaperConfig,
     sekarang: u64,
 ) -> Vec<String> {
@@ -479,7 +786,7 @@ pub async fn putaran_reap(
 
         let sesi = slot.sesi();
         let diam = slot.diam(sekarang);
-        if idle_reap_due(sesi, handoff_pending, diam, cfg).is_none() {
+        if idle_reap_due(sesi, penahan.total(), diam, cfg).is_none() {
             continue;
         }
 
@@ -592,13 +899,11 @@ async fn matikan_semua(slots: Vec<Arc<Slot>>) {
 /// keduanya berarti tanpa batas, dan mesin tanpa entri tidak membayar satu
 /// pemeriksaan pun di jalur pembuatan tab.
 fn batas_tab(machines: &[Mesin]) -> BTreeMap<String, u32> {
-    machines
-        .iter()
-        .filter_map(|mesin| {
-            let batas = mesin.max_tabs?;
-            (batas > 0).then(|| (mesin.id.clone(), batas))
-        })
-        .collect()
+    reload::batas_tab(
+        machines
+            .iter()
+            .map(|mesin| (mesin.id.as_str(), mesin.max_tabs)),
+    )
 }
 
 /// Satu mesin yang harus dinyalakan, hasil penggabungan CLI dan config.
@@ -1159,5 +1464,119 @@ binary = "/abs/shell"
             )
             .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod muat_batas_tests {
+    use std::io::Write;
+
+    use super::*;
+
+    /// Nama berkas memuat pid dan nama uji: dua uji yang menulis berkas yang
+    /// sama bisa saling menimpa saat dijalankan paralel, dan kegagalannya akan
+    /// terlihat seperti bug reload.
+    fn berkas(nama: &str, isi: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("ocb-reload-{}-{nama}.toml", std::process::id()));
+        let mut file = std::fs::File::create(&path).expect("membuat berkas uji");
+        file.write_all(isi.as_bytes()).expect("menulis berkas uji");
+        path
+    }
+
+    // AC-010 pada jalur nyata: angka dibaca dari berkas yang baru ditulis, dan
+    // `0` tetap berarti mati, bukan "nol detik".
+    #[test]
+    fn batas_dibaca_dari_berkas_dan_nol_mematikan_reap() {
+        let path = berkas(
+            "naik",
+            r#"
+[daemon]
+idle_reap_secs = 0
+
+[engines.kiri]
+kind = "shell"
+max_tabs = 9
+"#,
+        );
+        let batas = muat_batas(&path, None).expect("config sah");
+        assert_eq!(batas.max_tabs.get("kiri"), Some(&9));
+        assert_eq!(batas.idle_reap, None, "0 mematikan reap");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // AC-011: berkas rusak tidak menghasilkan batas baru sama sekali, dan
+    // penerapannya mempertahankan angka yang sedang berlaku.
+    #[test]
+    fn berkas_rusak_mempertahankan_batas_yang_sedang_berlaku() {
+        let path = berkas("rusak", "ini bukan = toml [[ [");
+        let err = muat_batas(&path, None).expect_err("harus ditolak");
+        assert!(
+            err.contains("mem-parse config"),
+            "sebab harus menyebut parse, dapat: {err}"
+        );
+
+        let hidup = Hidup::baru(Batas::baru(
+            reload::batas_tab([("kiri", Some(4))]),
+            Some(Duration::from_secs(60)),
+        ));
+        let hasil = hidup.terapkan(muat_batas(&path, None));
+
+        assert!(
+            matches!(hasil, Hasil::Dipertahankan { .. }),
+            "hasil harus mempertahankan, dapat {hasil:?}"
+        );
+        assert_eq!(hidup.max_tabs().get("kiri"), Some(&4));
+        assert_eq!(hidup.idle_reap(), Some(Duration::from_secs(60)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Flag baris perintah tetap menang setelah reload: SIGHUP membaca berkas,
+    // dan berkas tidak boleh diam-diam membatalkan flag yang sudah diketik.
+    #[test]
+    fn flag_idle_reap_menang_atas_berkas() {
+        let path = berkas(
+            "flag",
+            r#"
+[daemon]
+idle_reap_secs = 5
+"#,
+        );
+        let batas = muat_batas(&path, Some(0)).expect("config sah");
+        assert_eq!(batas.idle_reap, None, "flag 0 mematikan reap");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod penahan_tests {
+    use super::Penahan;
+    use lifecycle::Gudang;
+
+    // AC-009 pada lapisan angka: lease hidup dihitung, lease kedaluwarsa tidak,
+    // dan handoff tetap dihitung terpisah supaya log bisa membedakan keduanya.
+    #[test]
+    fn lease_hidup_dan_kedaluwarsa_dihitung_berbeda() {
+        let mut gudang = Gudang::baru(2);
+        gudang.pegang("sesi-a", "T1", 60, 1_000).expect("pegang");
+        gudang.pegang("sesi-b", "T2", 30, 1_000).expect("pegang");
+
+        let penahan = Penahan::dari_gudang(1, &gudang, 1_010);
+        assert_eq!(penahan.lease, 2);
+        assert_eq!(penahan.handoff, 1);
+        assert_eq!(penahan.total(), 3);
+        assert!(penahan.ada());
+
+        let penahan = Penahan::dari_gudang(0, &gudang, 1_031);
+        assert_eq!(penahan.lease, 1, "T2 sudah kedaluwarsa pada detik 1031");
+        assert_eq!(penahan.total(), 1);
+    }
+
+    #[test]
+    fn tanpa_handoff_dan_tanpa_lease_berarti_mesin_bebas() {
+        let gudang = Gudang::baru(1);
+        let penahan = Penahan::dari_gudang(0, &gudang, 5_000);
+        assert_eq!(penahan, Penahan::kosong());
+        assert!(!penahan.ada());
     }
 }

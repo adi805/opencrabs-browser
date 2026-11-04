@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use control::{ApplyOutcome, ApplyRequest, Registry, RegistryLimits};
 use engine::Slot;
+use lifecycle::Gudang;
 use policy::challenge::{LadderAvailability, Verdict};
 use policy::counters::{CaptchaCounters, Kind, Outcome};
 use policy::rate::{HandoffLimits, RateState};
@@ -51,6 +52,11 @@ pub struct Wired {
     /// Penghitung kegagalan buka-web. Dipakai jalur yang **benar-benar**
     /// mengamati kegagalan (handoff tantangan), bukan diisi di dashboard.
     pub kegagalan: Arc<crate::metrics::Kegagalan>,
+    /// Lease tab per sesi. Ditaruh di sini, bukan di dalam loop reap, karena
+    /// jalur yang memegang tab (proxy CDP, kontrol) dan jalur yang memutuskan
+    /// reap harus melihat gudang yang **sama**. Dua gudang berarti lease yang
+    /// dipegang satu jalur tidak terlihat oleh pemutus reap.
+    pub leases: Arc<Mutex<Gudang>>,
 }
 
 /// Alamat WebSocket mesin, **dibaca saat dipakai**.
@@ -123,6 +129,10 @@ pub fn start(
     ));
     let counters = Arc::new(CaptchaCounters::new());
     let kegagalan = Arc::new(crate::metrics::Kegagalan::baru());
+    // Batas per sesi belum punya kunci config sendiri; `0` berarti tanpa batas
+    // per sesi, dan batas per mesin (`max_tabs`) tetap berlaku lewat jalur cdp.
+    // Angkanya bisa diganti saat config dimuat ulang tanpa mengganti gudangnya.
+    let leases = Arc::new(Mutex::new(Gudang::baru(0)));
     let (probe_tx, probe_rx) = unbounded_channel();
     let observer = Arc::new(ChallengeObserver::new(probe_tx, Arc::clone(&counters)));
     tokio::spawn(apply_loop(
@@ -153,6 +163,7 @@ pub fn start(
         slot,
         ready_timeout_ms,
         kegagalan,
+        leases,
     }
 }
 

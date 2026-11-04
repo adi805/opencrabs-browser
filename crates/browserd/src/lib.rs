@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod anggaran;
 pub mod artefak;
 pub mod cdp_client;
 pub mod challenge;
@@ -21,6 +22,7 @@ pub mod klasifikasi;
 pub mod metrics;
 pub mod penanam;
 pub mod reap;
+pub mod reload;
 pub mod runtime;
 pub mod selftest;
 pub mod storecmd;

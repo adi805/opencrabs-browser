@@ -73,7 +73,11 @@ pub struct EnginePool {
     /// protokol (berapa tab yang boleh dibuka klien), bukan milik proses.
     /// Mesin tanpa entri di sini berarti **tanpa batas**, dan pemanggil yang
     /// benar-benar akan membuka tab tidak perlu menyentuh mesin sama sekali.
-    batas: BTreeMap<String, u32>,
+    /// Dibungkus `RwLock` **berbagi** antar klon pool: SIGHUP mengganti batas
+    /// saat daemon melayani, dan semua jalur (proxy CDP, pemutus reap, kontrol)
+    /// memegang klon pool yang berbeda. Nilai yang disalin per klon akan membuat
+    /// batas baru hanya berlaku di jalur yang kebetulan memegang klon itu.
+    batas: std::sync::Arc<std::sync::RwLock<BTreeMap<String, u32>>>,
 }
 
 impl std::fmt::Debug for EnginePool {
@@ -107,7 +111,7 @@ impl EnginePool {
         Self {
             default: id,
             slots,
-            batas: BTreeMap::new(),
+            batas: std::sync::Arc::new(std::sync::RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -166,7 +170,7 @@ impl EnginePool {
         Ok(Self {
             default,
             slots,
-            batas: BTreeMap::new(),
+            batas: std::sync::Arc::new(std::sync::RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -176,19 +180,39 @@ impl EnginePool {
     /// menolak konfigurasi yang menyebut mesin bawaan yang tidak ada, dan batas
     /// yang tidak punya mesin tidak bisa ditegakkan oleh siapa pun.
     #[must_use]
-    pub fn dengan_batas_tab(mut self, batas: BTreeMap<String, u32>) -> Self {
-        for (id, nilai) in batas {
-            if self.slots.contains_key(&id) {
-                self.batas.insert(id, nilai);
-            }
-        }
+    pub fn dengan_batas_tab(self, batas: BTreeMap<String, u32>) -> Self {
+        self.ganti_batas_tab(batas);
         self
+    }
+
+    /// Mengganti peta batas tab, dipakai saat boot dan saat config dimuat ulang.
+    ///
+    /// Entri diganti **seluruhnya**, bukan digabung: config baru yang menghapus
+    /// `max_tabs` harus benar-benar berarti tanpa batas. Menggabung akan
+    /// membuat batas lama hidup selamanya setelah dihapus dari berkas.
+    ///
+    /// Yang dikembalikan jumlah mesin yang batasnya benar-benar terpasang;
+    /// entri untuk id yang tidak ada tetap diabaikan seperti di
+    /// [`Self::dengan_batas_tab`].
+    pub fn ganti_batas_tab(&self, batas: BTreeMap<String, u32>) -> usize {
+        let baru: BTreeMap<String, u32> = batas
+            .into_iter()
+            .filter(|(id, _)| self.slots.contains_key(id))
+            .collect();
+        let jumlah = baru.len();
+        let mut kunci = self.batas.write().unwrap_or_else(|err| err.into_inner());
+        *kunci = baru;
+        jumlah
     }
 
     /// Batas tab mesin ini, kalau operator memasangnya.
     #[must_use]
     pub fn batas_tab(&self, id: &str) -> Option<u32> {
-        self.batas.get(id).copied()
+        self.batas
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(id)
+            .copied()
     }
 
     #[must_use]
@@ -386,6 +410,41 @@ mod tests {
             vec!["a".to_owned(), "b".to_owned()],
             "urutan harus stabil"
         );
+    }
+
+    // AC-010 pada lapisan pool: batas yang dipasang saat boot bisa diganti saat
+    // daemon melayani, dan penggantian itu MENGHAPUS entri yang tidak ada di
+    // peta baru. Menggabung akan membuat batas lama hidup selamanya setelah
+    // operator menghapus `max_tabs` dari config.
+    #[test]
+    fn batas_tab_bisa_diganti_tanpa_membangun_ulang_pool() {
+        let pool =
+            EnginePool::dari_slot("a", peta(&[("a", 40001), ("b", 40002)])).expect("pool sah");
+        pool.ganti_batas_tab(
+            [("a".to_owned(), 6u32), ("b".to_owned(), 2u32)]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(pool.batas_tab("a"), Some(6));
+        assert_eq!(pool.batas_tab("b"), Some(2));
+
+        // Peta baru tanpa entri `b`: `b` kembali tanpa batas, bukan tetap 2.
+        let terpasang = pool.ganti_batas_tab([("a".to_owned(), 3u32)].into_iter().collect());
+        assert_eq!(terpasang, 1);
+        assert_eq!(pool.batas_tab("a"), Some(3));
+        assert_eq!(pool.batas_tab("b"), None, "entri lama harus hilang");
+    }
+
+    // Klon pool adalah jalur yang berbeda (proxy CDP vs pemutus reap). Batas
+    // harus ikut berubah di klon, kalau tidak batas baru hanya berlaku di jalur
+    // yang kebetulan memegang klon aslinya.
+    #[test]
+    fn batas_tab_ikut_berubah_di_klon_pool() {
+        let pool =
+            EnginePool::dari_slot("a", peta(&[("a", 40001), ("b", 40002)])).expect("pool sah");
+        let klon = pool.clone();
+        pool.ganti_batas_tab([("b".to_owned(), 7u32)].into_iter().collect());
+        assert_eq!(klon.batas_tab("b"), Some(7));
     }
 
     #[test]
