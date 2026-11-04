@@ -15,6 +15,7 @@ pub mod challenge;
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod eskalasi;
 pub mod handoff;
 pub mod klasifikasi;
 pub mod metrics;
