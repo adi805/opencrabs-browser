@@ -22,7 +22,7 @@
 #![forbid(unsafe_code)]
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{Engine, EngineError, EngineInfo, LaunchSpec, ShellEngine};
 
@@ -255,6 +255,15 @@ impl Slot {
             return Ok(engine);
         }
 
+        // Boot diukur, bukan diasumsikan nol. `sekarang` diambil pemanggil
+        // SEBELUM mesin dinyalakan, dan menyalakan Chromium bisa memakan
+        // beberapa detik di host yang sedang sibuk. Menulis `terakhir =
+        // sekarang` sesudahnya memundurkan jam menganggur sebesar lama boot:
+        // mesin yang baru saja siap langsung terlihat "sudah diam 8 detik",
+        // lalu di-reap sebelum klien sempat memakainya. Yang dipakai karena
+        // itu `sekarang + lama boot`, yang dihitung dari jam asli sehingga
+        // tetap deterministik untuk test berjam-semua (`lama` = 0).
+        let mulai = Instant::now();
         let engine = self
             .penggerak
             .nyalakan(&self.spec, timeout_ms)
@@ -262,12 +271,13 @@ impl Slot {
                 id: self.id.clone(),
                 sebab: err.to_string(),
             })?;
+        let lama_boot = mulai.elapsed().as_secs();
 
         {
             let mut isi = self.kunci();
             isi.info = Some(engine.info().clone());
             isi.mesin = Some(Arc::clone(&engine));
-            isi.terakhir = sekarang;
+            isi.terakhir = sekarang.saturating_add(lama_boot);
             isi.tidur = false;
         }
         tracing::info!(
@@ -480,6 +490,49 @@ mod tests {
             let nomor = self.boot.fetch_add(1, Ordering::SeqCst);
             Ok(Arc::new(MesinPalsu::baru(9000 + nomor as u16)))
         }
+    }
+
+    /// Penggerak yang boot-nya memakan waktu, seperti Chromium di host sibuk.
+    struct PenggerakLambat;
+
+    impl Penggerak for PenggerakLambat {
+        fn nyalakan(
+            &self,
+            _spec: &LaunchSpec,
+            _timeout_ms: u64,
+        ) -> Result<Arc<dyn Engine>, EngineError> {
+            std::thread::sleep(Duration::from_millis(1200));
+            Ok(Arc::new(MesinPalsu::baru(9100)))
+        }
+    }
+
+    /// Boot yang lama tidak boleh memundurkan jam menganggur.
+    ///
+    /// Bug yang dijaga di sini nyata dan sempat lolos: `terakhir` ditulis
+    /// dengan `sekarang` yang diambil SEBELUM mesin dinyalakan, jadi mesin
+    /// yang baru siap sudah terlihat menganggur selama seluruh waktu boot-nya.
+    /// Di host sibuk itu berarti reap langsung mematikan mesin yang baru saja
+    /// dipakai, dan yang terlihat cuma "mesin hilang sesekali".
+    #[test]
+    fn boot_lama_tidak_memundurkan_jam_menganggur() {
+        let slot = Arc::new(Slot::baru(
+            "lambat",
+            "palsu",
+            LaunchSpec::new(PathBuf::from("/palsu"), PathBuf::from("/tmp/palsu")),
+            Arc::new(PenggerakLambat) as Arc<dyn Penggerak>,
+            5000,
+        ));
+        // Jam semu, bukan jam asli: yang diuji adalah apakah waktu boot ikut
+        // dihitung, bukan seberapa cepat host menjalankan test ini. Boot di
+        // sini memakan 1,2 detik, jadi `terakhir` wajib bergeser minimal satu
+        // detik dari 1000. Dengan bug lama, `diam(1001)` sudah 1 detik.
+        slot.pastikan(5000, 1000).expect("boot lambat");
+        let diam = slot.diam(1001);
+        assert!(
+            diam < Duration::from_secs(1),
+            "mesin yang baru selesai boot dianggap menganggur {diam:?}; \
+             jam menganggur dimundurkan sebesar lama boot"
+        );
     }
 
     fn slot_uji() -> (Arc<Slot>, Arc<PenggerakUji>) {
