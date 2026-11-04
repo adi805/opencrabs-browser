@@ -1,8 +1,8 @@
 ---
 project: "OpenCrabs Browser — mesin buka-web yang bisa diandalkan"
 version: "0.1.0"
-status: "draft"
-current_milestone: 0
+status: "in-progress"
+current_milestone: 4
 total_milestones: 4
 type: "tool"
 tech_stack:
@@ -209,10 +209,10 @@ Act on the current request: a PRD alone does not authorize building. At startup,
 
 | # | Milestone | Implementation Tasks | Done When | Status |
 |---|-----------|----------------------|-----------|--------|
-| 1 | **Mata dan tangan** | Persepsi 3 lapis (screenshot + pohon aksesibilitas + DOM), penelusuran shadow DOM/iframe, pencarian elemen (selector, peran, teks, koordinat), aksi klik/ketik/scroll/unggah dengan jalur bertingkat, verifikasi tiap aksi, artefak bukti kegagalan | Halaman consent tiruan (14 kotak custom tanpa `role`) berhasil dicentang semua dan hasilnya dibuktikan dari state halaman, bukan dari balasan (AC-005, AC-006, AC-021 s/d AC-026) | ⬜ Not Started |
-| 2 | Diagnostik dan eskalasi | Klasifikasi 6 kategori, rantai backoff maks 2, routing host→mesin, metrik `browser_open_failures_total` | Tiga halaman uji lokal menghasilkan tiga kategori berbeda dengan artefak lengkap; satu kegagalan jaringan dan satu kegagalan anti-bot eskalasinya tercatat (AC-001 s/d AC-004, AC-007, AC-008, AC-018) | ⬜ Not Started |
-| 3 | Ketahanan sesi dan mesin | Lease per sesi, batas tab per sesi, reload config via SIGHUP, anggaran memori + pemulihan, handoff ber-TTL | Tab sesi hidup melewati `idle_reap`, `max_tabs` berubah tanpa restart, config rusak tidak menurunkan batas (AC-009 s/d AC-017, AC-020) | ⬜ Not Started |
-| 4 | Audit terpadu | Audit seluruh FR/NFR/AC, jalankan `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo xtask check` | Semua AC berstatus VERIFIED atau UNVERIFIED dengan alasan; tidak ada klaim tanpa bukti (AC-019 ikut diperiksa) | ⬜ Not Started |
+| 1 | **Mata dan tangan** | Persepsi 3 lapis (screenshot + pohon aksesibilitas + DOM), penelusuran shadow DOM/iframe, pencarian elemen (selector, peran, teks, koordinat), aksi klik/ketik/scroll/unggah dengan jalur bertingkat, verifikasi tiap aksi, artefak bukti kegagalan | Halaman consent tiruan (14 kotak custom tanpa `role`) berhasil dicentang semua dan hasilnya dibuktikan dari state halaman, bukan dari balasan (AC-005, AC-006, AC-021 s/d AC-026) | ✅ Verified |
+| 2 | Diagnostik dan eskalasi | Klasifikasi 6 kategori, rantai backoff maks 2, routing host→mesin, metrik `browser_open_failures_total` | Tiga halaman uji lokal menghasilkan tiga kategori berbeda dengan artefak lengkap; satu kegagalan jaringan dan satu kegagalan anti-bot eskalasinya tercatat (AC-001 s/d AC-004, AC-007, AC-008, AC-018) | 🔄 In Progress |
+| 3 | Ketahanan sesi dan mesin | Lease per sesi, batas tab per sesi, reload config via SIGHUP, anggaran memori + pemulihan, handoff ber-TTL | Tab sesi hidup melewati `idle_reap`, `max_tabs` berubah tanpa restart, config rusak tidak menurunkan batas (AC-009 s/d AC-017, AC-020) | ✅ Verified |
+| 4 | Audit terpadu | Audit seluruh FR/NFR/AC, jalankan `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo xtask check` | Semua AC berstatus VERIFIED atau UNVERIFIED dengan alasan; tidak ada klaim tanpa bukti (AC-019 ikut diperiksa) | ✅ Verified |
 
 ### Authority Policy v1
 

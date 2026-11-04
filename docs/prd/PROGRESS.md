@@ -2,10 +2,10 @@
 document_type: project-progress
 project: "OpenCrabs Browser — mesin buka-web"
 prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
-status: draft
-current_milestone: 2
+status: in-progress
+current_milestone: 4
 total_milestones: 4
-last_updated: "2026-11-04 16:39"
+last_updated: "2026-11-04 18:04"
 ---
 
 # OpenCrabs Browser Progress
@@ -20,9 +20,11 @@ menyalin spesifikasi.
 - Execution mode: native (belum ada build yang diminta untuk requirement baru)
 - Build authority: **belum ada**. PRD ini spesifikasi, bukan izin membangun.
 - Active milestone / next action: milestone 1 (mata dan tangan), milestone 2
-  (klasifikasi kegagalan + diagnostik), dan milestone 3 (ketahanan sesi +
-  mesin) sudah **Done**, ketiganya dibuktikan test live. Berikutnya milestone 4
-  (audit terpadu).
+  (klasifikasi kegagalan + diagnostik), milestone 3 (ketahanan sesi + mesin),
+  dan milestone 4 (audit terpadu) sudah **Done**. Audit 26 AC:
+  **24 VERIFIED, 2 UNVERIFIED** dengan alasan tertulis, gerbang penuh hijau.
+  Berikutnya: menutup AC-007 (routing host ke mesin) dan mengotomatiskan
+  AC-019, keduanya belum ada bukti otomatis.
 - Otoritas build: owner memberi izin eksekusi penuh 3 November 2026.
 - Required unresolved input: tiga keputusan owner di PRD §2 Review Focus
   (batas anti-bot, tab paralel, `chrome_full`) mempengaruhi FR-001/FR-006/FR-004.
@@ -34,7 +36,7 @@ menyalin spesifikasi.
 | 1 | §4 #1 Mata dan tangan | ✅ Done | Runtime `oc-mata.js` + `oc-tangan.js` disuntik ke setiap tab baru (`Page.addScriptToEvaluateOnNewDocument`), dan `crates/browserd/tests/mata_tangan.rs` membuktikan di mesin sungguhan: 14 kotak centang custom diklik sampai status halaman berubah, isi shadow DOM `closed` dan iframe se-asal terbaca, klik yang tertutup overlay dilaporkan gagal tanpa mengubah halaman. `cargo test -p browserd --test mata_tangan` = 2 passed |
 | 2 | §4 #2 Diagnostik + eskalasi | ✅ Done | `klasifikasi.rs` (6 kategori, bukti wajib, 12 test), `artefak.rs` (4 berkas + kuota, 6 test), `eskalasi.rs` (tunggu → ulang backoff maks 2 → ganti mesin → handoff, 10 test), routing host→mesin + `validasi()` aturan saat start, metrik `browser_open_failures_total{kategori}`. `crates/browserd/tests/diagnostik.rs` membuktikan di mesin sungguhan: normal → `Terbuka`/200, 403 bertanda tantangan → `BlokAntiBot`, 2FA → `ButuhManusia`, port mati → `Jaringan`. `cargo test -p browserd --test diagnostik` = 1 passed |
 | 3 | §4 #3 Ketahanan sesi + mesin | ✅ Done | `lifecycle::lease` (gudang lease per sesi, TTL wajib ditolak nol, batas dihitung dari lease yang masih hidup, 11 test), `browserd::reload` (SIGHUP menukar peta `max_tabs` tanpa restart; config rusak = batas lama dipertahankan, 4 test), `browserd::anggaran` (supervisor PSS per mesin, pemulihan dijanjikan < 30 detik dan 31 detik dihitung terlambat, 8 test), `cdp` gagal-tertutup untuk mesin tak dikenal + gagal-terbuka untuk metrik gagal dibaca. Bukti live di `crates/browserd/tests/sesi_live.rs` (4 test): handoff dijawab melanjutkan tab yang sama (`window.__sesi` selamat), handoff dibatalkan melepas tab, SIGHUP mengubah `max_tabs` 3 → 1 → 4 dengan pid tetap, config rusak saat reload mempertahankan batas lama. Handoff membawa judul, PNG di `<store_db>/handoff/`, dan selector `#challenge-form` |
-| 4 | §4 #4 Audit terpadu | ⬜ Not Started | Gate yang sudah ada: `cargo xtask check` exit 0 di HEAD `f13fb01` |
+| 4 | §4 #4 Audit terpadu | ✅ Done | Audit 26 AC di `docs/prd/AUDIT-AC 041126-1718.md`: 24 VERIFIED, 2 UNVERIFIED (AC-007 routing per host, AC-019 isolasi port produksi), keduanya beralasan. Satu cacat ditemukan dan diperbaiki (`9ba1129`): default `--port` `browserd` menunjuk 9222, port browser produksi. Gerbang di tree yang sama dengan kode `9ba1129`: fmt rc 0, clippy rc 0 tanpa warning, `cargo test --workspace --no-fail-fast` 32 suite ok / 427 passed / 0 failed rc 0, `cargo xtask check` rc 0 |
 
 ## Resume And Changes
 
@@ -189,6 +191,43 @@ menyalin spesifikasi.
   atas nama sesi. (2) TTL handoff 900 detik diuji dengan jam semu di
   `control::registry`, tidak live. (3) `loop_anggaran` belum diuji end-to-end
   dengan mesin sungguhan; pemulihan terbukti dengan mesin palsu.
+
+### Milestone 4: audit terpadu 26 AC
+
+- Audit seluruh FR/NFR/AC ada di `docs/prd/AUDIT-AC 041126-1718.md`, disusun
+  di atas HEAD `7dffb6c`. Aturan statusnya satu, dan itu yang membuat angkanya
+  bisa dipercaya: VERIFIED berarti ada perintah yang bisa dijalankan ulang
+  orang lain dan lulus di gerbang itu; semua yang lain ditulis UNVERIFIED
+  dengan alasannya. Hasil: **24 VERIFIED, 2 UNVERIFIED**.
+- Dua yang tidak dinaikkan bukan karena kurang diperiksa, tapi karena
+  buktinya memang belum ada. AC-007 (routing host ke mesin) logikanya lengkap
+  dan teruji unit, tetapi nol pemanggil di luar `crates/policy/src/select.rs`;
+  pembuatan target selalu memakai mesin bawaan (`crates/cdp/src/targets.rs:270`).
+  AC-019 (isolasi port produksi) buktinya masih prosedur manual: `/json/list`
+  9222 menunjukkan 0 target sebelum dan sesudah uji live, sementara uji live
+  itu sendiri benar-benar menyalakan Chromium di port dev.
+- Audit menemukan satu cacat nyata, dan cacat itu jenis yang paling tidak
+  enak: kode dan komentarnya saling bertentangan. `browserd serve` tanpa flag
+  dan tanpa berkas config akan mencoba bind 9222, yaitu port browser produksi,
+  padahal komentar di atas argumen itu sudah mengklaim 9224 sejak semula.
+  Selama ini tertutupi karena unit systemd mengirim `--bind` eksplisit, jadi
+  yang selama ini melindungi adalah berkas konfigurasi, bukan default yang
+  benar. Diperbaiki di `9ba1129`, plus test pengunci
+  `default_port_adalah_9224_bukan_port_produksi`.
+- Angka gerbang di tree yang sama dengan kode `9ba1129`: `cargo fmt --all
+  -- --check` rc 0, `cargo clippy --workspace --all-targets -- -D warnings`
+  rc 0 dengan 0 baris warning, `cargo test --workspace --no-fail-fast` 32
+  suite ok, 0 suite FAILED, 427 passed, 0 failed, rc 0, lalu `cargo xtask
+  check` rc 0 (fmt ok, clippy ok, test ok). Run pertama fmt merah pada
+  `crates/browserd/src/cli.rs` karena mod test baru belum diformat; yang
+  diperbaiki bentuknya, lalu seluruh gerbang dijalankan ulang. Gerbangnya
+  tidak dilonggarkan dan tidak ada allowed-warning yang ditambah.
+- Yang **belum** terukur di milestone 4, dan tidak diklaim: tiga butir dari
+  milestone 3 masih berlaku tanpa perubahan (`Gudang::pegang` belum dipanggil
+  jalur produksi, TTL handoff 900 detik masih jam semu, `loop_anggaran` belum
+  end-to-end mesin nyata), ditambah dua yang baru: AC-007 dan AC-019 belum punya
+  bukti otomatis. Run gerbang ini juga tidak mengukur memori awal dan akhir,
+  jadi tidak ada klaim apa pun soal pembunuhan earlyoom di putaran ini.
 
 ## AI Agent Rules
 
