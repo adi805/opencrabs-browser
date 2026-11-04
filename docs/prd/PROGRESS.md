@@ -22,9 +22,10 @@ menyalin spesifikasi.
 - Active milestone / next action: milestone 1 (mata dan tangan), milestone 2
   (klasifikasi kegagalan + diagnostik), milestone 3 (ketahanan sesi + mesin),
   dan milestone 4 (audit terpadu) sudah **Done**. Audit 26 AC:
-  **25 VERIFIED, 1 UNVERIFIED** dengan alasan tertulis, gerbang penuh hijau.
-  AC-007 (routing host ke mesin) sudah ditutup dengan test integrasi; sisa
-  mengotomatiskan AC-019 (isolasi port produksi 9222).
+  **26 VERIFIED, 0 UNVERIFIED**, gerbang penuh hijau.
+  Dua AC yang dulu menunggu bukti otomatis sudah ditutup: AC-007 (routing host
+  ke mesin) lewat test integrasi, AC-019 (isolasi port produksi 9222) lewat uji
+  Rust yang menyalakan mesin nyata di port acak lalu membandingkan 9222.
 - Otoritas build: owner memberi izin eksekusi penuh 3 November 2026.
 - Required unresolved input: tiga keputusan owner di PRD §2 Review Focus
   (batas anti-bot, tab paralel, `chrome_full`) mempengaruhi FR-001/FR-006/FR-004.
