@@ -515,6 +515,40 @@ pub fn select(
     )
 }
 
+/// Pemilihan mesin saat yang diketahui cuma host, bukan kebutuhan task.
+///
+/// Dipakai jalur protokol (`Target.createTarget`): di sana hanya URL yang
+/// tersedia, tidak ada daftar kemampuan yang diminta. Karena itu fungsi ini
+/// **hanya** memutuskan kalau ada aturan host yang berlaku. Tanpa aturan,
+/// `Ok(None)` berarti pemanggil memakai mesin bawaannya, bukan mesin termurah:
+/// menjalankan seluruh trafik ke mesin termurah cuma karena `[policy.rules]`
+/// tidak menyebut host-nya adalah keputusan yang tidak pernah diambil siapa pun.
+///
+/// `host` wajib tanpa skema dan tanpa port; pemanggil yang mengekstraknya dari
+/// URL bertanggung jawab membuang keduanya. `"toko.test:8080"` tidak cocok
+/// dengan aturan `"toko.test"`, dan itu disengaja: menebak di sini berarti dua
+/// bentuk penulisan host memberi dua keputusan berbeda tanpa jejak.
+///
+/// # Errors
+///
+/// Meneruskan galat [`select`] apa adanya: aturan yang menunjuk mesin tidak
+/// terpasang atau mesin yang tidak mampu adalah penolakan, bukan alasan
+/// memakai mesin bawaan.
+pub fn select_untuk_host(
+    host: &str,
+    config: &PolicySection,
+    catalog: &Catalog,
+) -> Result<Option<Decision>, SelectError> {
+    if config.rule_for(host).is_none() && !config.is_stealth_host(host) {
+        return Ok(None);
+    }
+    let request = Request {
+        host: host.to_owned(),
+        ..Request::default()
+    };
+    select(&request, config, catalog).map(Some)
+}
+
 fn choose_with_layout(
     catalog: &Catalog,
     needs: Capabilities,
@@ -947,5 +981,87 @@ cooldown_secs = 120
         let pesan = format!("{salah:?}");
         assert!(pesan.contains("chrome-shel"), "{pesan}");
         assert!(pesan.contains("krome-full"), "{pesan}");
+    }
+
+    // AC-007: jalur protokol cuma tahu host. Yang diputuskan di sini hanya
+    // aturan host; sisanya menyerahkan keputusan ke pemanggil.
+    #[test]
+    fn host_dengan_aturan_diarahkan_ke_mesin_yang_ditunjuk() {
+        let config = PolicySection {
+            rules: BTreeMap::from([("toko.test".to_owned(), "chrome-full".to_owned())]),
+            ..PolicySection::default()
+        };
+        let keputusan = select_untuk_host("toko.test", &config, &semua())
+            .expect("aturan sah")
+            .expect("ada aturan yang berlaku");
+        assert_eq!(keputusan.kind, EngineKind::Full);
+        assert_eq!(keputusan.rule, RULE_CONFIG);
+
+        let sub = select_untuk_host("www.toko.test", &config, &semua())
+            .expect("aturan sah")
+            .expect("subdomain ikut aturan");
+        assert_eq!(sub.kind, EngineKind::Full);
+    }
+
+    #[test]
+    fn host_tanpa_aturan_tidak_memutuskan_apa_apa() {
+        // Kalau ini mengembalikan mesin termurah, SELURUH trafik yang hostnya
+        // tidak disebut di config pindah mesin tanpa ada yang menyuruh.
+        assert_eq!(
+            select_untuk_host("lain.test", &PolicySection::default(), &semua())
+                .expect("tanpa aturan bukan galat"),
+            None
+        );
+
+        // Port bukan bagian dari host: aturan ditulis tanpa port, jadi
+        // "toko.test:8080" bukan "toko.test" dan tidak boleh cocok.
+        let config = PolicySection {
+            rules: BTreeMap::from([("toko.test".to_owned(), "chrome-full".to_owned())]),
+            ..PolicySection::default()
+        };
+        assert_eq!(
+            select_untuk_host("toko.test:8080", &config, &semua())
+                .expect("tanpa aturan bukan galat"),
+            None
+        );
+    }
+
+    #[test]
+    fn host_stealth_diarahkan_ke_full() {
+        let config = PolicySection {
+            stealth_hosts: vec!["cloudflare.com".to_owned()],
+            ..PolicySection::default()
+        };
+        let keputusan = select_untuk_host("challenges.cloudflare.com", &config, &semua())
+            .expect("aturan sah")
+            .expect("host stealth punya aturan");
+        assert_eq!(keputusan.kind, EngineKind::Full);
+        assert_eq!(keputusan.rule, RULE_STEALTH);
+    }
+
+    #[test]
+    fn aturan_host_yang_tidak_bisa_dipenuhi_ditolak() {
+        let config = PolicySection {
+            rules: BTreeMap::from([("toko.test".to_owned(), "chrome-full".to_owned())]),
+            ..PolicySection::default()
+        };
+        let katalog = Catalog::dari_mesin(["chrome-shell"]);
+        let err =
+            select_untuk_host("toko.test", &config, &katalog).expect_err("chrome-full tidak ada");
+        assert!(
+            err.to_string().contains("chrome-full"),
+            "pesan galat menyebut mesinnya: {err}"
+        );
+
+        let stealth = PolicySection {
+            stealth_hosts: vec!["cloudflare.com".to_owned()],
+            ..PolicySection::default()
+        };
+        let err = select_untuk_host("cloudflare.com", &stealth, &katalog)
+            .expect_err("stealth tanpa full ditolak, bukan jatuh ke shell");
+        assert!(
+            matches!(err, SelectError::StealthHostNeedsFull { .. }),
+            "{err:?}"
+        );
     }
 }

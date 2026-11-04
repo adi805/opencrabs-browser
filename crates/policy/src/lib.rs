@@ -26,5 +26,5 @@ pub use counters::CaptchaCounters;
 pub use rate::{Allow, HandoffLimits, RateState};
 pub use select::{
     Capabilities, CaptchaSection, Catalog, Decision, EngineKind, PolicySection, Request,
-    SelectError, select,
+    SelectError, select, select_untuk_host,
 };
