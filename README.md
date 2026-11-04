@@ -201,6 +201,34 @@ Batas yang tetap jujur:
 
 Bukti: `cargo test -p cdp --test batas_tab` (9 kasus, mesin palsu yang benar-benar server HTTP dan websocket; tiga di antaranya membuktikan pesan yang ditolak **tidak pernah sampai** ke mesin).
 
+## Mata dan tangan: `__oc` di dalam halaman
+
+Daemon menyuntikkan satu skrip kecil ke **setiap tab, sejak dokumen lahir** (`Page.addScriptToEvaluateOnNewDocument`). Sesudah itu setiap halaman punya `window.__oc`, dan agent memakainya lewat `Runtime.evaluate` biasa. Tidak ada endpoint baru, tidak ada protokol baru: yang berubah cuma apa yang bisa dilakukan di dalam halaman.
+
+Kenapa harus sejak lahir: shadow root bermode `closed` hanya bisa direkam pada detik ia dibuat. Skrip ini menambal `Element.prototype.attachShadow` di document-start dan menyimpan akar tertutup di `WeakMap`, jadi isinya ikut terbaca. Tab yang sudah termuat sebelum suntikan tetap dapat runtime, tapi shadow tertutup yang sudah dibuat sebelum itu tidak bisa dipulihkan.
+
+| Perintah | Yang dikembalikan |
+|---|---|
+| `__oc.mata()` | `url`, `judul`, `jumlah`, `elemen[]` (tag, peran, nama aksesibel, kotak, terlihat, tercentang, nilai, jalur, asal: `dom`/`shadow`/`iframe`), `wadah[]`, dan ringkasan teks halaman |
+| `__oc.klik(target)` | `berubah` dengan daftar `perubahan`, atau `tidak_ada_perubahan`, atau `gagal` dengan `kategori` |
+| `__oc.ketik(target, teks)` | `berubah` kalau nilai benar-benar terpasang, `tidak_ada_perubahan` kalau tidak |
+| `__oc.scroll(target\|'bawah')` | posisi sebelum dan sesudah |
+| `__oc.berkas()` | input berkas yang ada, beserta catatan bahwa unggah tetap lewat CDP `DOM.setFileInputFiles` |
+
+`target` menerima empat bentuk: indeks dari `mata()` (`{i: 7}`), selector CSS, objek `{peran, nama}`, atau teks yang terlihat. Pencariannya menelusuri shadow DOM (terbuka maupun tertutup) dan iframe se-asal, karena `document.querySelectorAll` tidak bisa masuk ke sana.
+
+Klik mencoba tiga jalur berurutan dan berhenti di jalur pertama yang mengubah keadaan halaman: klik native, rangkaian event tikus berkoordinat, lalu papan ketik. Sebelum menyentuh apa pun, titik tengah elemen diuji dengan `elementFromPoint` (diturunkan ke dalam shadow root), jadi tombol yang tertutup lapisan lain dilaporkan **gagal** beserta elemen penghalangnya, bukan dilaporkan berhasil.
+
+Batas yang tetap jujur:
+
+- **Iframe lintas asal tidak terbaca.** Isinya milik origin lain, dan menembusnya butuh `Target.attachToTarget` per bingkai. Yang terlihat hanya keberadaan bingkainya (`wadah[].lintas_asal = true`).
+- **Verifikasi sinkron bisa meleset pada UI yang menunda perubahan.** Perubahan dari handler langsung terlihat; perubahan yang menunggu microtask atau animasi tidak. Untuk itu ada `__oc.klikTunggu(target, ms)`, yang butuh pemanggil memakai `awaitPromise`.
+- **Unggah berkas bukan urusan JavaScript.** Nilai `input[type=file]` hanya bisa diisi pengguna atau CDP.
+- **`paksa: true` melewati pemeriksaan overlay, bukan pemeriksaan hasil.** Hasilnya tetap keadaan halaman.
+- **Snapshot dibatasi.** `__oc.mata({maks: N})` memotong daftar elemen (bawaan 300); halaman 1000+ node tetap menghasilkan ringkasan teks, bukan 1000 baris JSON.
+
+Bukti: `cargo test -p browserd --test mata_tangan` menyalakan `chrome-headless-shell` sungguhan dan menyajikan fixture dari proses test: 14 kotak custom tanpa `role` tercentang semua lewat satu perintah, tombol di dalam shadow tertutup bisa diklik, tombol di dalam iframe bisa diklik dan inputnya bisa diketik, tombol di bawah overlay dilaporkan gagal, dan klik tanpa efek dilaporkan `tidak_ada_perubahan`.
+
 ## Lifecycle: mesin tidur saat menganggur
 
 Mesin yang tidak dipakai tidak perlu terus hidup. Dengan `--idle-reap-secs N` (atau `[daemon] idle_reap_secs = N`) daemon memeriksa tiap 5 detik: mesin tanpa sesi terbuka yang tidak disentuh selama N detik dimatikan lewat `SIGTERM` ke group prosesnya, lalu `SIGKILL` setelah tenggangnya. `0` (bawaan) mematikan fitur ini.
