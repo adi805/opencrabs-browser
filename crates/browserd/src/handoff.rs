@@ -547,6 +547,7 @@ mod tests {
                     target_id: "T-1".to_owned(),
                     kind: Kind::Captcha,
                     url: "https://situs.test/".to_owned(),
+                    title: None,
                     screenshot: None,
                     expected_selector: None,
                     detail: "s2_challenge_url".to_owned(),

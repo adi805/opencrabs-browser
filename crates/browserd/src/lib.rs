@@ -11,6 +11,7 @@
 
 pub mod anggaran;
 pub mod artefak;
+pub mod base64;
 pub mod cdp_client;
 pub mod challenge;
 pub mod cli;

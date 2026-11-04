@@ -304,6 +304,7 @@ mod tests {
                     target_id: "T-1".to_owned(),
                     kind: Kind::Captcha,
                     url: "https://situs.test/beranda".to_owned(),
+                    title: Some("Tantangan".to_owned()),
                     screenshot: None,
                     expected_selector: Some("#selesai".to_owned()),
                     detail: "s2_challenge_url".to_owned(),

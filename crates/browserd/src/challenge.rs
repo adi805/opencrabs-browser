@@ -18,6 +18,7 @@
 //! hanya status, URL akhir, dan nama sinyal DOM.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use cdp::FrameObserver;
@@ -195,6 +196,40 @@ pub fn action(evidence: &Evidence) -> Action {
     }
 }
 
+/// Konteks halaman yang ditempelkan ke handoff supaya owner bisa menjawab
+/// tanpa menggali log: judul untuk mengenali halamannya, layar untuk melihat
+/// apa yang dihadapi mesin, dan selector titik henti untuk jalur jawab.
+///
+/// Semua opsional, dan `None` berarti pengambilan gagal. Handoffnya tetap
+/// dibuat: handoff tanpa konteks masih berguna, handoff yang hilang karena
+/// screenshot gagal tidak.
+#[derive(Debug, Clone, Default)]
+pub struct Konteks {
+    pub judul: Option<String>,
+    pub layar: Option<PathBuf>,
+}
+
+/// Selector titik henti yang benar-benar dilihat probe.
+///
+/// Yang dikembalikan adalah ekspresi yang **sama** dengan yang dipakai
+/// [`JS_DETECT`]: selector yang tidak pernah dicari probe bukan titik henti,
+/// itu tebakan. Prioritas dari yang paling spesifik: form tantangan, lalu
+/// widget captcha, lalu turnstile global. Sinyal teks tidak punya elemen,
+/// jadi jawabannya `None` daripada mengarang selector.
+#[must_use]
+pub fn selector_titik_henti(dom: &DomFinding) -> Option<&'static str> {
+    if dom.challenge_form {
+        return Some("#challenge-form, #cf-challenge-running");
+    }
+    if dom.captcha_widget {
+        return Some(".g-recaptcha, [data-sitekey], iframe[src*=\"hcaptcha.com\"]");
+    }
+    if dom.captcha_global {
+        return Some(".cf-turnstile");
+    }
+    None
+}
+
 /// Menyusun permintaan handoff dari bukti yang sudah dinilai.
 ///
 /// `detail` hanya memuat nama sinyal dan status: itu yang dibaca owner untuk
@@ -205,6 +240,7 @@ pub fn handoff_baru(
     target_id: &str,
     evidence: &Evidence,
     putusan: &Verdict,
+    konteks: &Konteks,
 ) -> NewHandoff {
     let sinyal = putusan.signal_labels().join(",");
     let status = evidence
@@ -215,8 +251,12 @@ pub fn handoff_baru(
         target_id: target_id.to_owned(),
         kind: HandoffKind::Captcha,
         url: evidence.final_url.clone().unwrap_or_default(),
-        screenshot: None,
-        expected_selector: None,
+        title: konteks.judul.clone(),
+        screenshot: konteks.layar.clone(),
+        expected_selector: evidence
+            .dom
+            .as_ref()
+            .and_then(|dom| selector_titik_henti(dom).map(str::to_owned)),
         detail: format!(
             "sinyal={sinyal} status={status} bobot={} keyakinan={}",
             putusan.weight,
@@ -656,7 +696,7 @@ mod tests {
             ..Evidence::default()
         };
         let putusan = challenge::verdict(&evidence);
-        let new = handoff_baru("S1", "T1", &evidence, &putusan);
+        let new = handoff_baru("S1", "T1", &evidence, &putusan, &Konteks::default());
         assert_eq!(new.kind, HandoffKind::Captcha);
         assert_eq!(new.url, "https://x.test/a");
         assert!(
@@ -733,6 +773,103 @@ mod tests {
                 }
             ),
             Some(Escalation::Handoff)
+        );
+    }
+
+    #[test]
+    fn selector_diturunkan_dari_sinyal_yang_dilihat_probe() {
+        let form = DomFinding {
+            challenge_form: true,
+            ..DomFinding::default()
+        };
+        let widget = DomFinding {
+            captcha_widget: true,
+            ..DomFinding::default()
+        };
+        let global = DomFinding {
+            captcha_global: true,
+            ..DomFinding::default()
+        };
+        let teks = DomFinding {
+            challenge_text: true,
+            ..DomFinding::default()
+        };
+        assert_eq!(
+            selector_titik_henti(&form),
+            Some("#challenge-form, #cf-challenge-running")
+        );
+        assert_eq!(
+            selector_titik_henti(&widget),
+            Some(".g-recaptcha, [data-sitekey], iframe[src*=\"hcaptcha.com\"]")
+        );
+        assert_eq!(selector_titik_henti(&global), Some(".cf-turnstile"));
+        assert_eq!(
+            selector_titik_henti(&teks),
+            None,
+            "sinyal teks tidak punya elemen: selector di sini akan jadi tebakan"
+        );
+    }
+
+    #[test]
+    fn selector_yang_dilaporkan_benar_benar_dicari_probe() {
+        // Selector yang tidak muncul di skrip probe bukan titik henti, itu
+        // karangan. Uji ini mengikat keduanya supaya perubahan skrip tidak
+        // meninggalkan selector basi di jawaban ke owner.
+        for dom in [
+            DomFinding {
+                challenge_form: true,
+                ..DomFinding::default()
+            },
+            DomFinding {
+                captcha_widget: true,
+                ..DomFinding::default()
+            },
+            DomFinding {
+                captcha_global: true,
+                ..DomFinding::default()
+            },
+        ] {
+            let selector = selector_titik_henti(&dom).expect("harus ada selector");
+            for bagian in selector.split(',') {
+                let bagian = bagian.trim();
+                if bagian.starts_with('.') && bagian == ".cf-turnstile" {
+                    // Turnstile global terdeteksi lewat `window`, bukan query:
+                    // selector ini titik henti untuk owner, bukan sinyal probe.
+                    continue;
+                }
+                assert!(
+                    JS_DETECT.contains(bagian),
+                    "selector {bagian} tidak ada di skrip probe"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn handoff_membawa_konteks_halaman() {
+        let evidence = Evidence {
+            document_status: Some(403),
+            final_url: Some("https://x.test/a".to_owned()),
+            dom: Some(DomFinding {
+                challenge_form: true,
+                ..DomFinding::default()
+            }),
+            ..Evidence::default()
+        };
+        let putusan = challenge::verdict(&evidence);
+        let konteks = Konteks {
+            judul: Some("Just a moment".to_owned()),
+            layar: Some(PathBuf::from("/tmp/handoff-1.png")),
+        };
+        let new = handoff_baru("S1", "T1", &evidence, &putusan, &konteks);
+        assert_eq!(new.title.as_deref(), Some("Just a moment"));
+        assert_eq!(
+            new.screenshot.as_deref(),
+            Some(std::path::Path::new("/tmp/handoff-1.png"))
+        );
+        assert_eq!(
+            new.expected_selector.as_deref(),
+            Some("#challenge-form, #cf-challenge-running")
         );
     }
 

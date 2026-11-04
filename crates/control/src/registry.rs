@@ -116,6 +116,10 @@ pub struct NewHandoff {
     pub target_id: String,
     pub kind: Kind,
     pub url: String,
+    /// Judul dokumen saat handoff dibuat. Owner memakainya untuk mengenali
+    /// halaman tanpa membuka log, jadi ini satu-satunya isi halaman yang ikut
+    /// tersimpan, dan `None` berarti pengambilan gagal, bukan judul kosong.
+    pub title: Option<String>,
     pub screenshot: Option<PathBuf>,
     pub expected_selector: Option<String>,
     pub detail: String,
@@ -129,6 +133,7 @@ pub struct Handoff {
     pub target_id: String,
     pub kind: Kind,
     pub url: String,
+    pub title: Option<String>,
     pub screenshot: Option<PathBuf>,
     pub expected_selector: Option<String>,
     pub detail: String,
@@ -148,6 +153,7 @@ pub struct View {
     pub session_id: String,
     pub kind: Kind,
     pub url: String,
+    pub title: Option<String>,
     pub screenshot: Option<String>,
     pub expected_selector: Option<String>,
     pub detail: String,
@@ -164,6 +170,7 @@ impl From<&Handoff> for View {
             session_id: handoff.session_id.clone(),
             kind: handoff.kind,
             url: handoff.url.clone(),
+            title: handoff.title.clone(),
             screenshot: handoff
                 .screenshot
                 .as_ref()
@@ -276,6 +283,7 @@ impl Registry {
             target_id: new.target_id,
             kind: new.kind,
             url: new.url,
+            title: new.title,
             screenshot: new.screenshot,
             expected_selector: new.expected_selector,
             detail: new.detail,
@@ -458,6 +466,7 @@ mod tests {
             target_id: "T-1".to_owned(),
             kind,
             url: "https://situs.test/beranda".to_owned(),
+            title: Some("Just a moment".to_owned()),
             screenshot: Some(PathBuf::from("/tmp/captcha.png")),
             expected_selector: None,
             detail: "s2_challenge_url".to_owned(),
@@ -492,6 +501,24 @@ mod tests {
         assert_eq!(view.state, State::Pending);
         assert_eq!(view.expires_at, 1_000 + HOLD_SECS);
         assert!(view.screenshot.is_some());
+        assert_eq!(
+            view.title.as_deref(),
+            Some("Just a moment"),
+            "judul harus ikut sampai ke view: itu yang dibaca owner"
+        );
+    }
+
+    #[test]
+    fn judul_yang_tidak_terambil_tetap_none_bukan_string_kosong() {
+        // `None` dan `""` terlihat sama di layar tapi berbeda artinya: yang
+        // pertama berarti pengambilan gagal, yang kedua berarti halaman
+        // memang tidak punya judul. Menyamakan keduanya menghapus petunjuk
+        // saat mencari kenapa handoff datang tanpa konteks.
+        let (registry, _, _) = registry();
+        let mut new = baru(Kind::Captcha);
+        new.title = None;
+        let view = registry.create(1_000, new).expect("harus dibuat");
+        assert_eq!(view.title, None);
     }
 
     #[test]

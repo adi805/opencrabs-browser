@@ -94,6 +94,9 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         args.ready_timeout_ms,
         limits_handoff(&file),
         control::RegistryLimits::default(),
+        // Layar handoff disimpan di samping DB store: handoff harus membawa
+        // gambar halaman, dan gambar itu milik data daemon, bukan /tmp.
+        Some(wiring::dir_layar(&file.store_db())),
     );
 
     let bind = resolved.bind.clone();
