@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><title>Shadow terbuka dan tertutup</title></head><body>
+<h1>Shadow</h1>
+<div id="terbuka"></div>
+<div id="tertutup"></div>
+<p id="catatan">belum ada yang diklik</p>
+<script>
+const a = document.getElementById('terbuka').attachShadow({mode:'open'});
+a.innerHTML = '<button id="tombol-terbuka">Tombol terbuka</button>';
+a.getElementById('tombol-terbuka').addEventListener('click', () => {
+  document.getElementById('catatan').textContent = 'terbuka diklik';
+});
+const b = document.getElementById('tertutup').attachShadow({mode:'closed'});
+b.innerHTML = '<button id="tombol-tertutup">Tombol tertutup</button>';
+b.getElementById('tombol-tertutup').addEventListener('click', () => {
+  document.getElementById('catatan').textContent = 'tertutup diklik';
+});
+</script></body></html>

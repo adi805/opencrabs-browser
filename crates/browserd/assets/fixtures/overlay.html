@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><title>Overlay</title>
+<style>
+ #tombol{position:relative;z-index:1;padding:10px 20px}
+ #lapisan{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:9}
+</style></head><body>
+<h1>Overlay</h1>
+<button id="tombol">Klik saya</button>
+<div id="lapisan"></div>
+<p id="catatan">belum</p>
+<script>document.getElementById('tombol').addEventListener('click',()=>{document.getElementById('catatan').textContent='diklik'});</script>
+</body></html>

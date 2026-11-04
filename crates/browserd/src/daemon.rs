@@ -51,6 +51,15 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
         .map_err(|err| anyhow::anyhow!("konfigurasi mesin tidak sah: {err}"))?
         .dengan_batas_tab(batas_tab(&resolved.machines));
 
+    // Penanam dijalankan untuk SETIAP mesin, bukan hanya mesin bawaan. Klien
+    // yang diarahkan ke mesin lain lewat policy harus mendapat mata dan tangan
+    // yang sama; menyuntik satu mesin saja akan membuat kemampuan bergantung
+    // pada mesin mana yang kebetulan dipilih.
+    for (id, slot) in pool.slots() {
+        crate::penanam::mulai(Arc::clone(slot));
+        tracing::info!(mesin = %id, "penanam runtime mata-tangan dijalankan");
+    }
+
     // State daemon dilacak sejak awal. Metrik `browser_engine_state` yang
     // dilaporkan tanpa state nyata cuma angka karangan, jadi state-nya
     // dijalankan lewat tabel transisi yang sama dengan yang diuji unit.

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><title>Consent tiruan</title>
+<style>
+ body{font:16px system-ui;margin:24px}
+ kotak-centang{display:inline-flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer;user-select:none}
+ kotak-centang .kotak{width:22px;height:22px;border:2px solid #444;border-radius:4px;display:inline-block}
+ kotak-centang[aria-checked="true"] .kotak{background:#1a73e8;border-color:#1a73e8}
+ button{margin-top:18px;padding:8px 18px}
+</style></head><body>
+<h1>Sebelum lanjut</h1>
+<p>Centang 14 pilihan. Semua kotak ini custom element tanpa role.</p>
+<div id="daftar"></div>
+<button id="lanjut" disabled>Lanjut</button>
+<p id="status">0 dari 14 tercentang</p>
+<script>
+class KotakCentang extends HTMLElement {
+  constructor(){
+    super();
+    const akar = this.attachShadow({mode:'open'});
+    akar.innerHTML = '<span class="kotak"></span><span class="teks"></span>';
+    // Atribut TIDAK boleh ditambah di constructor. Spesifikasi custom element
+    // melarangnya, dan Chromium menegakkannya: elemen yang melanggar ditandai
+    // gagal, selamanya tinggal HTMLUnknownElement tanpa shadow root. Halaman
+    // seperti Google consent menaruh atribut di markup atau di sini.
+  }
+  connectedCallback(){
+    if (!this.hasAttribute('aria-checked')) this.setAttribute('aria-checked','false');
+    this.shadowRoot.querySelector('.teks').textContent = this.getAttribute('label') || 'Pilihan';
+    this.addEventListener('click', () => {
+      const kini = this.getAttribute('aria-checked') === 'true';
+      this.setAttribute('aria-checked', String(!kini));
+      segarkan();
+    });
+  }
+}
+customElements.define('kotak-centang', KotakCentang);
+const daftar = document.getElementById('daftar');
+for (let i = 1; i <= 14; i += 1) {
+  const el = document.createElement('kotak-centang');
+  el.setAttribute('label', 'Pilihan ' + i);
+  daftar.appendChild(el);
+}
+function segarkan(){
+  const semua = document.querySelectorAll('kotak-centang');
+  let n = 0;
+  for (const el of semua) if (el.getAttribute('aria-checked') === 'true') n += 1;
+  document.getElementById('status').textContent = n + ' dari 14 tercentang';
+  document.getElementById('lanjut').disabled = n !== 14;
+}
+</script></body></html>
