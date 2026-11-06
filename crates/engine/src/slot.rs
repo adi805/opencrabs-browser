@@ -24,7 +24,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{Engine, EngineError, EngineInfo, LaunchSpec, ShellEngine};
+use crate::{Engine, EngineError, EngineInfo, LaunchSpec, OxiEngine, ShellEngine};
 
 /// Kegagalan yang datang dari satu slot, bukan dari protokol.
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +48,14 @@ pub trait Penggerak: Send + Sync {
 /// Penggerak sungguhan: `chrome-headless-shell` lewat [`ShellEngine`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PenggerakShell;
+
+/// Penggerak sungguhan: `oxibrowser serve` lewat [`OxiEngine`].
+///
+/// Dipisah dari [`PenggerakShell`] karena dua mesin itu punya resep dan
+/// discovery yang berbeda. Yang **sama** cuma kontrak [`Engine`], dan itulah
+/// yang membuat `Slot` tidak perlu tahu mesin mana yang dipegangnya.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PenggerakOxi;
 
 /// Detik epoch sekarang.
 ///
@@ -73,6 +81,27 @@ impl Penggerak for PenggerakShell {
     fn nyalakan(&self, spec: &LaunchSpec, timeout_ms: u64) -> Result<Arc<dyn Engine>, EngineError> {
         ShellEngine::launch(spec.clone(), timeout_ms)
             .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
+    }
+}
+
+impl Penggerak for PenggerakOxi {
+    fn nyalakan(&self, spec: &LaunchSpec, timeout_ms: u64) -> Result<Arc<dyn Engine>, EngineError> {
+        OxiEngine::launch(spec.clone(), timeout_ms)
+            .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
+    }
+}
+
+/// Penggerak untuk satu jenis mesin, atau `None` kalau jenis itu belum punya
+/// adapter.
+///
+/// Satu tempat pemetaan `kind -> penggerak`, supaya `daemon` tidak menumbuhkan
+/// `match` sendiri yang bisa lupa diperbarui saat adapter baru masuk.
+#[must_use]
+pub fn penggerak_untuk(kind: &str) -> Option<Arc<dyn Penggerak>> {
+    match kind {
+        "shell" => Some(Arc::new(PenggerakShell)),
+        "oxi" => Some(Arc::new(PenggerakOxi)),
+        _ => None,
     }
 }
 

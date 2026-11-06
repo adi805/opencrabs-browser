@@ -6,29 +6,25 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::Pid;
-
+use crate::proses::{Proc, stderr_ke_file};
 use crate::{Engine, EngineError, EngineInfo, LaunchSpec};
 
 pub const DEFAULT_READY_TIMEOUT_MS: u64 = 15_000;
 
 /// Batas keras ukuran respons discovery. Endpoint ini kecil; respons raksasa
 /// berarti yang menjawab bukan mesin yang kita kira.
-const MAX_RESPONSE_BYTES: usize = 1 << 20;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 1 << 20;
 
 /// Berkas stderr mesin di dalam `user_data_dir`. Namanya dipakai juga oleh
 /// pesan error, jadi hanya didefinisikan sekali di sini.
 pub const STDERR_LOG: &str = "engine-stderr.log";
 
-const TERM_GRACE: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Flag yang sudah terbukti di benchmark sebelumnya. Sengaja tidak memakai
 /// `--headless`: biner ini headless secara bawaan.
@@ -44,12 +40,6 @@ const SHELL_FLAGS: &[&str] = &[
     "--disable-extensions",
     "--window-size=1920,1080",
 ];
-
-struct Proc {
-    child: Child,
-    pgid: i32,
-    stopped: bool,
-}
 
 pub struct ShellEngine {
     spec: LaunchSpec,
@@ -78,27 +68,12 @@ impl ShellEngine {
         cmd.arg(format!("--user-data-dir={}", spec.user_data_dir.display()));
         cmd.args(SHELL_FLAGS);
         cmd.args(&spec.extra_args);
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::null());
         // stderr tidak dibuang: kegagalan boot yang bisu memaksa orang menebak.
         // Isinya kecil (belasan baris) dan berakhir di sebelah profil, sehingga
         // "mesin tidak siap" selalu punya sebab yang bisa dibaca.
-        let stderr_log = spec.user_data_dir.join(STDERR_LOG);
-        match std::fs::File::create(&stderr_log) {
-            Ok(file) => {
-                cmd.stderr(Stdio::from(file));
-            }
-            Err(err) => {
-                tracing::warn!(path = %stderr_log.display(), %err, "tidak bisa menulis log stderr mesin");
-                cmd.stderr(Stdio::null());
-            }
-        }
-        cmd.stdout(Stdio::null());
+        stderr_ke_file(&mut cmd, &spec.user_data_dir.join(STDERR_LOG));
         // Group sendiri: SIGTERM ke group ini ikut mematikan seluruh anaknya.
-        cmd.process_group(0);
-
-        let child = cmd.spawn()?;
-        let pgid = child.id() as i32;
+        let mut proc = Proc::spawn(cmd)?;
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
 
         let prepared = (|| -> Result<EngineInfo, EngineError> {
@@ -115,16 +90,10 @@ impl ShellEngine {
             Ok(info) => Ok(Self {
                 spec,
                 info,
-                proc: Mutex::new(Proc {
-                    child,
-                    pgid,
-                    stopped: false,
-                }),
+                proc: Mutex::new(proc),
             }),
             Err(err) => {
-                let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
-                let mut child = child;
-                let _ = child.wait();
+                proc.kill_group();
                 Err(err)
             }
         }
@@ -164,44 +133,21 @@ impl Engine for ShellEngine {
     }
 
     fn process_id(&self) -> Option<u32> {
-        self.proc.lock().ok().map(|guard| guard.child.id())
+        self.proc.lock().ok().map(|guard| guard.pid())
     }
 
     fn is_running(&self) -> bool {
         let Ok(mut guard) = self.proc.lock() else {
             return false;
         };
-        if guard.stopped {
-            return false;
-        }
-        matches!(guard.child.try_wait(), Ok(None))
+        guard.is_running()
     }
 
+    /// SIGTERM dulu supaya shell sempat menutup profil dan menyimpan cookie,
+    /// lalu SIGKILL lewat [`Proc::stop`] kalau lewat masa tenggang.
     fn stop(&self) -> Result<(), EngineError> {
         let mut guard = self.proc.lock().map_err(|_| EngineError::Poisoned)?;
-        if guard.stopped {
-            return Ok(());
-        }
-        let pgid = Pid::from_raw(guard.pgid);
-
-        // SIGTERM dulu: shell sempat menutup profil dan menyimpan cookie.
-        let _ = killpg(pgid, Signal::SIGTERM);
-        let deadline = Instant::now() + TERM_GRACE;
-        while Instant::now() < deadline {
-            match guard.child.try_wait() {
-                Ok(Some(_)) => {
-                    guard.stopped = true;
-                    return Ok(());
-                }
-                Ok(None) => std::thread::sleep(POLL_INTERVAL),
-                Err(err) => return Err(EngineError::Io(err)),
-            }
-        }
-
-        let _ = killpg(pgid, Signal::SIGKILL);
-        let _ = guard.child.wait();
-        guard.stopped = true;
-        Ok(())
+        guard.stop()
     }
 }
 
@@ -242,7 +188,7 @@ pub fn parse_devtools_port(contents: &str) -> Option<u16> {
     contents.lines().next()?.trim().parse::<u16>().ok()
 }
 
-fn info_from_json(body: &str, port: u16) -> Result<EngineInfo, EngineError> {
+pub(crate) fn info_from_json(body: &str, port: u16) -> Result<EngineInfo, EngineError> {
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|err| EngineError::Discovery(format!("bukan JSON: {err}")))?;
 
@@ -274,7 +220,7 @@ fn info_from_json(body: &str, port: u16) -> Result<EngineInfo, EngineError> {
 /// GET minimal ke mesin lokal. Ditulis manual karena yang dibutuhkan hanya
 /// HTTP/1.1 tanpa TLS ke loopback, dan menambah klien HTTP penuh untuk ini
 /// berarti menambah permukaan yang harus dijaga.
-fn http_get(port: u16, path: &str) -> Result<String, EngineError> {
+pub(crate) fn http_get(port: u16, path: &str) -> Result<String, EngineError> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -345,14 +291,14 @@ fn content_length(head: &[u8]) -> Option<usize> {
 ///
 /// Respons tanpa `Content-Length` (atau `Transfer-Encoding: chunked`) hanya
 /// dianggap selesai saat socket ditutup, persis seperti perilaku lama.
-fn is_complete(buf: &[u8]) -> bool {
+pub(crate) fn is_complete(buf: &[u8]) -> bool {
     let Some((head, body)) = split_http_response(buf) else {
         return false;
     };
     content_length(head).is_some_and(|expected| body.len() >= expected)
 }
 
-fn split_http_response(buf: &[u8]) -> Option<(&[u8], &[u8])> {
+pub(crate) fn split_http_response(buf: &[u8]) -> Option<(&[u8], &[u8])> {
     let sep = b"\r\n\r\n";
     let pos = buf.windows(sep.len()).position(|window| window == sep)?;
     Some((&buf[..pos], &buf[pos + sep.len()..]))

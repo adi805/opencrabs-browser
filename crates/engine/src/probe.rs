@@ -38,6 +38,45 @@ pub fn discover_shell() -> Option<PathBuf> {
     pick_shell_in(&Path::new(&home).join(PLAYWRIGHT_CACHE))
 }
 
+/// Kandidat biner oxi, dari yang paling spesifik ke paling umum.
+///
+/// `$OXI_BIN` didahulukan karena CI mengunduh atau membangun biner ke lokasi
+/// yang ditentukan sendiri, dan menebak dari `$PATH` di sana hanya menambah
+/// satu cara untuk salah. Oxi **tidak** punya aset rilis Linux, jadi biner
+/// biasanya hasil `cargo install` di `~/.cargo/bin`.
+pub const OXI_ENV: &str = "OXI_BIN";
+pub const OXI_KANDIDAT: &[&str] = &[".cargo/bin/oxibrowser", ".local/bin/oxibrowser"];
+
+/// Biner oxi yang ada di mesin ini, kalau ada.
+///
+/// Yang diperiksa hanya keberadaan berkas yang bisa dieksekusi; menjalankan
+/// `oxibrowser version` untuk memastikan berarti menyalakan proses hanya demi
+/// sebuah kecurigaan, dan boot nanti tetap akan melaporkan kegagalan yang jelas.
+#[must_use]
+pub fn discover_oxi() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os(OXI_ENV) {
+        let path = PathBuf::from(explicit);
+        return bisa_dijalankan(&path).then_some(path);
+    }
+    let home = std::env::var_os("HOME")?;
+    oxi_di_home(Path::new(&home))
+}
+
+/// Urutan pencarian di dalam satu `$HOME`. Dipisah supaya bisa diuji tanpa
+/// menyentuh `$HOME` maupun `$OXI_BIN`.
+fn oxi_di_home(home: &Path) -> Option<PathBuf> {
+    let mut kandidat: Vec<PathBuf> = OXI_KANDIDAT.iter().map(|rel| home.join(rel)).collect();
+    kandidat.push(PathBuf::from("/usr/local/bin/oxibrowser"));
+    kandidat.into_iter().find(|path| bisa_dijalankan(path))
+}
+
+fn bisa_dijalankan(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +125,42 @@ mod tests {
     #[test]
     fn direktori_tidak_ada_balik_none_tanpa_panic() {
         assert!(pick_shell_in(Path::new("/tidak/ada/sama/sekali")).is_none());
+    }
+
+    fn temp_oxi(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ocb-oxi-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("direktori uji");
+        dir
+    }
+
+    #[test]
+    fn oxi_ditemukan_di_cargo_bin() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_oxi("cargo");
+        let bin = home.join(".cargo/bin/oxibrowser");
+        fs::create_dir_all(bin.parent().expect("induk")).expect("folder");
+        fs::write(&bin, b"#!/bin/sh\n").expect("tulis");
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        assert_eq!(oxi_di_home(&home), Some(bin));
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn berkas_oxi_tanpa_bit_eksekusi_bukan_kandidat() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_oxi("noexec");
+        let bin = home.join(".local/bin/oxibrowser");
+        fs::create_dir_all(bin.parent().expect("induk")).expect("folder");
+        fs::write(&bin, b"bukan-biner").expect("tulis");
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let hasil = oxi_di_home(&home);
+        assert!(
+            hasil.is_none() || hasil.as_deref() != Some(bin.as_path()),
+            "berkas tanpa bit eksekusi tidak boleh dipilih: {hasil:?}"
+        );
+        fs::remove_dir_all(&home).ok();
     }
 }

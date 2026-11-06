@@ -13,13 +13,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod oxi;
 pub mod probe;
+pub(crate) mod proses;
 pub mod shell;
 pub mod slot;
 
-pub use probe::discover_shell;
+pub use oxi::OxiEngine;
+pub use probe::{discover_oxi, discover_shell};
 pub use shell::ShellEngine;
-pub use slot::{Keadaan, Penggerak, PenggerakShell, Slot, SlotError};
+pub use slot::{Keadaan, Penggerak, PenggerakOxi, PenggerakShell, Slot, SlotError};
 
 use std::path::PathBuf;
 
