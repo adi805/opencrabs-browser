@@ -125,6 +125,23 @@ fn pss(pid: u32) -> Option<u64> {
     browserd::metrics::read_pss_bytes(pid)
 }
 
+/// Tunggu sampai PSS proses terbaca dan bukan nol. Proses yang baru lahir bisa
+/// belum punya `smaps_rollup` yang terbaca; nol berarti pid-nya ada tapi tidak
+/// memetakan memori apa pun (mis. sisa zombie).
+fn tunggu_pss(pid: u32) -> u64 {
+    let batas = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(bytes) = pss(pid).filter(|bytes| *bytes > 0) {
+            return bytes;
+        }
+        assert!(
+            Instant::now() < batas,
+            "PSS pid {pid} tetap nol setelah 30 detik: bukan proses hidup"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
@@ -424,14 +441,16 @@ fn jalankan_uji(daemon: &mut Child, cdp_port: u16) {
         pid_baru, pid_mesin,
         "pid tidak berubah: mesin lama dipakai, bukan dibangunkan ulang"
     );
-    let pss_baru = pss(pid_baru).expect("PSS mesin baru terbaca");
+    // PSS mesin baru sengaja TIDAK dipakai sebagai ambang "mesin berjalan".
+    // `TURUN_MINIMAL` mengukur penurunan saat reap (10 MB), bukan lantai
+    // pemakaian proses baru: mesin yang baru saja melaporkan sehat terukur
+    // 7.9 MB, jadi ambang itu gagal pada mesin yang jelas hidup. Yang
+    // membuktikan mesinnya benar-benar jalan adalah tab di bawah
+    // (`/json/new` lalu `Runtime.evaluate`). Di sini cukup pastikan pid-nya
+    // proses nyata yang memetakan memori, bukan pid hantu atau zombie.
+    let pss_baru = tunggu_pss(pid_baru);
     eprintln!(
         "bangun lagi: pid {pid_mesin} -> {pid_baru}, PSS {:.1} MB",
-        mb(pss_baru)
-    );
-    assert!(
-        pss_baru >= TURUN_MINIMAL,
-        "mesin baru tidak benar-benar berjalan: PSS {:.1} MB",
         mb(pss_baru)
     );
 
