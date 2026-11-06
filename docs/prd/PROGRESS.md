@@ -3,9 +3,9 @@ document_type: project-progress
 project: "OpenCrabs Browser: web-opening engine"
 prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
 status: in-progress
-current_milestone: 4
-total_milestones: 4
-last_updated: "2026-11-04 21:29"
+current_milestone: 5
+total_milestones: 5
+last_updated: "2026-11-07 05:21"
 ---
 
 # OpenCrabs Browser Progress
@@ -18,11 +18,11 @@ not copy the specification.
 
 - PRD version: 0.1.0 (draft)
 - Execution mode: native (no build has been requested for new requirements)
-- Build authority: **none yet**. This PRD is a specification, not permission to build.
-- Active milestone / next action: milestone 1 (eyes and hands), milestone 2
-  (failure classification + diagnostics), milestone 3 (session and engine
-  resilience), and milestone 4 (unified audit) are all **Done**. Audit of 26 AC:
-  **26 VERIFIED, 0 UNVERIFIED**, full gate green.
+- Active milestone / next action: milestones 1 to 5 are **Done** (eyes and
+  hands, failure classification + diagnostics, session and engine resilience,
+  unified audit, and the `oxi` adapter with a measured capability probe). Next is
+  milestone 6 (`chrome-full` + xvfb + the `cloakbrowser` artifact path). Audit of
+  26 AC: **26 VERIFIED, 0 UNVERIFIED**, full gate green.
   The two ACs that used to wait for automatic proof are closed: AC-007 (host
   routing to an engine) through an integration test, AC-019 (production port
   9222 isolation) through a Rust test that starts a real engine on a random
@@ -390,9 +390,31 @@ not copy the specification.
 - `crates/policy/src/select.rs` stops pretending. `Catalog::dari_mesin` used to
   report every capability as `true` for every recognized kind, which is a guess
   dressed as a capability table. It now reads named constants: `TERUKUR_SHELL`
-  (measured), `TERUKUR_FULL` (no adapter, so `false`), and `TERUKUR_OXI` (all
-  `false` until the probe records otherwise). The honest default for an
-  unmeasured engine is `false`.
+  (measured), `TERUKUR_FULL` (no adapter, so `false`), and `TERUKUR_OXI`
+  (measured by the probe, see below). The honest default for an unmeasured
+  engine is `false`.
+- The measurement that closed M5: run `42300230272` on commit `0315c95` compiled
+  OxiBrowser 0.28.0 on ubuntu-latest and ran
+  `cargo test -p browserd --test oxi_probe -- --nocapture`. Thirteen checks came
+  back `ok` (`/json/version`, `Target.createTarget`, `Target.attachToTarget`,
+  `DOM.getDocument`, `Runtime.evaluate` = `42`, `Page.navigate`,
+  `document.title` = `Halaman Probe Oxi`, `Page.captureScreenshot` = real PNG of
+  6188 base64 characters, `Network.setCookie` read back unchanged). Two came
+  back `GAGAL`: page scripts never execute (`document.body.dataset.skrip` empty)
+  and `Input.dispatchMouseEvent` never reaches the page (`#hasil` stayed
+  `belum`). The input probe installs its listener over CDP, so its failure is
+  not a side effect of the script failure. Table and raw output:
+  `docs/prd/BUKTI-OXI 071126-0519.md`.
+- `TERUKUR_OXI` now carries those numbers: `layout: true`, `script: false`,
+  `cookies: true`, `input: false`. A request that needs `script` or `input` is
+  therefore refused for engine `oxi` at selection time, before a job starts
+  rather than halfway through it.
+- The same run proved the daemon side end to end:
+  `daemon_melayani_mesin_oxi_dari_config` and
+  `oxi_bicara_cdp_ke_halaman_nyata_lalu_mati_bersih` both `ok`
+  (`crates/browserd/tests/oxi_live.rs`), the second ending with a process group
+  that is gone, checked by `killpg(pgid, None) == ESRCH` instead of a flag we
+  set ourselves.
 
 ## AI Agent Rules
 

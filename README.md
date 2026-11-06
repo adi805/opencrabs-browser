@@ -276,17 +276,21 @@ Limits that stay honest:
 | `0.1.0` (current) | store: profiles, cookies that survive a restart | M2 |
 | `0.1.0` (current) | policy, challenge detection, OTP handoff | M3 |
 | `0.1.0` (current) | CDP multiplex: several engines in one daemon | M4 |
-| not yet tagged | `oxi` adapter, only if the capability test passes | M5 |
+| `0.1.0` (current) | `oxi` adapter plus a measured capability probe | M5 |
 | not yet tagged | `chrome-full` + xvfb + `cloakbrowser` artifact path | M6 |
 
-The `oxi` row is honest about its own condition: the adapter is wired
-(`kind = "oxi"` boots the engine, shared process-group stop, `/json/version`
-accepts both key spellings), but the milestone only counts once a probe has
-measured what OxiBrowser actually supports. That probe runs in
-`.github/workflows/oxi-probe.yml`, because Oxi ships macOS-only binaries and
-building it on Linux is a 722-package compile, and its output lands in
-`docs/prd/BUKTI-OXI`. Until those numbers exist, `crates/policy` reports every
-oxi capability as `false` rather than guessing.
+The `oxi` row is honest about what OxiBrowser turned out to be. The adapter is
+wired (`kind = "oxi"` boots the engine, shared process-group stop,
+`/json/version` accepts both key spellings), and CI measured the engine instead
+of trusting its README. Result of run `42300230272` on commit `0315c95`: the DOM
+builds, `Runtime.evaluate` returns `42` for `6*7`, cookies round-trip, and
+`Page.captureScreenshot` produces a real PNG. Page scripts never execute, and
+dispatched mouse events never reach the page, so `script` and `input` stay
+`false` in `crates/policy` and a request that needs them is refused up front for
+this engine. The full table and raw output live in
+`docs/prd/BUKTI-OXI 071126-0519.md`. Building the engine is a 722-package
+compile, so it happens in `.github/workflows/oxi-probe.yml`, never on the
+machine the product runs on.
 
 The milestone numbers in this table follow `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex). The `0.1.0` version in `Cargo.toml` has not been bumped since M0: what grows is the contents, not the number. **There is no tag yet**, because a repository that carries a `0.1.0` tag while people still cannot use it is a fake release.
 
