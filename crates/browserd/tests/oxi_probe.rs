@@ -421,6 +421,36 @@ async fn probe_kapabilitas() {
         }),
     );
 
+    // Skrip halaman sendiri, bukan cuma `Runtime.evaluate` dari CDP: kalau
+    // tag <script> tidak dijalankan, halaman nyata akan tampil mati.
+    baris(
+        &mut laporan,
+        "skrip_halaman",
+        async {
+            let value = cdp
+                .perintah(
+                    "Runtime.evaluate",
+                    sesi_param(
+                        "Runtime.evaluate",
+                        json!({"expression": "document.body.dataset.skrip || ''", "returnByValue": true}),
+                    ),
+                )
+                .await?;
+            let teks = value
+                .get("result")
+                .and_then(|result| result.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if teks == "jalan" {
+                Ok("tag <script> halaman dieksekusi".to_owned())
+            } else {
+                Err(format!("skrip halaman tidak jalan (nilai: '{teks}')"))
+            }
+        }
+        .await,
+    );
+
     baris(
         &mut laporan,
         "Page.captureScreenshot",
@@ -429,52 +459,169 @@ async fn probe_kapabilitas() {
             sesi_param("Page.captureScreenshot", json!({"format": "png"})),
         )
         .await
-        .map(|value| {
-            let panjang = value
-                .get("data")
-                .and_then(Value::as_str)
-                .map(|data| data.len())
-                .unwrap_or(0);
-            format!("{panjang} karakter base64")
+        .and_then(|value| {
+            let data = value.get("data").and_then(Value::as_str).unwrap_or("");
+            // PNG selalu diawali magic 89 50 4E 47, yang dalam base64 menjadi
+            // "iVBORw0KGgo". Panjang base64 saja tidak membuktikan apa pun:
+            // string sampah pun punya panjang.
+            if data.starts_with("iVBORw0KGgo") {
+                Ok(format!("PNG sah, {} karakter base64", data.len()))
+            } else {
+                Err(format!(
+                    "bukan PNG: awalan '{}'",
+                    data.chars().take(12).collect::<String>()
+                ))
+            }
         }),
     );
 
-    baris(
-        &mut laporan,
-        "Network.getCookies",
-        cdp.perintah(
+    // Cookie: tulis dulu, baru baca. `getCookies` yang mengembalikan array
+    // kosong tidak membuktikan apa pun kalau belum pernah ada cookie.
+    let tulis_cookie = cdp
+        .perintah(
+            "Network.setCookie",
+            sesi_param(
+                "Network.setCookie",
+                json!({"name": "probe_oxi", "value": "42", "url": url}),
+            ),
+        )
+        .await;
+    let baca_cookie = cdp
+        .perintah(
             "Network.getCookies",
             sesi_param("Network.getCookies", json!({"urls": [url]})),
         )
-        .await
-        .map(|value| value.to_string()),
+        .await;
+    baris(
+        &mut laporan,
+        "Network.setCookie+getCookies",
+        match (tulis_cookie, baca_cookie) {
+            (Err(sebab), _) => Err(format!("setCookie: {sebab}")),
+            (Ok(_), Err(sebab)) => Err(format!("getCookies: {sebab}")),
+            (Ok(_), Ok(value)) => {
+                let kembali =
+                    value
+                        .get("cookies")
+                        .and_then(Value::as_array)
+                        .is_some_and(|daftar| {
+                            daftar.iter().any(|cookie| {
+                                cookie.get("name").and_then(Value::as_str) == Some("probe_oxi")
+                                    && cookie.get("value").and_then(Value::as_str) == Some("42")
+                            })
+                        });
+                if kembali {
+                    Ok("cookie yang ditulis terbaca lagi dengan nilai sama".to_owned())
+                } else {
+                    Err(format!("cookie tidak kembali; jawaban: {value}"))
+                }
+            }
+        },
     );
+
+    // Input: klik titik tengah tombol, lalu baca efeknya di DOM. Jawaban `{}`
+    // dari `Input.dispatchMouseEvent` bukan bukti: yang membuktikan input
+    // benar-benar sampai adalah listener halaman yang berubah.
+    let pusat_tombol: Result<(f64, f64), String> = async {
+        // Listener dipasang dari CDP supaya hasil probe ini hanya bergantung
+        // pada dispatch input, bukan pada parser skrip halaman.
+        cdp.perintah(
+            "Runtime.evaluate",
+            sesi_param(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.getElementById('tombol').addEventListener('click', function () { document.getElementById('hasil').textContent = 'sudah diklik'; }); 'dipasang'",
+                    "returnByValue": true,
+                }),
+            ),
+        )
+        .await?;
+        let value = cdp
+            .perintah(
+                "Runtime.evaluate",
+                sesi_param(
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": "(() => { const r = document.getElementById('tombol').getBoundingClientRect(); return JSON.stringify({x: r.x + r.width / 2, y: r.y + r.height / 2}); })()",
+                        "returnByValue": true,
+                    }),
+                ),
+            )
+            .await?;
+        let teks = value
+            .get("result")
+            .and_then(|result| result.get("value"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "result.value bukan string".to_owned())?;
+        let pusat: Value =
+            serde_json::from_str(teks).map_err(|sebab| format!("koordinat tidak terbaca: {sebab}"))?;
+        Ok::<(f64, f64), String>((
+            pusat.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+            pusat.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+        ))
+    }
+    .await;
 
     baris(
         &mut laporan,
         "Input.dispatchMouseEvent",
-        async {
-            let tekan = cdp
-                .perintah(
-                    "Input.dispatchMouseEvent",
-                    sesi_param(
+        match pusat_tombol {
+            Err(sebab) => Err(format!("koordinat tombol: {sebab}")),
+            Ok((x, y)) => {
+                let tekan = cdp
+                    .perintah(
                         "Input.dispatchMouseEvent",
-                        json!({"type": "mousePressed", "x": 10, "y": 10, "button": "left", "clickCount": 1}),
-                    ),
-                )
-                .await;
-            let lepas = cdp
-                .perintah(
-                    "Input.dispatchMouseEvent",
-                    sesi_param(
+                        sesi_param(
+                            "Input.dispatchMouseEvent",
+                            json!({"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}),
+                        ),
+                    )
+                    .await;
+                let lepas = cdp
+                    .perintah(
                         "Input.dispatchMouseEvent",
-                        json!({"type": "mouseReleased", "x": 10, "y": 10, "button": "left", "clickCount": 1}),
-                    ),
-                )
-                .await;
-            tekan.and(lepas).map(|value| value.to_string())
-        }
-        .await,
+                        sesi_param(
+                            "Input.dispatchMouseEvent",
+                            json!({"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}),
+                        ),
+                    )
+                    .await;
+                match (tekan, lepas) {
+                    (Err(sebab), _) => Err(format!("mousePressed: {sebab}")),
+                    (Ok(_), Err(sebab)) => Err(format!("mouseReleased: {sebab}")),
+                    (Ok(_), Ok(_)) => {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let hasil = cdp
+                            .perintah(
+                                "Runtime.evaluate",
+                                sesi_param(
+                                    "Runtime.evaluate",
+                                    json!({"expression": "document.getElementById('hasil').textContent", "returnByValue": true}),
+                                ),
+                            )
+                            .await;
+                        match hasil {
+                            Err(sebab) => Err(format!("baca #hasil: {sebab}")),
+                            Ok(value) => {
+                                let teks = value
+                                    .get("result")
+                                    .and_then(|result| result.get("value"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("");
+                                if teks == "sudah diklik" {
+                                    Ok(format!(
+                                        "klik ({x:.0},{y:.0}) memicu listener: #hasil = '{teks}'"
+                                    ))
+                                } else {
+                                    Err(format!(
+                                        "klik ({x:.0},{y:.0}) tidak mengubah DOM: #hasil = '{teks}'"
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
     );
 
     server.abort();
@@ -507,6 +654,7 @@ async fn sajikan_fixture() -> (String, tokio::task::JoinHandle<()>) {
 <body><h1 id="judul">Probe</h1><button id="tombol">Klik</button>
 <input id="isian" type="text"><div id="hasil">belum</div>
 <script>
+document.body.dataset.skrip = 'jalan';
 document.getElementById('tombol').addEventListener('click', function () {
   document.getElementById('hasil').textContent = 'sudah diklik';
 });
