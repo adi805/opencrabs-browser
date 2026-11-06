@@ -179,18 +179,28 @@ pub const TERUKUR_FULL: Capabilities = Capabilities {
     input: false,
 };
 
-/// Kemampuan `oxibrowser` yang **sudah diukur** oleh
+/// Kemampuan `oxibrowser` 0.28.0 yang **sudah diukur** oleh
 /// `crates/browserd/tests/oxi_probe.rs`.
 ///
 /// Nilainya diisi dari keluaran probe, bukan dari README proyek itu: Oxi
 /// mengklaim CDP kompatibel, dan justru klaim itulah yang harus dibuktikan.
-/// Selama putaran probe belum tercatat di `docs/prd/BUKTI-OXI *.md`, mesin oxi
-/// tetap `false` di sini sehingga permintaan yang butuh kemampuan itu ditolak
-/// di depan alih-alih gagal di tengah jalan.
+/// Bukti: GitHub Actions run `42300230272` pada commit `0315c95`, dirangkum di
+/// `docs/prd/BUKTI-OXI 071126-0519.md`.
+///
+/// Yang **terukur jalan**: halaman dimuat lewat jaringan, DOM terbentuk, judul
+/// dari HTML terbaca, screenshot keluar sebagai PNG sah, dan cookie yang
+/// ditulis lewat `Network.setCookie` terbaca lagi dengan nilai sama.
+///
+/// Yang **terukur gagal**: skrip milik halaman tidak pernah jalan
+/// (`document.body.dataset.skrip` kosong), dan klik lewat
+/// `Input.dispatchMouseEvent` tidak mengubah DOM sama sekali walau listener-nya
+/// dipasang dari CDP, jadi kegagalan input ini bukan turunan kegagalan skrip.
+/// Keduanya `false` di sini supaya permintaan yang butuh kemampuan itu ditolak
+/// di depan, bukan gagal di tengah jalan.
 pub const TERUKUR_OXI: Capabilities = Capabilities {
-    layout: false,
+    layout: true,
     script: false,
-    cookies: false,
+    cookies: true,
     input: false,
 };
 
