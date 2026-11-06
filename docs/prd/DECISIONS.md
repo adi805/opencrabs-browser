@@ -1,74 +1,74 @@
 ---
 document_type: project-decision-log
-project: "OpenCrabs Browser — mesin buka-web"
+project: "OpenCrabs Browser: web-opening engine"
 status: active
 created: "2026-11-04"
 ---
 
 # OpenCrabs Browser Decision Log
 
-Sumber kebenaran keputusan produk/arsitektur untuk target ini. Kebijakan toolkit
-PRD tidak dicatat di sini.
+Source of truth for product and architecture decisions on this target. PRD toolkit
+policy is not recorded here.
 
 ## Decisions
 
-- [2026-11-04 07:0x] Decision: tujuan utama = mata dan tangan di browser
+- [2026-11-04 07:0x] Decision: the primary goal is eyes and hands in the browser
   Status: Accepted
-  Approval: owner (verbatim: "Elu punya tangan, mata gitu loh dalam semua hal yang di browser ini elu bisa lihat dan klik semua")
+  Approval: owner (translated from the Indonesian original: "You have hands, eyes, like that, in everything in this browser you can see and click everything")
   Requirement IDs: FR-008, FR-009, FR-010
-  Context: kendala yang paling sering muncul bukan "browser tidak jalan", tapi gue
-    tidak bisa melihat dan mengklik elemen tertentu (custom element, shadow DOM,
-    iframe, tombol yang hanya bisa diklik di koordinat).
-  Rationale: tanpa persepsi dan aksi yang lengkap, klasifikasi kegagalan cuma
-    memberi tahu kenapa gue gagal, bukan membuat gue bisa.
-  Impact: milestone 1 berubah dari "diagnostik" menjadi "mata dan tangan";
-    diagnostik/escalasi turun ke milestone 2.
+  Context: the obstacle that came up most often was not "the browser does not run",
+    it was that I could not see and click certain elements (custom elements, shadow
+    DOM, iframes, buttons that can only be clicked at a coordinate).
+  Rationale: without complete perception and action, failure classification only
+    tells me why I failed, it does not make me able to succeed.
+  Impact: milestone 1 changed from "diagnostics" to "eyes and hands";
+    diagnostics and escalation moved down to milestone 2.
 
-- [2026-11-02 04:33] Decision: `max_tabs` ditegakkan di lapisan protokol
+- [2026-11-02 04:33] Decision: `max_tabs` is enforced at the protocol layer
   Status: Accepted
-  Approval: owner ("Tegakkan max_tabs")
-  Requirement IDs: FR-005 (batas), NFR-001 (pagar memori)
-  Context: config sudah menyebut `max_tabs` tapi hanya dibaca lalu diabaikan, jadi
-    operator mengira ada batas padahal tidak ada.
-  Rationale: angka kebenaran dibaca dari mesin (`/json/list`), bukan penghitung
-    daemon; pesan penolakan menyebut angka dan cara keluarnya.
-  Impact: `/json/new` menjawab 429, `Target.createTarget` menjawab `-32010`, dan
-    perintah yang ditolak tidak pernah sampai ke mesin.
+  Approval: owner ("Enforce max_tabs")
+  Requirement IDs: FR-005 (limit), NFR-001 (memory fence)
+  Context: the config already named `max_tabs` but it was only read and then
+    ignored, so operators believed a limit existed when it did not.
+  Rationale: the number of record is read from the engine (`/json/list`), not from
+    a daemon counter; the rejection message names the number and the way out.
+  Impact: `/json/new` answers 429, `Target.createTarget` answers `-32010`, and a
+    rejected command never reaches the engine.
 
-- [2026-11-04 06:31] Decision: engine render tetap Chromium, engine ringan hanya jalur teks
+- [2026-11-04 06:31] Decision: the render engine stays Chromium, light engines are only the text path
   Status: Accepted
-  Approval: bukti terukur (bukan preferensi)
+  Approval: measured evidence (not preference)
   Requirement IDs: FR-001, FR-002
-  Context: Lightpanda hemat memori tapi nol mesin layout; Firefox headless tidak
-    punya `/json/version` dan idle 896 MB.
-  Rationale: screenshot tanpa gaya dan `getBoundingClientRect()` yang melempar
-    membuat mesin itu tidak bisa dipakai untuk kerja visual.
-  Impact: kandidat pengganti engine keluar dari scope; penghematan diambil dari
-    lifecycle (reap, anggaran, batas tab), bukan dari mengganti mesin.
+  Context: Lightpanda saves memory but has zero layout engine; Firefox headless has
+    no `/json/version` and sits at 896 MB idle.
+  Rationale: an unstyled screenshot and a `getBoundingClientRect()` that throws
+    make that engine unusable for visual work.
+  Impact: replacement engine candidates left the scope; the savings come from
+    lifecycle (reap, budget, tab limit), not from swapping the engine.
 
-- [2026-11-04 06:31] Decision: `max_tabs` dan `idle_reap_secs` harus berlaku lewat SIGHUP
+- [2026-11-04 06:31] Decision: `max_tabs` and `idle_reap_secs` must take effect through SIGHUP
   Status: Proposed
-  Approval: belum ada (menunggu owner)
+  Approval: none yet (waiting for the owner)
   Requirement IDs: FR-005, AC-010, AC-011
-  Context: hari ini kedua angka dibaca sekali saat start, jadi mengubahnya berarti
-    restart daemon dan memutus sesi yang sedang jalan.
-  Rationale: reload dengan parse-dulu-baru-tukar menghindari daemon mati karena
-    config setengah jadi.
-  Impact: `EnginePool` perlu batas yang bisa diperbarui saat hidup; unit systemd
-    perlu `ExecReload`.
+  Context: today both numbers are read once at start, so changing them means
+    restarting the daemon and cutting a session that is still running.
+  Rationale: a reload that parses first and swaps second avoids a daemon dying
+    because of a half-written config.
+  Impact: `EnginePool` needs a limit that can be updated while alive; the systemd
+    unit needs `ExecReload`.
 
-- [2026-11-04 06:31] Decision: sesi tab memakai lease, bukan satu tab dipakai ulang
+- [2026-11-04 06:31] Decision: tab sessions use a lease, not one reused tab
   Status: Proposed
-  Approval: belum ada (menunggu owner)
+  Approval: none yet (waiting for the owner)
   Requirement IDs: FR-005, FR-006
-  Context: manajer agent memakai ulang satu tab, jadi kerja paralel saling
-    menimpa dan `max_tabs` tidak pernah terasa.
-  Rationale: lease memberi batas yang bisa diaudit dan membuat reap tahu tab mana
-    yang masih dipakai.
-  Impact: butuh state kedua (lease per sesi) yang harus ber-TTL supaya tidak
-    membocorkan memori.
+  Context: the agent manager reuses one tab, so parallel work overwrites itself and
+    `max_tabs` is never felt.
+  Rationale: a lease gives an auditable limit and lets reap know which tabs are
+    still in use.
+  Impact: needs a second piece of state (a per-session lease) that must have a TTL
+    so it cannot leak memory.
 
 ## AI Agent Rules
 
-Keputusan berstatus Proposed tidak boleh dianggap izin membangun. Yang Accepted
-boleh dirujuk sebagai dasar, dan yang Superseded disimpan, bukan dihapus.
+A decision with status Proposed must not be treated as permission to build. An
+Accepted one may be cited as a basis, and a Superseded one is kept, not deleted.

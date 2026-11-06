@@ -1,99 +1,99 @@
 # opencrabs-browser (`browserd`)
 
-Daemon browser untuk agent: satu pintu CDP, mesin ringan di belakangnya, dan batas memori yang dijaga.
+A browser daemon for agents: one CDP door, a light engine behind it, and a memory budget that is actually enforced.
 
-Chrome yang dipakai agent sekarang memang jalan, tapi beratnya tumbuh per tab dan tidak pernah turun. Proyek ini menggantinya dengan daemon yang **memegang kontrak CDP** (jadi klien tidak perlu berubah), sementara mesin browser di belakangnya bisa diganti: `chrome-headless-shell` hari ini, engine lain nanti, engine palsu saat test.
+The Chrome that agents use today works, but its weight grows per tab and never comes back down. This project replaces it with a daemon that **holds the CDP contract** (so clients do not need to change), while the engine behind it stays replaceable: `chrome-headless-shell` today, other engines later, fake engines during tests.
 
-Status: **M0, kerangka.** Daemon berbicara, lifecycle belum. Bukan rilis.
+Status: **M0 through M4 landed.** The daemon speaks, multiplex routes across engines, lifecycle reaps. Not a release yet.
 
 ---
 
-## Arsitektur
+## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph klien
+    subgraph client
         A[OpenCrabs agent<br/>browser_navigate / browser_eval]
     end
     subgraph browserd
         B[data plane<br/>/json/version, /json/list]
-        C[pass-through WebSocket<br/>byte utuh, urutan utuh]
-        D[discovery rewrite<br/>ws URL dititipkan ke daemon]
+        C[WebSocket pass-through<br/>bytes intact, order intact]
+        D[discovery rewrite<br/>ws URL pointed at the daemon]
     end
     subgraph engine
-        E[chrome-headless-shell<br/>port debug milik sendiri]
+        E[chrome-headless-shell<br/>its own debug port]
     end
     A -->|GET /json/version| B
     A -->|ws /devtools/...| C
-    C -->|pesan diteruskan apa adanya| E
-    E -->|jawaban diteruskan apa adanya| C
-    D -->|menulis webSocketDebuggerUrl| B
+    C -->|message forwarded as is| E
+    E -->|reply forwarded as is| C
+    D -->|writes webSocketDebuggerUrl| B
     E -->|DevToolsActivePort| D
 ```
 
-Satu aturan yang membuat semua ini berguna: **isi pesan tidak pernah diubah.** `id`, `sessionId`, urutan, dan byte diteruskan apa adanya. Yang ditulis ulang cuma alamat: klien tidak boleh tahu port mesin, karena port itu bisa berganti setiap kali mesin di-restart.
+One rule makes all of this worth something: **message contents are never rewritten.** `id`, `sessionId`, ordering, and bytes pass through untouched. Only addresses are rewritten: a client must never learn the engine port, because that port can change every time the engine restarts.
 
-## Isi repo
+## Repository layout
 
-| Crate | Tanggung jawab | Status |
+| Crate | Responsibility | Status |
 |---|---|---|
-| `browserd` | biner, CLI, daemon HTTP + WebSocket | jalan |
-| `cdp` | framing, id, pass-through, discovery, `/json/*` | jalan |
-| `engine` | trait `Engine`, adapter shell, probe, kill seluruh process group | jalan |
-| `lifecycle` | kapan tab dan proses mati, ratchet PSS | M1 |
-| `store` | sesi, profil, cookie terenkripsi | M2 |
-| `policy` | pemilihan engine, deteksi halaman tantangan | M3 |
-| `otp` | pengambilan kode OTP dari sumber sah | M4 |
-| `control` | pintu HTTP untuk tool dan operator | M5 |
-| `testing` | engine palsu dan fixture (dev-dependency saja) | jalan |
-| `xtask` | `doctor`, `check`, `bench` | jalan |
+| `browserd` | binary, CLI, HTTP + WebSocket daemon | working |
+| `cdp` | framing, ids, pass-through, discovery, `/json/*` | working |
+| `engine` | `Engine` trait, shell adapter, probe, kill the whole process group | working |
+| `lifecycle` | when tabs and processes die, PSS ratchet | M1 |
+| `store` | sessions, profiles, encrypted cookies | M2 |
+| `policy` | engine selection, challenge page detection | M3 |
+| `otp` | OTP code retrieval from legitimate sources | M4 |
+| `control` | HTTP door for tools and operators | M5 |
+| `testing` | fake engines and fixtures (dev-dependency only) | working |
+| `xtask` | `doctor`, `check`, `bench` | working |
 
-Crate yang kosong sengaja kosong: tanda tangan API yang ditebak sekarang akan jadi utang yang memaksa refactor tepat saat isinya mulai ditulis.
+Empty crates are deliberately empty: an API signature guessed today becomes debt that forces a refactor exactly when the contents start being written.
 
-## Coba
+## Try it
 
-Butuh Rust 1.98.1 (dipin di `rust-toolchain.toml`) dan `chrome-headless-shell`.
+Requires Rust 1.98.1 (pinned in `rust-toolchain.toml`) and `chrome-headless-shell`.
 
 ```bash
-cargo xtask doctor                 # cek biner engine, port, disk
+cargo xtask doctor                 # check the engine binary, ports, disk
 cargo build --release
 ./target/release/browserd serve --port 9224
 ```
 
-Di terminal lain:
+In another terminal:
 
 ```bash
 curl -s http://127.0.0.1:9224/json/version | jq .
 node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224
 ```
 
-`cdp-smoke.mjs` memeriksa enam hal: versi, daftar target, koneksi WebSocket, `Target.getTargets`, `Runtime.evaluate` di halaman, dan penyimpanan screenshot sebagai bukti render.
+`cdp-smoke.mjs` checks six things: version, target list, WebSocket connection, `Target.getTargets`, `Runtime.evaluate` inside a page, and saving a screenshot as proof of render.
 
-Gerbang tunggal sebelum commit:
+The single gate before committing:
 
 ```bash
 cargo xtask check     # fmt --check, clippy -D warnings, test
 ```
 
-Isi perintah itu sama persis dengan `.github/workflows/ci.yml`. Hijau lokal dan hijau di CI artinya hal yang sama.
+That command is exactly what `.github/workflows/ci.yml` runs. Green locally and green in CI mean the same thing.
 
-## Port kontrol (handoff tantangan)
+## Control port (challenge handoff)
 
-Selain port CDP, daemon membuka satu port HTTP kecil untuk manusia: `127.0.0.1:9223` (bisa diubah lewat `[daemon] control_bind`). Port ini **tidak** menyajikan halaman, hanya JSON, dan tidak pernah bind ke alamat publik.
+Besides the CDP port, the daemon opens one small HTTP port for humans: `127.0.0.1:9223` (changeable through `[daemon] control_bind`). This port does **not** serve pages, it only serves JSON, and it never binds to a public address.
 
 ```bash
-token=$(cat ~/.opencrabs/browser-daemon/control.token)   # 0600, dibuat otomatis saat start
+token=$(cat ~/.opencrabs/browser-daemon/control.token)   # 0600, created automatically on start
 curl -s -H "Authorization: Bearer $token" http://127.0.0.1:9223/api/v1/health
 ```
 
-| Endpoint | Guna |
+| Endpoint | Purpose |
 |---|---|
-| `GET /api/v1/health` | status daemon, versi, uptime, jumlah handoff menunggu |
-| `GET /api/v1/handoff/pending` | antrean tantangan yang menunggu jawaban manusia |
-| `POST /api/v1/handoff/{id}/answer` | kirim jawaban (`keys`, `click`, `text`, `abort`) untuk diterapkan ke tab |
-| `POST /api/v1/challenge/probe` | periksa satu target: ada form tantangan di DOM atau tidak |
+| `GET /api/v1/health` | daemon status, version, uptime, number of pending handoffs |
+| `GET /api/v1/handoff/pending` | queue of challenges waiting for a human answer |
+| `POST /api/v1/handoff/{id}/answer` | submit an answer (`keys`, `click`, `text`, `abort`) to be applied to the tab |
+| `POST /api/v1/challenge/probe` | inspect one target: is there a challenge form in the DOM or not |
 
-Pembungkus yang sudah menyembunyikan token dari `argv` (terbaca lewat `ps`) ada di `~/.opencrabs/scripts/browserd-ctl.sh`:
+A wrapper that already keeps the token out of `argv` (visible through `ps`) lives at `~/.opencrabs/scripts/browserd-ctl.sh`:
 
 ```bash
 browserd-ctl.sh health
@@ -102,194 +102,192 @@ browserd-ctl.sh answer <handoff-id> '{"type":"keys","value":"Enter"}'
 browserd-ctl.sh probe <target-id>
 ```
 
-**Simpangan dari paket desain:** dokumen 04 menyebut `token_file = "~/.opencrabs/keys.toml"`. Implementasi memakai berkas sendiri, `~/.opencrabs/browser-daemon/control.token` (mode `0600`, dibuat dengan `O_EXCL` oleh `keygen`/`serve`). Alasannya: `keys.toml` adalah berkas kredensial milik OpenCrabs yang dipakai banyak proses lain, dan daemon ini tidak perlu bisa membaca kunci provider mana pun. Perbandingan token dilakukan constant-time, dan token tidak pernah dicetak ke log maupun ke baris perintah.
+**Deviation from the design package:** document 04 named `token_file = "~/.opencrabs/keys.toml"`. The implementation uses its own file, `~/.opencrabs/browser-daemon/control.token` (mode `0600`, created with `O_EXCL` by `keygen`/`serve`). The reason: `keys.toml` is OpenCrabs' credential file, shared by many other processes, and this daemon has no business being able to read any provider key. Token comparison is constant-time, and the token is never printed to a log or to a command line.
+## Multiplex: more than one engine
 
-## Multiplex: lebih dari satu mesin
-
-Satu daemon bisa menjalankan beberapa mesin sekaligus. Setiap bagian di bawah `[engines]` adalah satu mesin, dan **nama bagian itu adalah id mesin**:
+One daemon can run several engines at once. Every section under `[engines]` is one engine, and **the section name is the engine id**:
 
 ```toml
 [daemon]
-engine_default = "chrome_shell"      # opsional; tanpa ini dipakai chrome_shell, lalu id terkecil
+engine_default = "chrome_shell"      # optional; without it chrome_shell is used, then the smallest id
 
 [engines.chrome_shell]
 binary = "~/bin/chrome-headless-shell"
 args = ["--no-sandbox", "--mute-audio"]
-max_tabs = 6                         # ditegakkan, lihat bagian Batas tab
+max_tabs = 6                         # enforced, see the Tab limits section
 
 [engines.shell_dua]
 kind = "shell"
 binary = "~/bin/chrome-headless-shell"
-port = 43002                         # wajib unik; 0 berarti pilih port bebas
+port = 43002                         # must be unique; 0 means pick a free port
 user_data_dir = "~/.cache/opencrabs-browser/dua-profile"
 ```
 
-Bentuk lama `[engines.chrome_shell]` tanpa `[[engines]]` tetap jalan: yang berubah cuma jumlah mesin yang boleh ada di dalamnya.
+The older shape of `[engines.chrome_shell]` without `[[engines]]` still works: the only thing that changed is how many engines may live inside it.
 
-Yang berubah di sisi klien, dan hanya ini: **id target diberi prefiks mesin**. Klien yang bicara ke daemon melihat tab `chrome_shell~A1B2…`, dan `/json/close/chrome_shell~A1B2…` menutup tab itu di mesin yang benar. Field lain tidak disentuh, `sessionId` diterjemahkan ke ruang id milik klien supaya dua mesin yang kebetulan memakai nilai sama tidak saling menimpa, dan URL websocket selalu menunjuk ke daemon, bukan ke port mesin.
+What changes on the client side, and this is all: **target ids are prefixed with the engine id.** A client talking to the daemon sees the tab as `chrome_shell~A1B2…`, and `/json/close/chrome_shell~A1B2…` closes that tab on the correct engine. Other fields are untouched, `sessionId` is translated into the client's own id space so that two engines which happen to use the same value do not overwrite each other, and the websocket URL always points at the daemon, never at an engine port.
 
-Aturan yang berlaku saat ada lebih dari satu mesin:
+Rules that apply when more than one engine is present:
 
-| Kejadian | Perilaku |
+| Event | Behaviour |
 |---|---|
-| `Target.getTargets` | digabung dari semua mesin |
-| `Target.setDiscoverTargets` | disiarkan ke semua mesin, jawaban pertama yang dikembalikan |
-| `Target.createTarget` tanpa `openCrabsOptions.engine` | mengikuti aturan `[policy.rules]` untuk host di `params.url`; tanpa aturan yang berlaku, dibuat di mesin bawaan |
-| `openCrabsOptions.engine = "<id>"` | dibuat di mesin itu; parameter dibuang sebelum diteruskan |
-| aturan host menunjuk jenis mesin yang tidak terpasang | ditolak `-32000` yang menyebut jenis dan id yang ada, bukan diam-diam memakai bawaan |
-| id mesin yang tidak terpasang | ditolak `-32000` dengan daftar mesin yang ada, bukan diam-diam memakai bawaan |
-| `sessionId` yang tidak dikenal | ditolak `-32001`, tidak ditelan |
-| satu mesin mati | sesinya menerima `Target.detachedFromTarget`, klien tetap tersambung |
-| semua mesin mati | koneksi klien ditutup |
-| `/json/list` dengan satu mesin mati | mesin itu dilewati dengan peringatan di log; 502 hanya kalau semuanya gagal |
-| `/metrics` | satu baris `browser_engine_state` per mesin; penghitung milik daemon tetap satu |
+| `Target.getTargets` | merged from every engine |
+| `Target.setDiscoverTargets` | broadcast to every engine, the first reply is returned |
+| `Target.createTarget` without `openCrabsOptions.engine` | follows `[policy.rules]` for the host in `params.url`; with no matching rule it is created on the default engine |
+| `openCrabsOptions.engine = "<id>"` | created on that engine; the parameter is stripped before forwarding |
+| a host rule names an engine kind that is not installed | rejected with `-32000` naming the kind and the ids that do exist, never a silent fallback to the default |
+| an engine id that is not installed | rejected with `-32000` listing the engines that do exist, never a silent fallback to the default |
+| an unknown `sessionId` | rejected with `-32001`, not swallowed |
+| one engine dies | its sessions receive `Target.detachedFromTarget`, the client stays connected |
+| every engine dies | the client connection is closed |
+| `/json/list` with one engine dead | that engine is skipped with a warning in the log; 502 only if all of them fail |
+| `/metrics` | one `browser_engine_state` line per engine; the daemon's own counters stay single |
 
-**Batas yang jujur, belum dikerjakan:**
+**Honest limits, not done yet:**
 
-- Aturan host memilih **jenis** mesin (`chrome-shell`/`chrome-full`), dan instance yang dipakai adalah instance **pertama** jenis itu menurut urut id. Memilih instance tertentu (dua mesin jenis sama, satu di antaranya ditunjuk namanya) belum ada.
-- `/json/new` selalu membuat tab di mesin bawaan. Endpoint itu hanya punya query mentah untuk URL dan tidak punya tempat untuk menyebut mesin; pakai `Target.createTarget` dengan `openCrabsOptions`, atau andalkan aturan host yang berlaku di jalur itu.
-- Probe handoff (port kontrol) masih menembak mesin bawaan saja. Kalau tantangan muncul di halaman mesin lain, probe-nya tidak melihat halaman itu; yang dilaporkan adalah apa yang ada di mesin bawaan.
-- Satu klien websocket berbicara ke semua mesin lewat satu antrean per mesin (256 pesan). Kalau antrean penuh, perintah ditolak dengan galat, bukan dibuang diam-diam.
+- A host rule picks an engine **kind** (`chrome-shell`/`chrome-full`), and the instance used is the **first** instance of that kind in id order. Picking a specific instance (two engines of the same kind, one of them named explicitly) is not implemented.
+- `/json/new` always creates the tab on the default engine. That endpoint only has a raw query string for the URL and no place to name an engine; use `Target.createTarget` with `openCrabsOptions`, or rely on the host rule that applies on that path.
+- The handoff probe (control port) still only targets the default engine. If a challenge shows up on a page in a different engine, the probe does not see that page; it reports what is on the default engine.
+- One websocket client talks to every engine through one queue per engine (256 messages). When a queue is full the command is rejected with an error, not silently dropped.
 
-Diukur 2 November 2026 di laptop pengembangan (4 core, Linux):
+Measured on 2 November 2026 on the development laptop (4 cores, Linux):
 
-| Bukti | Hasil |
+| Evidence | Result |
 |---|---|
-| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 330 test (dihitung ulang 2 Nov 2026 setelah `max_tabs` ditegakkan) |
+| `cargo xtask check` | exit 0: fmt, clippy `-D warnings`, 330 tests (recounted 2 Nov 2026 after `max_tabs` was enforced) |
 | `cargo xtask doctor` | exit 0 |
-| `node bench/cdp-smoke.mjs` | 6/6 lulus |
-| Klien nyata (OpenCrabs `browser_navigate`) lewat daemon | `https://example.com` → "Example Domain" |
-| `browser_eval` lewat daemon | `bodyChars=917`, URL benar |
-| `browser_screenshot` lewat daemon | PNG base64, bukan halaman kosong |
-| Browser produksi di `:9222` | tidak disentuh selama pengujian |
-| Bukti M4: dua mesin palsu, satu daemon | `cargo test -p cdp --test discovery` 7 lulus, `-p cdp --test multiplex` 8 lulus |
-| Bukti M4: dua `chrome-headless-shell` nyata | `cargo test -p browserd --test m4_proof` 1 lulus: judul tab tidak tertukar, tutup tab kanan tidak memengaruhi tab kiri |
-| Bukti `max_tabs`: batas ditegakkan | `cargo test -p cdp --test batas_tab` 9 lulus: `/json/new` 429, `-32010` di passthrough dan di multiplex, dan pesan yang ditolak tidak pernah sampai ke mesin |
-| Bukti M1: reap lalu bangun lagi | `cargo test -p browserd --test idle_reap` 5 lulus (mesin palsu, HTTP sungguhan) dan `--test idle_proof` 1 lulus (`chrome-headless-shell` sungguhan, PSS turun 12,2 MB, daemon tidak restart) |
-| Bukti M4: `/metrics` dua mesin | `cargo test -p browserd --test m4_metrics` 2 lulus: label per mesin, blok global tetap satu |
-| CI GitHub, run pertama (2 Nov 2026) | `success` dalam **1m9s**, cold cache, runner `rustc 1.98.1`, 36 test lulus (9/14/11/2 per crate) |
-| Build rilis di GitHub (run 41386053917) | `success` total 70s, `cargo build --release` selesai **43.36s**, `target` 267 MB |
-| Biner rilis x86_64 setelah `strip` | **1,28 MB** (`browserd-0.1.0-x86_64-unknown-linux-gnu.tar.gz`, 1 282 228 byte) |
-| Disk runner | `/dev/root` 145G, **85G tersedia** sebelum build |
+| `node bench/cdp-smoke.mjs` | 6/6 passing |
+| Real client (OpenCrabs `browser_navigate`) through the daemon | `https://example.com` -> "Example Domain" |
+| `browser_eval` through the daemon | `bodyChars=917`, correct URL |
+| `browser_screenshot` through the daemon | PNG base64, not a blank page |
+| Production browser on `:9222` | untouched throughout testing |
+| M4 evidence: two fake engines, one daemon | `cargo test -p cdp --test discovery` 7 passing, `-p cdp --test multiplex` 8 passing |
+| M4 evidence: two real `chrome-headless-shell` | `cargo test -p browserd --test m4_proof` 1 passing: tab titles are not swapped, closing the right tab does not affect the left one |
+| `max_tabs` evidence: the limit is enforced | `cargo test -p cdp --test batas_tab` 9 passing: `/json/new` 429, `-32010` on both pass-through and multiplex, and a rejected message never reaches the engine |
+| M1 evidence: reap then respawn | `cargo test -p browserd --test idle_reap` 5 passing (fake engine, real HTTP) and `--test idle_proof` 1 passing (real `chrome-headless-shell`, PSS down 12.2 MB, daemon did not restart) |
+| M4 evidence: `/metrics` for two engines | `cargo test -p browserd --test m4_metrics` 2 passing: per engine labels, the global block stays single |
+| GitHub CI, first run (2 Nov 2026) | `success` in **1m9s**, cold cache, runner `rustc 1.98.1`, 36 tests passing (9/14/11/2 per crate) |
+| Release build on GitHub (run 41386053917) | `success`, 70s total, `cargo build --release` finished in **43.36s**, `target` 267 MB |
+| Release binary x86_64 after `strip` | **1.28 MB** (`browserd-0.1.0-x86_64-unknown-linux-gnu.tar.gz`, 1 282 228 bytes) |
+| Runner disk | `/dev/root` 145G, **85G available** before the build |
 
-Yang **belum** diukur dan tidak diklaim: hit rate cache setelah beberapa run, dan selisih PSS antara laptop dan runner.
+What is **not** measured and therefore not claimed: cache hit rate after several runs, and the PSS difference between the laptop and the runner.
 
-Catatan untuk yang membaca angka biner di atas: 1,28 MB itu **daemon**, bukan browser. Mesin (Chrome) tetap biner terpisah di sistem, dan total jejak RAM-nya yang nanti dijaga oleh budget di M1.
+A note for anyone reading the binary numbers above: 1.28 MB is the **daemon**, not the browser. The engine (Chrome) remains a separate binary on the system, and its total RAM footprint is what the M1 budget will police.
 
-Satu koreksi terhadap paket desain: batas disk runner diperkirakan 14 GB, yang terukur 85 GB tersedia. Penghematan disk (`CARGO_INCREMENTAL=0`, `df -h` sebelum dan sesudah) tetap dipakai karena murah, tapi batas 14 GB itu tidak lagi jadi alasan membatasi arsitektur.
+One correction to the design package: the runner disk limit was estimated at 14 GB, the measured value is 85 GB available. The disk savings (`CARGO_INCREMENTAL=0`, `df -h` before and after) are kept because they are cheap, but the 14 GB figure is no longer a reason to constrain the architecture.
 
-## Batas tab: `max_tabs`
+## Tab limits: `max_tabs`
 
-`max_tabs` di bawah satu mesin **ditegakkan**, bukan cuma dibaca. Batasnya per mesin, dan kosong atau `0` sama-sama berarti tanpa batas.
+`max_tabs` under one engine is **enforced**, not merely read. The limit is per engine, and empty or `0` both mean no limit.
 
-| Jalur | Yang terjadi saat batas tercapai |
+| Path | What happens when the limit is reached |
 |---|---|
-| `PUT /json/new` | `429 Too Many Requests` dengan body `{"error":"…"}`; mesin tidak disentuh sama sekali |
-| `Target.createTarget`, satu mesin | balasan galat JSON-RPC `-32010`; `id` dan `sessionId` dipantulkan supaya pustaka klien tidak menunggu selamanya |
-| `Target.createTarget`, multiplex | sama, dan hanya mesin tujuannya yang diperiksa: mesin lain tanpa batas tetap bisa membuat tab |
-| `/json/list` | tetap dijawab. Batas tab tidak boleh membuat klien buta, karena klien yang ingin menutup tab justru perlu melihat daftarnya |
+| `PUT /json/new` | `429 Too Many Requests` with a body of `{"error":"…"}`; the engine is not touched at all |
+| `Target.createTarget`, single engine | JSON-RPC error reply `-32010`; `id` and `sessionId` are echoed back so client libraries do not wait forever |
+| `Target.createTarget`, multiplex | the same, and only the destination engine is checked: other engines without a limit can still create tabs |
+| `/json/list` | still answered. A tab limit must never blind a client, because a client that wants to close a tab needs to see the list |
 
-Yang dihitung hanya target bertipe `page`. Chrome melaporkan `iframe`, `service_worker`, dan `background_page` di daftar yang sama, dan menghitung semuanya akan membuat satu halaman dengan tiga iframe memakan empat jatah tab.
+Only targets of type `page` are counted. Chrome reports `iframe`, `service_worker`, and `background_page` in the same list, and counting all of them would make one page with three iframes consume four tab slots.
 
-Angkanya dibaca dari **mesin itu sendiri** (`/json/list`), bukan dari penghitung di daemon. Penghitung sendiri berarti dua angka yang bisa berbeda: tab yang ditutup klien lewat soket CDP tidak akan terlihat oleh daemon, dan batas akan menolak tab baru padahal mesinnya kosong. Harganya satu GET localhost sebelum tab dibuat, jauh lebih murah daripada satu boot Chromium. Pesan galatnya menyebut angkanya (`2 dari batas 2`) dan jalan keluarnya, jadi operator tidak perlu membuka config untuk tahu siapa yang penuh.
+The number is read from **the engine itself** (`/json/list`), not from a counter inside the daemon. A local counter means two numbers that can disagree: tabs a client closed over the CDP socket would be invisible to the daemon, and the limit would reject new tabs while the engine sits empty. The cost is one localhost GET before a tab is created, far cheaper than one Chromium boot. The error message names the number (`2 of limit 2`) and the way out, so an operator does not have to open the config to learn who is full.
 
-Batas yang tetap jujur:
+Limits that stay honest:
 
-- **Tidak atomik.** Dua `Target.createTarget` yang benar-benar bersamaan bisa sama-sama membaca angka di bawah batas lalu sama-sama lolos. Menutupnya butuh penghitung permintaan yang sedang terbang, dan itu state kedua yang justru ingin dihindari.
-- **Tab yang lahir di dalam halaman tidak terlihat.** `window.open`, popup OAuth, dan `Target.createTarget` yang dipanggil dari dalam halaman tidak melewati daemon; jumlahnya baru terlihat pada permintaan berikutnya.
-- **Gagal-terbuka saat menghitung gagal.** Kalau `/json/list` tidak terbaca, batas tidak ditegakkan dan sebabnya dicatat di log (`jumlah tab tidak terbaca`). Menolak tab karena masalah pengukuran akan mengubah satu gangguan kecil menjadi "browser tidak bisa dipakai".
-- **`max_tabs` itu pagar sopan, bukan pengaman memori.** Penjaga kerasnya tetap anggaran memori dan reap: mesin yang penuh tetap di-reap saat menganggur, dan mesin yang dipaksa bekerja di luar batas tetap dibatasi anggarannya.
+- **Not atomic.** Two genuinely simultaneous `Target.createTarget` calls can both read a number below the limit and both pass. Closing that gap needs an in-flight request counter, and that is a second piece of state precisely what we want to avoid.
+- **Tabs born inside the page are invisible.** `window.open`, OAuth popups, and `Target.createTarget` called from inside a page do not go through the daemon; their count only shows up on the next request.
+- **Fail-open when measurement fails.** If `/json/list` cannot be read, the limit is not enforced and the reason is logged as a warning that the tab count was unreadable. Rejecting tabs because of a measurement problem would turn a small glitch into "the browser is unusable".
+- **`max_tabs` is a courtesy fence, not a memory guard.** The hard guard remains the memory budget and reap: a full engine is still reaped while idle, and an engine forced to work beyond its limit is still capped by its budget.
 
-Bukti: `cargo test -p cdp --test batas_tab` (9 kasus, mesin palsu yang benar-benar server HTTP dan websocket; tiga di antaranya membuktikan pesan yang ditolak **tidak pernah sampai** ke mesin).
+Evidence: `cargo test -p cdp --test batas_tab` (9 cases, fake engines that are real HTTP and websocket servers; three of them prove a rejected message **never reaches** the engine).
+## Eyes and hands: `__oc` inside the page
 
-## Mata dan tangan: `__oc` di dalam halaman
+The daemon injects one small script into **every tab, from the moment the document is born** (`Page.addScriptToEvaluateOnNewDocument`). After that every page has `window.__oc`, and the agent uses it through ordinary `Runtime.evaluate`. No new endpoint, no new protocol: the only thing that changes is what can be done from inside the page.
 
-Daemon menyuntikkan satu skrip kecil ke **setiap tab, sejak dokumen lahir** (`Page.addScriptToEvaluateOnNewDocument`). Sesudah itu setiap halaman punya `window.__oc`, dan agent memakainya lewat `Runtime.evaluate` biasa. Tidak ada endpoint baru, tidak ada protokol baru: yang berubah cuma apa yang bisa dilakukan di dalam halaman.
+Why it has to be from birth: a shadow root in `closed` mode can only be captured at the second it is created. This script patches `Element.prototype.attachShadow` at document start and stores the closed root in a `WeakMap`, so its contents stay readable. A tab that was already loaded before the injection still gets the runtime, but closed shadows created before that cannot be recovered.
 
-Kenapa harus sejak lahir: shadow root bermode `closed` hanya bisa direkam pada detik ia dibuat. Skrip ini menambal `Element.prototype.attachShadow` di document-start dan menyimpan akar tertutup di `WeakMap`, jadi isinya ikut terbaca. Tab yang sudah termuat sebelum suntikan tetap dapat runtime, tapi shadow tertutup yang sudah dibuat sebelum itu tidak bisa dipulihkan.
-
-| Perintah | Yang dikembalikan |
+| Command | What it returns |
 |---|---|
-| `__oc.mata()` | `url`, `judul`, `jumlah`, `elemen[]` (tag, peran, nama aksesibel, kotak, terlihat, tercentang, nilai, jalur, asal: `dom`/`shadow`/`iframe`), `wadah[]`, dan ringkasan teks halaman |
-| `__oc.klik(target)` | `berubah` dengan daftar `perubahan`, atau `tidak_ada_perubahan`, atau `gagal` dengan `kategori` |
-| `__oc.ketik(target, teks)` | `berubah` kalau nilai benar-benar terpasang, `tidak_ada_perubahan` kalau tidak |
-| `__oc.scroll(target\|'bawah')` | posisi sebelum dan sesudah |
-| `__oc.berkas()` | input berkas yang ada, beserta catatan bahwa unggah tetap lewat CDP `DOM.setFileInputFiles` |
+| `__oc.mata()` | `url`, `judul`, `jumlah`, `elemen[]` (tag, role, accessible name, box, visible, checked, value, path, origin: `dom`/`shadow`/`iframe`), `wadah[]`, and a text summary of the page |
+| `__oc.klik(target)` | `berubah` with a list of `perubahan`, or `tidak_ada_perubahan`, or `gagal` with a `kategori` |
+| `__oc.ketik(target, teks)` | `berubah` when the value really lands, `tidak_ada_perubahan` when it does not |
+| `__oc.scroll(target\|'bawah')` | position before and after |
+| `__oc.berkas()` | file inputs that exist, plus a note that uploads still go through CDP `DOM.setFileInputFiles` |
 
-`target` menerima empat bentuk: indeks dari `mata()` (`{i: 7}`), selector CSS, objek `{peran, nama}`, atau teks yang terlihat. Pencariannya menelusuri shadow DOM (terbuka maupun tertutup) dan iframe se-asal, karena `document.querySelectorAll` tidak bisa masuk ke sana.
+`target` accepts four shapes: an index from `mata()` (`{i: 7}`), a CSS selector, a `{peran, nama}` object, or visible text. The lookup walks shadow DOM (open and closed) and same-origin iframes, because `document.querySelectorAll` cannot reach into them.
 
-Klik mencoba tiga jalur berurutan dan berhenti di jalur pertama yang mengubah keadaan halaman: klik native, rangkaian event tikus berkoordinat, lalu papan ketik. Sebelum menyentuh apa pun, titik tengah elemen diuji dengan `elementFromPoint` (diturunkan ke dalam shadow root), jadi tombol yang tertutup lapisan lain dilaporkan **gagal** beserta elemen penghalangnya, bukan dilaporkan berhasil.
+A click tries three paths in order and stops at the first one that changes page state: native click, a coordinate-driven mouse event sequence, then the keyboard. Before touching anything, the element's centre point is tested with `elementFromPoint` (descended into the shadow root), so a button covered by another layer is reported as **gagal** together with the blocking element, instead of being reported as a success.
 
-Batas yang tetap jujur:
+Limits that stay honest:
 
-- **Iframe lintas asal tidak terbaca.** Isinya milik origin lain, dan menembusnya butuh `Target.attachToTarget` per bingkai. Yang terlihat hanya keberadaan bingkainya (`wadah[].lintas_asal = true`).
-- **Verifikasi sinkron bisa meleset pada UI yang menunda perubahan.** Perubahan dari handler langsung terlihat; perubahan yang menunggu microtask atau animasi tidak. Untuk itu ada `__oc.klikTunggu(target, ms)`, yang butuh pemanggil memakai `awaitPromise`.
-- **Unggah berkas bukan urusan JavaScript.** Nilai `input[type=file]` hanya bisa diisi pengguna atau CDP.
-- **`paksa: true` melewati pemeriksaan overlay, bukan pemeriksaan hasil.** Hasilnya tetap keadaan halaman.
-- **Snapshot dibatasi.** `__oc.mata({maks: N})` memotong daftar elemen (bawaan 300); halaman 1000+ node tetap menghasilkan ringkasan teks, bukan 1000 baris JSON.
+- **Cross-origin iframes are not readable.** Their contents belong to another origin, and piercing them needs `Target.attachToTarget` per frame. Only the existence of the frame is visible (`wadah[].lintas_asal = true`).
+- **Synchronous verification can miss UI that defers its change.** Changes from a handler are visible immediately; changes that wait on a microtask or an animation are not. For that there is `__oc.klikTunggu(target, ms)`, which requires the caller to use `awaitPromise`.
+- **File upload is not JavaScript's job.** The value of `input[type=file]` can only be set by the user or by CDP.
+- **`paksa: true` skips the overlay check, not the outcome check.** The result is still page state.
+- **The snapshot is bounded.** `__oc.mata({maks: N})` truncates the element list (default 300); a page with 1000+ nodes still produces a text summary, not 1000 lines of JSON.
 
-Bukti: `cargo test -p browserd --test mata_tangan` menyalakan `chrome-headless-shell` sungguhan dan menyajikan fixture dari proses test: 14 kotak custom tanpa `role` tercentang semua lewat satu perintah, tombol di dalam shadow tertutup bisa diklik, tombol di dalam iframe bisa diklik dan inputnya bisa diketik, tombol di bawah overlay dilaporkan gagal, dan klik tanpa efek dilaporkan `tidak_ada_perubahan`.
+Evidence: `cargo test -p browserd --test mata_tangan` starts a real `chrome-headless-shell` and serves fixtures from the test process: 14 custom boxes without a `role` all get checked through one command, a button inside a closed shadow can be clicked, a button inside an iframe can be clicked and its input typed into, a button under an overlay is reported as failing, and a click with no effect is reported as `tidak_ada_perubahan`.
 
-## Lifecycle: mesin tidur saat menganggur
+## Lifecycle: engines sleep while idle
 
-Mesin yang tidak dipakai tidak perlu terus hidup. Dengan `--idle-reap-secs N` (atau `[daemon] idle_reap_secs = N`) daemon memeriksa tiap 5 detik: mesin tanpa sesi terbuka yang tidak disentuh selama N detik dimatikan lewat `SIGTERM` ke group prosesnya, lalu `SIGKILL` setelah tenggangnya. `0` (bawaan) mematikan fitur ini.
+An engine nobody is using does not need to stay alive. With `--idle-reap-secs N` (or `[daemon] idle_reap_secs = N`) the daemon checks every 5 seconds: an engine with no open session that has not been touched for N seconds is shut down with `SIGTERM` to its process group, then `SIGKILL` after a grace period. `0` (the default) disables the feature.
 
-Yang membuat ini bukan sekadar "mematikan proses": daemon menyimpan **resep** mesinnya (`binary`, `args`, `port`, `user_data_dir`), bukan cuma pegangan ke proses. Mesin yang di-reap bisa lahir lagi saat ada yang memakainya, di port baru, tanpa me-restart daemon dan tanpa menyentuh config.
+What makes this more than "killing a process": the daemon keeps the engine's **recipe** (`binary`, `args`, `port`, `user_data_dir`), not just a handle to the process. A reaped engine can be born again when something needs it, on a new port, without restarting the daemon and without touching the config.
 
-| Kejadian | Perilaku |
+| Event | Behaviour |
 |---|---|
-| Menganggur melewati ambang, tanpa sesi, tanpa handoff tertunda | `SIGTERM` ke group proses, 5 detik, lalu `SIGKILL`; slot jadi `tidur` |
-| Ada sesi WebSocket terbuka | tidak di-reap, seberapa lama pun kliennya diam |
-| Ada handoff yang belum dijawab | tidak di-reap (registry handoff belum menyimpan mesin, jadi satu handoff menahan semua mesin; arah kelirunya aman, memori yang ditahan) |
-| Mesin menolak mati sesudah `SIGKILL` | dikembalikan ke slot, dicoba lagi di putaran berikutnya, `warn` di log |
-| `/json/version` | dijawab dari info yang sudah dicatat; **tidak** membangunkan mesin |
-| `/json/list`, `/json/new`, `/json/protocol`, `/json/activate`, `/json/close` | membangunkan mesin yang ditanya (di mode multiplex: semua) sebelum diteruskan |
-| `/healthz` | `state` membedakan `hidup`, `tidur` (sehat), `mati` (kegagalan), `belum_pernah` |
-| `/metrics` | `browser_engine_state` melaporkan state slot, bukan tebakan dari pid |
+| Idle past the threshold, no session, no pending handoff | `SIGTERM` to the process group, 5 seconds, then `SIGKILL`; the slot becomes `tidur` |
+| An open WebSocket session exists | not reaped, no matter how long the client stays quiet |
+| A handoff that has not been answered | not reaped (the handoff registry does not store an engine yet, so one handoff holds back every engine; it errs on the safe side, at the cost of held memory) |
+| An engine refuses to die after `SIGKILL` | returned to its slot, retried on the next round, `warn` in the log |
+| `/json/version` | answered from already recorded info; it does **not** wake an engine |
+| `/json/list`, `/json/new`, `/json/protocol`, `/json/activate`, `/json/close` | wake the engine being asked about (in multiplex mode: all of them) before forwarding |
+| `/healthz` | `state` distinguishes `hidup`, `tidur` (healthy), `mati` (failure), `belum_pernah` |
+| `/metrics` | `browser_engine_state` reports the slot state, not a guess from a pid |
 
-`tidur` sengaja dihitung **sehat**: daemon yang sedang berhemat bukan gangguan, dan alarm yang menyala tiap kali reap bekerja akan diabaikan orang.
+`tidur` is deliberately counted as **healthy**: a daemon that is saving resources is not an incident, and an alarm that fires every time reap does its job would be ignored by everyone.
 
-Diukur 2 November 2026 dengan satu `chrome-headless-shell` sungguhan dan ambang 10 detik (`cargo test -p browserd --test idle_proof -- --nocapture`):
+Measured on 2 November 2026 with one real `chrome-headless-shell` and a 10 second threshold (`cargo test -p browserd --test idle_proof -- --nocapture`):
 
-| Yang diukur | Hasil |
+| What was measured | Result |
 |---|---|
-| PSS total (daemon + mesin) sebelum reap | 26,4 MB |
-| PSS total sesudah reap, daemon yang sama | 14,1 MB (turun 12,2 MB) |
-| Mesin pada 3,0 detik sesudah sentuhan terakhir (sebelum ambang) | masih hidup, PSS 12,3 MB |
-| Waktu reap sesudah sentuhan terakhir | 10,1 detik |
-| `/proc/<pid>` mesin sesudah reap | bersih |
-| `/json/list` sesudah reap | mesin baru: pid 643979 -> 644068, PSS 12,1 MB |
-| `Runtime.evaluate` `6 * 7` di tab mesin baru | `42` |
+| Total PSS (daemon + engine) before reap | 26.4 MB |
+| Total PSS after reap, same daemon | 14.1 MB (down 12.2 MB) |
+| Engine at 3.0 seconds after the last touch (before the threshold) | still alive, PSS 12.3 MB |
+| Reap time after the last touch | 10.1 seconds |
+| Engine `/proc/<pid>` after reap | clean |
+| `/json/list` after reap | new engine: pid 643979 -> 644068, PSS 12.1 MB |
+| `Runtime.evaluate` `6 * 7` in a tab on the new engine | `42` |
 
-PSS, bukan RSS: RSS menjumlahkan halaman bersama (biner, font, pustaka) berkali-kali, jadi dua angka RSS tidak boleh dijumlahkan dan penurunannya akan terlihat lebih besar dari yang nyata.
+PSS, not RSS: RSS adds shared pages (binary, fonts, libraries) once per process, so two RSS numbers must not be summed and the drop would look larger than it really is.
 
-Batas yang jujur:
+Limits that stay honest:
 
-- Ambang dihitung dari sentuhan terakhir pada slot, dan handoff **belum per mesin**: satu handoff tertunda menahan reap untuk semua mesin.
-- `/json/list` membangunkan mesin yang ditanya. Klien yang cuma ingin melihat daftar tetap membayar satu boot; itu disengaja, karena daftar kosong lebih menyesatkan daripada satu boot.
-- Tab tidak dipulihkan sesudah reap. Store M2 menjaga profil dan cookie; tab hidup di memori, dan setelah mesin mati tab itu memang sudah tidak ada.
+- The threshold is measured from the last touch on the slot, and handoffs are **not** per engine yet: one pending handoff holds back reap for every engine.
+- `/json/list` wakes the engine being asked about. A client that only wants to see the list still pays one boot; that is intentional, because an empty list is more misleading than one boot.
+- Tabs are not restored after reap. The M2 store keeps profiles and cookies; a tab lives in memory, and once the engine is dead that tab really is gone.
 
-## Peta milestone
+## Milestone map
 
-| Versi | Isi minimum | Milestone |
+| Version | Minimum content | Milestone |
 |---|---|---|
-| `0.1.0` (sekarang) | daemon, `/json/version`, pass-through, reroute, L1+L2 hijau di CI | M0 |
-| `0.1.0` (sekarang) | lifecycle: TTL tab, reap, ratchet PSS terbukti | M1 |
-| `0.1.0` (sekarang) | store: profil, cookie yang bertahan restart | M2 |
-| `0.1.0` (sekarang) | policy, deteksi tantangan, handoff OTP | M3 |
-| `0.1.0` (sekarang) | multiplex CDP: beberapa mesin dalam satu daemon | M4 |
-| belum ditag | adapter `oxi`, hanya kalau uji kapabilitas lulus | M5 |
-| belum ditag | `chrome-full` + xvfb + jalur artefak `cloakbrowser` | M6 |
+| `0.1.0` (current) | daemon, `/json/version`, pass-through, reroute, L1+L2 green in CI | M0 |
+| `0.1.0` (current) | lifecycle: tab TTL, reap, proven PSS ratchet | M1 |
+| `0.1.0` (current) | store: profiles, cookies that survive a restart | M2 |
+| `0.1.0` (current) | policy, challenge detection, OTP handoff | M3 |
+| `0.1.0` (current) | CDP multiplex: several engines in one daemon | M4 |
+| not yet tagged | `oxi` adapter, only if the capability test passes | M5 |
+| not yet tagged | `chrome-full` + xvfb + `cloakbrowser` artifact path | M6 |
 
-Nomor milestone di tabel ini mengikuti `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex). Versi `0.1.0` di `Cargo.toml` belum dinaikkan sejak M0: yang bertambah isinya, bukan nomornya. **Belum ada tag**, karena repo yang punya tag `0.1.0` sementara belum bisa dipakai orang adalah rilis palsu.
+The milestone numbers in this table follow `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex). The `0.1.0` version in `Cargo.toml` has not been bumped since M0: what grows is the contents, not the number. **There is no tag yet**, because a repository that carries a `0.1.0` tag while people still cannot use it is a fake release.
 
-## Kebijakan
+## Policy
 
-- **Tanpa vendor Chromium.** Mesin dipakai sebagai biner terpisah, bukan untuk dipatch jadi produk sendiri.
-- **Tanpa rahasia di repo.** Tidak ada kredensial, token, atau kunci. Konfigurasi runtime dibaca dari berkas di luar repo dengan izin `0600`.
-- **Build berat di CI, ukur memori di host.** Runner GitHub 4 core / 16 GB dipakai untuk kompilasi. Angka memori yang menentukan budget diukur di mesin tempat produk berjalan, bukan di VM orang lain.
-- `#![forbid(unsafe_code)]` di setiap crate.
+- **No vendored Chromium.** The engine is used as a separate binary, not patched into a product of our own.
+- **No secrets in the repository.** No credentials, tokens, or keys. Runtime configuration is read from files outside the repository with `0600` permissions.
+- **Heavy builds in CI, memory measured on the host.** GitHub runners with 4 cores / 16 GB are used for compilation. The memory numbers that set the budget are measured on the machine where the product runs, not on someone else's VM.
+- `#![forbid(unsafe_code)]` in every crate.
 
-## Lisensi
+## License
 
-MIT OR Apache-2.0. Lihat `LICENSE-MIT` dan `LICENSE-APACHE`.
+MIT OR Apache-2.0. See `LICENSE-MIT` and `LICENSE-APACHE`.

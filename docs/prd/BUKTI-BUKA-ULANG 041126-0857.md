@@ -1,44 +1,45 @@
-# Bukti buka ulang situs yang pernah bermasalah
+# Evidence: re-opening sites that had failed before
 
-Diambil 4 Nov 2026 08:54-08:58 WIB lewat daemon `browserd` di `127.0.0.1:9224`
-(tab baru per situs, `Page.enable` + `Network.enable` + `Runtime.evaluate` +
-`Page.captureScreenshot`, tab ditutup sesudahnya). Port produksi 9222 dibaca
-read-only sebelum dan sesudah: 0 tab, tidak menerima perintah apa pun.
+Captured 4 Nov 2026 08:54 to 08:58 WIB through the `browserd` daemon on
+`127.0.0.1:9224` (a new tab per site, `Page.enable` + `Network.enable` +
+`Runtime.evaluate` + `Page.captureScreenshot`, the tab closed afterwards).
+Production port 9222 was read read-only before and after: 0 tabs, it received no
+command at all.
 
-Situs yang dulu gagal adalah halaman consent Google: `browser_click` dan
-`browser_act` time out, `browser_eval` + `.click()` berhasil, dan
-`querySelectorAll('[role="checkbox"]')` mengembalikan 0 karena kotaknya custom
-element. Itu sebabnya halaman ini diuji ulang lebih dulu.
+The site that had failed before was the Google consent page: `browser_click` and
+`browser_act` timed out, `browser_eval` plus `.click()` worked, and
+`querySelectorAll('[role="checkbox"]')` returned 0 because the boxes are custom
+elements. That is why this page was re-tested first.
 
-## Hasil
+## Results
 
-| Situs | Status dokumen | URL akhir | Judul | Sinyal DOM | Detik | Kategori yang benar |
+| Site | Document status | Final URL | Title | DOM signal | Seconds | Correct category |
 |---|---|---|---|---|---|---|
-| `google.com/search?q=...` | 200 lalu **429** | `/sorry/index?...` | kosong | frame `recaptcha/enterprise` | 25,1 (mentok batas) | `blok_anti_bot` |
-| `nowsecure.nl` | tak tertangkap (tab dibuat sudah membawa URL) | `nowsecure.nl` | `nowsecure.nl` | `captcha_dom` (hCaptcha) | 2,0 dan 13,3 di dua run | `blok_anti_bot` |
-| `tidak-ada-host-oc.test` | tidak ada | `chrome-error://chromewebdata/` | kosong | tidak ada | 0,3 | `jaringan` |
-| `instagram.com` | tidak tertangkap | `instagram.com` | `Instagram` | tidak ada | 15,2 | `render_lambat` (di ambang) atau sukses |
-| `consent.google.com/?gl=ID` | **404** | sama | `Error 404 (Tidak Ditemukan)!!1` | tidak ada | 0,9 | bukan tantangan, halaman galat biasa |
+| `google.com/search?q=...` | 200 then **429** | `/sorry/index?...` | empty | `recaptcha/enterprise` frame | 25.1 (hit the limit) | `blok_anti_bot` |
+| `nowsecure.nl` | not captured (the tab was created already carrying the URL) | `nowsecure.nl` | `nowsecure.nl` | `captcha_dom` (hCaptcha) | 2.0 and 13.3 across two runs | `blok_anti_bot` |
+| a deliberately non-existent host (a made-up `.test` name) | none | `chrome-error://chromewebdata/` | empty | none | 0.3 | `jaringan` |
+| `instagram.com` | not captured | `instagram.com` | `Instagram` | none | 15.2 | `render_lambat` (borderline) or success |
+| `consent.google.com/?gl=ID` | **404** | same | `Error 404 (Not Found)!!1` | none | 0.9 | not a challenge, an ordinary error page |
 
-## Tiga pelajaran yang mengubah desain klasifikasi
+## Three lessons that changed the classification design
 
-1. **Status sendirian tidak cukup, dan status bisa hilang.** Klien yang membuat
-   tab lewat `PUT /json/new?<url>` memulai navigasi sebelum `Network.enable`
-   sempat dikirim, jadi `Network.responseReceived` untuk dokumen pertama tidak
-   pernah terlihat. `nowsecure.nl` membuktikannya: nol event dokumen, tapi
-   halamannya jelas tantangan. Klasifikasi wajib punya jalur dari URL akhir dan
-   sinyal DOM, bukan hanya status.
-2. **Google membalas 429 di URL `/sorry/index`, bukan 403, dan teks halamannya
-   0 karakter.** Deteksi berbasis teks saja akan melaporkan "halaman normal".
-   Bukti yang menyelamatkan: status 429 + pola URL + frame reCAPTCHA.
-3. **`chrome-error://chromewebdata/` adalah bukti jaringan yang paling kuat.**
-   Halaman galat Chromium punya body 0 karakter, jadi tanpa memeriksa URL akhir
-   sistem akan menyebutnya "halaman kosong" dan bukan kegagalan jaringan.
+1. **Status alone is not enough, and status can go missing.** A client that creates
+   a tab through `PUT /json/new?<url>` starts the navigation before
+   `Network.enable` has been sent, so `Network.responseReceived` for the first
+   document is never seen. `nowsecure.nl` proves it: zero document events, yet the
+   page is clearly a challenge. Classification must have a path from the final URL
+   and DOM signals, not from status alone.
+2. **Google answers 429 at the `/sorry/index` URL, not 403, and the page text is 0
+   characters.** Text-based detection alone would report "a normal page". The
+   evidence that saved it: status 429 plus the URL pattern plus a reCAPTCHA frame.
+3. **`chrome-error://chromewebdata/` is the strongest network evidence.** A
+   Chromium error page has a 0 character body, so without checking the final URL
+   the system would call it "an empty page" instead of a network failure.
 
-## Yang belum diukur
+## What is not measured yet
 
-Laju deteksi anti-bot pada host nyata (satu percobaan per situs, bukan sampel),
-dan perilaku `chrome_full` di xvfb. Tidak ada klaim soal keduanya.
+The anti-bot detection rate on real hosts (one attempt per site, not a sample), and
+the behaviour of `chrome_full` under xvfb. There is no claim about either.
 
-Berkas mentah: `/tmp/oc-buka-{google2,cf2,dnsgagal,ig,consent}.json` dan
-screenshot pasangannya.
+Raw files: `/tmp/oc-buka-{google2,cf2,dnsgagal,ig,consent}.json` and their
+matching screenshots.
