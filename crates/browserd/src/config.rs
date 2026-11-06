@@ -273,9 +273,29 @@ impl FileConfig {
     }
 
     /// Aturan pemilihan mesin dari `[policy]`.
+    ///
+    /// `[policy] default` yang tidak ditulis diisi dari mesin bawaan daemon
+    /// (`[daemon] engine_default`, lalu `chrome_shell`, lalu id terkecil).
+    /// Tanpa pengisian ini, config yang hanya berisi satu mesin lain, mis. oxi
+    /// saja, ditolak saat start karena nama bawaan `chrome-shell` tidak pernah
+    /// ditulis siapa pun dan mesin itu tidak terpasang.
+    ///
+    /// Yang diisi adalah **jenis** mesinnya, bukan id: `[engines.toko]` dengan
+    /// `kind = "oxi"` menjadi `oxi`, dan itulah nama yang dikenal `[policy]`.
     #[must_use]
     pub fn policy(&self) -> policy::PolicySection {
-        self.policy.clone().unwrap_or_default()
+        let mut aturan = self.policy.clone().unwrap_or_default();
+        if aturan.default.is_none() {
+            aturan.default = self.engine_default().and_then(|id| {
+                let (_, section) = self.machines().find(|(nama, _)| nama.as_str() == id)?;
+                // Jenis yang sama dengan yang dipakai `dari_config`: `kind`
+                // kosong berarti shell. Id mesin tidak pernah dipakai di sini,
+                // karena `[policy]` menyebut jenis (`shell`, `oxi`), bukan id
+                // (`kiri`, `kanan`).
+                Some(section.kind.clone().unwrap_or_else(|| "shell".to_owned()))
+            });
+        }
+        aturan
     }
 
     #[must_use]
@@ -458,6 +478,38 @@ default = "shell"
                 .map(String::as_str),
             Some("chrome-full")
         );
+    }
+
+    #[test]
+    fn policy_default_diisi_dari_mesin_bawaan_bukan_dikarang() {
+        // Config yang hanya berisi satu mesin non-shell dan tidak menulis
+        // `[policy] default`: yang dipakai jenis mesin bawaan itu, bukan
+        // `chrome-shell` yang tidak pernah ditulis operator dan tidak terpasang.
+        let text = r#"
+[engines.oxi]
+kind = "oxi"
+binary = "/usr/local/bin/oxibrowser"
+"#;
+        let config: FileConfig = toml::from_str(text).expect("harus bisa diparse");
+        assert_eq!(config.policy().default.as_deref(), Some("oxi"));
+        assert!(
+            config
+                .policy()
+                .validasi(&policy::Catalog::dari_mesin(["oxi"]))
+                .is_ok(),
+            "config sah tidak boleh ditolak hanya karena bawaannya bukan shell"
+        );
+
+        // Yang ditulis operator tetap menang, termasuk ketika mesinnya belum
+        // terpasang: itu salah tulis, dan validator yang harus mengatakannya.
+        let tegas: FileConfig = toml::from_str(
+            r#"
+[policy]
+default = "chrome-full"
+"#,
+        )
+        .expect("harus bisa diparse");
+        assert_eq!(tegas.policy().default.as_deref(), Some("chrome-full"));
     }
 
     #[test]

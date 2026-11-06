@@ -307,25 +307,21 @@ impl std::fmt::Display for SelectError {
 impl std::error::Error for SelectError {}
 
 /// Bagian `[policy]` di `browser-daemon.toml`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct PolicySection {
     /// Mesin bawaan saat tidak ada aturan lain yang cocok.
-    pub default: String,
+    ///
+    /// `None` berarti operator **tidak menulis** `[policy] default`, dan itu
+    /// bukan hal yang sama dengan menulis `chrome-shell`. Pemanggil yang punya
+    /// mesin bawaan sendiri (daemon: `[daemon] engine_default`) mengisinya dari
+    /// sana; di sini nilainya dibiarkan kosong supaya tidak ada nama mesin yang
+    /// dikarang di dalam kode.
+    pub default: Option<String>,
     /// Host yang wajib memakai `chrome-full` karena tantangannya berat.
     pub stealth_hosts: Vec<String>,
     /// Pemetaan host ke nama mesin, mis. `"shop.example" = "chrome-full"`.
     pub rules: BTreeMap<String, String>,
-}
-
-impl Default for PolicySection {
-    fn default() -> Self {
-        Self {
-            default: EngineKind::Shell.as_str().to_owned(),
-            stealth_hosts: Vec::new(),
-            rules: BTreeMap::new(),
-        }
-    }
 }
 
 impl PolicySection {
@@ -368,15 +364,19 @@ impl PolicySection {
     pub fn validasi(&self, catalog: &Catalog) -> Result<(), Vec<SelectError>> {
         let mut salah = Vec::new();
 
-        match EngineKind::parse(&self.default) {
-            None => salah.push(SelectError::UnknownEngineName(self.default.clone())),
-            Some(kind) if catalog.capabilities(kind).is_none() => {
-                salah.push(SelectError::NotInstalled {
-                    kind,
-                    rule: RULE_DEFAULT,
-                });
+        // Tanpa `[policy] default` tidak ada yang perlu diperiksa: mesin
+        // bawaan diambil dari `[daemon] engine_default` oleh pemanggil.
+        if let Some(bawaan) = &self.default {
+            match EngineKind::parse(bawaan) {
+                None => salah.push(SelectError::UnknownEngineName(bawaan.clone())),
+                Some(kind) if catalog.capabilities(kind).is_none() => {
+                    salah.push(SelectError::NotInstalled {
+                        kind,
+                        rule: RULE_DEFAULT,
+                    });
+                }
+                Some(_) => {}
             }
-            Some(_) => {}
         }
 
         for (host, nama) in &self.rules {
@@ -544,9 +544,15 @@ pub fn select(
         });
     }
 
-    // 8. Bawaan dari config, lalu shell.
-    let fallback = EngineKind::parse(&config.default)
-        .ok_or_else(|| SelectError::UnknownEngineName(config.default.clone()))?;
+    // 8. Bawaan dari config, lalu shell. Shell adalah nama terakhir yang
+    //    dipakai, bukan nama yang dikarang: tanpanya, config yang hanya berisi
+    //    satu mesin lain tidak punya jalan sama sekali.
+    let nama = config
+        .default
+        .clone()
+        .unwrap_or_else(|| EngineKind::Shell.as_str().to_owned());
+    let fallback =
+        EngineKind::parse(&nama).ok_or_else(|| SelectError::UnknownEngineName(nama.clone()))?;
     require(
         fallback,
         catalog,
@@ -920,7 +926,9 @@ mod tests {
     #[test]
     fn bagian_config_bawaan_sesuai_dokumen() {
         let policy = PolicySection::default();
-        assert_eq!(policy.default, "chrome-shell");
+        // Tanpa `[policy] default` tidak ada nama mesin yang dikarang di sini:
+        // mesin bawaan ditentukan pemanggil dari konfigurasinya sendiri.
+        assert_eq!(policy.default, None);
         assert!(policy.stealth_hosts.is_empty());
 
         let captcha = CaptchaSection::default();
@@ -952,7 +960,7 @@ cooldown_secs = 120
             captcha: CaptchaSection,
         }
         let root: Root = toml::from_str(text).expect("harus bisa diparse");
-        assert_eq!(root.policy.default, "chrome-full");
+        assert_eq!(root.policy.default.as_deref(), Some("chrome-full"));
         assert!(root.policy.is_stealth_host("static.cloudflare.com"));
         assert_eq!(root.policy.rule_for("shop.example"), Some("chrome-full"));
         assert_eq!(root.captcha.handoff_per_host_hour, 3);
@@ -978,7 +986,7 @@ cooldown_secs = 120
         // AC-008: aturan yang menyebut mesin tidak terpasang ditolak saat
         // start, dan pesannya menyebut mesin itu.
         let policy = PolicySection {
-            default: "chrome-shell".to_owned(),
+            default: Some("chrome-shell".to_owned()),
             stealth_hosts: Vec::new(),
             rules: BTreeMap::from([("shop.example".to_owned(), "chrome-full".to_owned())]),
         };
@@ -995,7 +1003,7 @@ cooldown_secs = 120
     #[test]
     fn validasi_aturan_sah_lolos_dan_mesin_hilang_tidak_menghalangi() {
         let policy = PolicySection {
-            default: "chrome-shell".to_owned(),
+            default: Some("chrome-shell".to_owned()),
             stealth_hosts: vec!["static.cloudflare.com".to_owned()],
             rules: BTreeMap::from([("shop.example".to_owned(), "chrome-full".to_owned())]),
         };
@@ -1012,7 +1020,7 @@ cooldown_secs = 120
     #[test]
     fn validasi_nama_mesin_salah_disebut_namanya() {
         let policy = PolicySection {
-            default: "chrome-shel".to_owned(),
+            default: Some("chrome-shel".to_owned()),
             stealth_hosts: Vec::new(),
             rules: BTreeMap::from([("a.example".to_owned(), "krome-full".to_owned())]),
         };
