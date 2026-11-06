@@ -14,9 +14,22 @@ Live state for this target only. The PRD holds the milestone outcomes, Done When
 and the FR/NFR/AC scope; this file records evidence and the next step, it does
 not copy the specification.
 
+## Resume Packet (a fresh session reads this first)
+
+One read must be enough to continue without asking the owner anything.
+
+| Field | Value |
+|---|---|
+| Active milestone | 6 (`chrome-full` + xvfb + the `cloakbrowser` artifact path); milestones 1 to 5 are Done |
+| Next exact command | `cargo xtask doctor` |
+| Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
+| Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
+| Last passing check | `cargo xtask check` at `193abc4e` plus the edits in this commit: `fmt ok`, `clippy ok`, `test ok`, exit 0 (2026-11-06) |
+| Open blockers | None inside this repo. The three former owner decisions are defaults in PRD section 2 Review Focus. Permanent deletion of `adi805/opencrabs-web` is outside this repo and waits on `gh auth refresh -s delete_repo` |
+
 ## Current State
 
-- PRD version: 0.1.0 (draft)
+- PRD version: 0.1.0 (implementation)
 - Execution mode: native (no build has been requested for new requirements)
 - Active milestone / next action: milestones 1 to 5 are **Done** (eyes and
   hands, failure classification + diagnostics, session and engine resilience,
@@ -28,8 +41,8 @@ not copy the specification.
   9222 isolation) through a Rust test that starts a real engine on a random
   port and then compares against 9222.
 - Build authority: the owner granted full execution permission on 3 November 2026.
-- Required unresolved input: three owner decisions in PRD §2 Review Focus
-  (anti-bot limits, parallel tabs, `chrome_full`) affect FR-001/FR-006/FR-004.
+- Required unresolved input: none. The three owner decisions that used to be
+  open questions are now defaults with a reversal cost in PRD section 2 Review Focus.
 
 ## Milestones And Evidence
 

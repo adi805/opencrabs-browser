@@ -1,13 +1,13 @@
 ---
 project: "OpenCrabs Browser: a web-opening engine you can rely on"
 version: "0.1.0"
-status: "in-progress"
-current_milestone: 4
-total_milestones: 4
+status: "implementation"
+current_milestone: 5
+total_milestones: 5
 type: "tool"
 tech_stack:
   - "Rust (workspace: engine, cdp, lifecycle, browserd, policy, control)"
-  - "Chromium headless_shell (engine chrome_shell) + full Chromium (chrome_full, not built yet)"
+  - "Chromium headless_shell (engine chrome_shell), OxiBrowser 0.28.0 as a measured light engine (engine oxi), and full Chromium (chrome_full, not built yet)"
   - "CDP (Chrome DevTools Protocol) as the only door to the engine"
   - "systemd user unit + tokio"
 created: "2026-11-04"
@@ -17,8 +17,8 @@ ai_instructions: "#builder-capability-routing-contract"
 
 # OpenCrabs Browser: a web-opening engine you can rely on
 
-> Status: **draft**. This document is a specification, not permission to build.
-> What already exists in the repo (M0 to M4) is used as evidence of the starting
+> Status: **implementation**. Milestones 1, 3, 4 and 5 carry verified evidence; milestone 2 is still in progress. This document stays a specification, not permission to build.
+> What already exists in the repo (M0 to M5) is used as evidence of the starting
 > state, not as something considered done for the requirements below.
 
 ## 1. Overview
@@ -48,9 +48,14 @@ ai_instructions: "#builder-capability-routing-contract"
 
 Three decisions that are still open for the owner and shape the final form:
 
-1. **Anti-bot detection ceiling**: must the system try to get past a challenge (residential proxies, fingerprinting), or is detecting it and handing off to a human enough? My recommendation: detect plus handoff first, because trying to beat challenges turns this project into an anti-detection tool, and that is an ethical and political decision, not a technical one.
-2. **Tabs per job**: may the agent hold N parallel tabs (which needs sessions and leases), or does it stay at one tab? Recommendation: a lease with a limit, because parallel work is already real (audit and publish running side by side).
-3. **`chrome_full`**: build it as a second engine (needs xvfb, about 900 MB idle measured on Firefox, full Chromium not measured yet) or defer it? Recommendation: build it lazily, only for hosts listed in `policy.stealth_hosts`, and only once FR-002 works.
+Every remaining choice is a default with a written reversal cost. Nothing here is a
+question for the owner to answer before the next session starts.
+
+| Decision | Default applied | Why | Reversal cost |
+|---|---|---|---|
+| Anti-bot ceiling: try to pass challenges with proxies or fingerprinting, or detect and hand off to a human? | Detect and hand off as `butuh_manusia`; no bypass code is written | Trying to beat challenges turns this project into an anti-detection tool, and that is an ethical decision the owner has not made; detection plus handoff already covers the failures measured so far | One extra tier in the escalation chain plus one `policy` key, about a day of work; no AC changes |
+| Tabs per job: allow N parallel tabs, or hold one? | A lease with a per-session limit, enforced by `max_tabs` | Parallel work is already real (audit and publish side by side), and a lease is the only way `idle_reap` can tell a working tab from an orphan | `crates/lifecycle` lease type and AC-009 to AC-013, about two days |
+| `chrome_full` engine (xvfb, about 900 MB idle measured on Firefox) | Deferred; built only for hosts in `policy.stealth_hosts`, and only after FR-002 passes | It is not measured on this 7 GB laptop and it is not a precondition for any milestone that is already verified | One adapter in `crates/engine` plus a unit file, about two days; no existing AC changes |
 
 ### Requirements
 
@@ -75,32 +80,32 @@ Three decisions that are still open for the owner and shape the final form:
 
 | ID | Requirement IDs | Type | Observable criterion | Required evidence |
 |---|---|---|---|---|
-| AC-001 | FR-001 | Positive | Three test pages (one normal, one 403 carrying a challenge, one requiring 2FA) produce three different categories that are stable across 3 attempts. | An integration test using a fake local server, not the internet. |
+| AC-001 | FR-001 | Positive | Three test pages (one normal, one 403 carrying a challenge, one requiring 2FA) produce three different categories that are stable across 3 attempts. | `cargo test -p browserd --test diagnostik tiga_halaman_tiga_kategori_dan_artefak`; each attempt leaves `screenshot.png`, `dom.html`, `mesin.log` and `ringkasan.json` in the artifact directory. |
 | AC-002 | FR-001 | Negative | A page that succeeds is **never** reported as failed, and a category without supporting evidence must not appear. | A negative test plus an assertion that a category always carries a non-empty `bukti`. |
-| AC-003 | FR-002 | Positive | The escalation order is recorded in full for one network failure and one anti-bot failure; it stops at the step that works. | Structured log holding the list of steps plus the stopping reason. |
-| AC-004 | FR-002 | Boundary | Retry at most 2 times per category; the third attempt is not run. | A test that counts attempts against a server that always fails. |
+| AC-003 | FR-002 | Positive | The escalation order is recorded in full for one network failure and one anti-bot failure; it stops at the step that works. | `cargo test -p browserd --test diagnostik` checks the recorded `Langkah` list plus its stopping reason; the same list is written to `ringkasan.json`. |
+| AC-004 | FR-002 | Boundary | Retry at most 2 times per category; the third attempt is not run. | `cargo test -p browserd --lib maksimal_dua_ulang_dan_handoff_selalu_terakhir`. |
 | AC-005 | FR-003 | Positive | One failure produces one directory with at least 4 files (screenshot, DOM, log, summary) and the summary names the category plus the reason. | `ls` of the artifact directory plus `cat` of the summary inside the test. |
-| AC-006 | FR-003 | Negative | Artifacts are never written into the repo working directory and their volume is capped (quota), so repeated failures do not fill the disk. | A quota test: 100 failures stay under the configured byte limit. |
-| AC-007 | FR-004 | Positive | A host matching a rule is routed to the engine the rule names; the log says which rule won. | A test with two fake engines and one host rule. |
-| AC-008 | FR-004 | Negative | With no rule, the request still goes to the default engine; a rule naming a missing engine is rejected at start, not silently ignored. | A start-failure test plus a message naming the engine. |
+| AC-006 | FR-003 | Negative | Artifacts are never written into the repo working directory and their volume is capped (quota), so repeated failures do not fill the disk. | `cargo test -p browserd --lib kuota_menahan_seratus_kegagalan` plus an assertion that the artifact root is outside the repo working directory. |
+| AC-007 | FR-004 | Positive | A host matching a rule is routed to the engine the rule names; the log says which rule won. | `cargo test -p browserd --test routing_host host_beraturan_mendarat_di_instance_yang_ditunjuk`. |
+| AC-008 | FR-004 | Negative | With no rule, the request still goes to the default engine; a rule naming a missing engine is rejected at start, not silently ignored. | `cargo test -p browserd --test routing_host host_tanpa_aturan_memakai_mesin_bawaan` and `cargo test -p browserd --test routing_host aturan_ke_jenis_yang_tidak_terpasang_dijawab_galat_bukan_diam`, whose message names the missing kind. |
 | AC-009 | FR-005 | Positive | A tab held by a lease still exists after `idle_reap_secs` passes, as long as the lease has not expired. | A fake-time test (no sleeping): `idle_reap_due` plus a lease. |
-| AC-010 | FR-005 | Positive | A `max_tabs` change in the config file takes effect after SIGHUP without a restart: the new limit immediately rejects or allows. | Procedure: change the number, send SIGHUP, create a tab, look at the result; recorded in PROGRESS.md. |
-| AC-011 | FR-005 | Boundary | The old limit still applies if the new config is broken: the daemon logs the parse error and keeps the last values, it does not fall back to no limit. | A test with an invalid config. |
-| AC-012 | FR-006 | Positive | Two parallel sessions hold their own tabs; closing one session does not close the other session's tabs. | A test with two leases plus a close command. |
-| AC-013 | FR-006 | Negative | A reached per-session limit rejects a new tab with an error that names which session, instead of closing another session's tab. | A negative test plus an assertion that the other session's tab count is unchanged. |
-| AC-014 | FR-007 | Positive | The handoff carries URL, title, screenshot, and selector; the operator's answer continues the same session. | An end-to-end test with a fake control port. |
-| AC-015 | FR-007 | Boundary | An expired handoff clears the state and returns the engine to a ready state; no handoff lives longer than the TTL. | A fake-time test plus a state check. |
-| AC-016 | NFR-001 | Boundary | An engine that exceeds its budget is shut down and started again; the daemon keeps serving and recovery finishes in under 30 seconds. | A test with a fake engine reporting a large PSS. |
-| AC-017 | NFR-001 | Negative | Exceeding the budget must not make the daemon exit or reject requests to other engines. | A test with two engines, one forced over budget. |
+| AC-010 | FR-005 | Positive | A `max_tabs` change in the config file takes effect after SIGHUP without a restart: the new limit immediately rejects or allows. | `cargo test -p browserd --test sesi_live sighup_mengubah_batas_tab_tanpa_restart`; the live procedure and its result are recorded in PROGRESS.md. |
+| AC-011 | FR-005 | Boundary | The old limit still applies if the new config is broken: the daemon logs the parse error and keeps the last values, it does not fall back to no limit. | `cargo test -p browserd --test sesi_live config_rusak_saat_reload_mempertahankan_batas_lama`. |
+| AC-012 | FR-006 | Positive | Two parallel sessions hold their own tabs; closing one session does not close the other session's tabs. | `cargo test -p lifecycle --lib menutup_satu_sesi_tidak_menutup_tab_sesi_lain` plus the two-engine run `cargo test -p browserd --test idle_reap mesin_kedua_tidak_ikut_mati`. |
+| AC-013 | FR-006 | Negative | A reached per-session limit rejects a new tab with an error that names which session, instead of closing another session's tab. | `cargo test -p lifecycle --lib batas_per_sesi_menolak_dengan_nama_sesi_tanpa_menyentuh_sesi_lain`. |
+| AC-014 | FR-007 | Positive | The handoff carries URL, title, screenshot, and selector; the operator's answer continues the same session. | `cargo test -p browserd --test sesi_live handoff_dijawab_melanjutkan_tab_yang_sama`. |
+| AC-015 | FR-007 | Boundary | An expired handoff clears the state and returns the engine to a ready state; no handoff lives longer than the TTL. | `cargo test -p browserd --test sesi_live handoff_dibatalkan_melepas_tab_dan_mesin_siap_lagi` plus `cargo test -p lifecycle --lib idle_reap_hanya_kalau_tidak_ada_sesi_dan_handoff`. |
+| AC-016 | NFR-001 | Boundary | An engine that exceeds its budget is shut down and started again; the daemon keeps serving and recovery finishes in under 30 seconds. | `cargo test -p browserd --lib pemulihan_dalam_batas_dihitung_patuh` and `cargo test -p browserd --lib pemulihan_lewat_30_detik_dihitung_terlambat`, plus the measured run `cargo test -p browserd --test idle_proof pss_kembali_ke_baseline_lalu_mesin_hidup_lagi`. |
+| AC-017 | NFR-001 | Negative | Exceeding the budget must not make the daemon exit or reject requests to other engines. | `cargo test -p browserd --test m4_proof dua_mesin_nyata_tidak_saling_mengganggu` plus `cargo test -p browserd --test idle_reap mesin_kedua_tidak_ikut_mati`. |
 | AC-018 | NFR-002 | Positive | Metrics appear with an engine label and increase as sessions, tabs, and failures happen; a metric that cannot be measured is not sent as 0. | `cargo test -p browserd --lib metrics` plus an endpoint read. |
 | AC-019 | NFR-003 | Boundary | A test or procedure proves port 9222 receives not a single command from this system; the engine profile is in a different directory. | A `/json/list` check on 9222 before and after plus a profile path assertion. |
-| AC-020 | NFR-004 | Negative | A failed tab count measurement means the request is forwarded (fails open) and recorded; an unknown destination engine means the request is rejected (fails closed). | Two tests, one forcing each condition. |
-| AC-021 | FR-008 | Positive | A snapshot of one 1000 node page produces a screenshot plus a list of interactive elements (role, name, box) plus a DOM summary, with a total size under the configured limit. | A test on a locally served page dense with elements. |
-| AC-022 | FR-008 | Boundary | A page whose content sits inside an iframe and inside open shadow DOM still yields interactive elements from inside both containers. | Two test pages: one iframe, one shadow DOM. |
-| AC-023 | FR-009 | Positive | A fake consent page with 14 custom element boxes **without `role`** can all be checked by one command; the result is proven from the page state, not from an "ok" reply. | A test with a local page; evidence = 14 boxes in the checked state. |
-| AC-024 | FR-009 | Negative | A click whose point is covered by another element (an overlay) is reported as failed together with the blocking element, not reported as succeeded. | A test with an overlay above a button. |
-| AC-025 | FR-010 | Positive | Every action returns one of two explicit outcomes: `berubah` (with evidence of what changed) or `tidak_ada_perubahan`. | Three action tests: a click that changes the URL, a click that changes a checkbox, a click with no effect. |
-| AC-026 | FR-010 | Negative | No action without a change is ever reported as succeeded. | An assertion on the output of the third AC-025 case. |
+| AC-020 | NFR-004 | Negative | A failed tab count measurement means the request is forwarded (fails open) and recorded; an unknown destination engine means the request is rejected (fails closed). | `cargo test -p browserd --lib pengukuran_gagal_tidak_memicu_pemulihan` for fail-open, and `cargo test -p browserd --test routing_host aturan_ke_jenis_yang_tidak_terpasang_dijawab_galat_bukan_diam` for fail-closed. |
+| AC-021 | FR-008 | Positive | A snapshot of one 1000 node page produces a screenshot plus a list of interactive elements (role, name, box) plus a DOM summary, with a total size under the configured limit. | `cargo test -p browserd --test mata_tangan mata_dan_tangan_bekerja_di_halaman_nyata`; the element list and total bytes go into `ringkasan.json`. |
+| AC-022 | FR-008 | Boundary | A page whose content sits inside an iframe and inside open shadow DOM still yields interactive elements from inside both containers. | `cargo test -p browserd --test mata_tangan mata_dan_tangan_bekerja_di_halaman_nyata`, which serves the `/iframe.html` and `/shadow.html` fixtures from `crates/browserd/tests/mata_tangan.rs`. |
+| AC-023 | FR-009 | Positive | A fake consent page with 14 custom element boxes **without `role`** can all be checked by one command; the result is proven from the page state, not from an "ok" reply. | `cargo test -p browserd --test mata_tangan mata_dan_tangan_bekerja_di_halaman_nyata` asserts 14 boxes reported and 14 changed, then reads the page status back. |
+| AC-024 | FR-009 | Negative | A click whose point is covered by another element (an overlay) is reported as failed together with the blocking element, not reported as succeeded. | `cargo test -p browserd --test mata_tangan mata_dan_tangan_bekerja_di_halaman_nyata` serves `/overlay.html` and asserts the blocking element is named. |
+| AC-025 | FR-010 | Positive | Every action returns one of two explicit outcomes: `berubah` (with evidence of what changed) or `tidak_ada_perubahan`. | `cargo test -p browserd --test mata_tangan mata_dan_tangan_bekerja_di_halaman_nyata` covers three cases (URL change, checkbox change, no effect) and prints the outcome string for each. |
+| AC-026 | FR-010 | Negative | No action without a change is ever reported as succeeded. | `cargo test -p browserd --test mata_tangan mata_dan_tangan_bekerja_di_halaman_nyata`, third case, asserts `tidak_ada_perubahan` is the only outcome reported. |
 
 ### Constraints
 
@@ -181,9 +186,22 @@ flowchart LR
 | `control` | Human handoff, tokens, TTL | Challenge + page context | Operator answer |
 | Diagnostics (new) | Failure classification + evidence artifacts | Navigation failure, engine log | Category + evidence files |
 
+### Bootstrap & First-Run Contract
+
+| Field | Required value |
+|---|---|
+| Clean-checkout command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
+| Runtime pin | Rust 1.98.1, pinned in `rust-toolchain.toml` (channel plus `rustfmt` and `clippy` components); `Cargo.toml` states `rust-version = "1.95"` as the floor, not the pin |
+| Install / dependency step | `cargo fetch --locked`; every version comes from `Cargo.lock` and a floating resolve is never used |
+| Start command | `./target/release/browserd serve --port 9224` (data plane 9224, control 9225; production 9222 is never used) |
+| Smoke check | `curl -s http://127.0.0.1:9224/json/version` must return JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` must print 6/6 with `screenshot.png` written |
+| Seed or fixture state | `cargo xtask doctor` verifies the `chrome-headless-shell` path, that ports 9224 and 9225 are free, and that the disk has room; fake engines and page fixtures come from `crates/testing`, so no network and no real site are needed |
+| Known environment traps | `/usr/bin/rustc` on this laptop is a stale 1.75 distro build, so `~/.cargo/bin` must come first in `PATH`; a `user_data_dir` shared by two engines makes the second one fail to start with no clear message; the laptop has about 6 GB of free disk, so a debug build of the whole workspace is what fills it |
+| First evidence of running | the `/json/version` body and the `cdp-smoke.mjs` result pasted into PROGRESS.md under the milestone being built, plus `git rev-parse HEAD` recorded next to it |
+
 ### Builder Capability Routing Contract
 
-Act on the current request: a PRD alone does not authorize building. At startup, read this PRD and the target instructions once; inspect the host-provided available skill and tool catalog, read the matching instructions, and check prerequisites. Record the chosen routes, UNAVAILABLE preferences, affected IDs, and evidence limits in PROGRESS.md and the audit.
+Act on the current request: a PRD alone does not authorize building. At startup, read this PRD and the target instructions once; inspect the host-provided available skill/tool catalog, read the matching instructions, and check prerequisites. A preferred route the host does not actually provide is recorded as UNAVAILABLE and never assumed to exist; only the declared fallback may then run. Record the chosen routes, UNAVAILABLE preferences, affected IDs, and evidence limits in PROGRESS.md and the audit.
 
 | Trigger | Required capability | Preferred skill/tool if available | Fallback if unavailable | Required evidence | Authority |
 |---|---|---|---|---|---|
@@ -213,14 +231,15 @@ Act on the current request: a PRD alone does not authorize building. At startup,
 | 2 | Diagnostics and escalation | Classification into 6 categories, a backoff chain capped at 2, host-to-engine routing, the `browser_open_failures_total` metric | Three local test pages produce three different categories with complete artifacts; the escalation of one network failure and one anti-bot failure is recorded (AC-001 to AC-004, AC-007, AC-008, AC-018) | 🔄 In Progress |
 | 3 | Session and engine resilience | Per-session leases, per-session tab limits, config reload through SIGHUP, memory budget plus recovery, handoffs with a TTL | A session's tab survives past `idle_reap`, `max_tabs` changes without a restart, a broken config does not lower the limit (AC-009 to AC-017, AC-020) | ✅ Verified |
 | 4 | Unified audit | Audit every FR/NFR/AC, run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo xtask check` | Every AC is either VERIFIED or UNVERIFIED with a reason; no claim without evidence (AC-019 is checked too) | ✅ Verified |
+| 5 | Light engine adapter (`oxi`) | `crates/engine/src/oxi.rs` plus the shared `Proc` in `crates/engine/src/proses.rs`, `penggerak_untuk("oxi")` in `slot.rs`, `discover_oxi()` in `probe.rs`, the capability probe in `crates/browserd/tests/oxi_probe.rs` and the live adapter test in `crates/browserd/tests/oxi_live.rs` | The probe records what the engine really does and `TERUKUR_OXI` claims only that: layout and cookies yes, page script and input dispatch no (`docs/prd/BUKTI-OXI 071126-0519.md`, CI run `42300230272`) | ✅ Verified |
 
 ### Authority Policy v1
 
 For a new native build, the user's explicit build request authorizes scoped local implementation.
 
-One exact plan approval covers the declared local runner transitions.
+One exact plan approval covers declared local runner transitions.
 
-Pause only for a blocking decision, a material scope change, or a genuine new authority boundary: external writes, destructive actions, purchases, credential changes, deployment, production, or owner acceptance.
+Pause only for a blocking decision, material scope change, or a genuine new authority boundary: external writes, destructive actions, purchases, credential changes, deployment, production, or owner acceptance.
 
 ### Runtime Checks
 
