@@ -349,6 +349,51 @@ not copy the specification.
 - Audit status changed: AC-019 from UNVERIFIED to VERIFIED. `docs/prd/AUDIT-AC`
   is now 26 VERIFIED, 0 UNVERIFIED.
 
+
+### Milestone 5: the `oxi` adapter, and the process rule it forced out
+
+- The question milestone 5 asks is not "can we add another engine" but "does the
+  boundary we built in M4 survive a second implementation". OxiBrowser is a
+  Rust browser with a CDP server, so it is the honest test: a different binary,
+  a different CLI, a different `/json/version` shape, the same daemon.
+- The blocker came before any code. Every OxiBrowser release asset is a Mach-O
+  universal binary for macOS: `file` on `oxibrowser-unsigned` from
+  `v0.28.0` says "Mach-O universal binary with 2 architectures", `sha256`
+  `ed60eef1b80455308e3bf3a24ec34029d0ed66c1508329818a6be58e470461a2`. There is no
+  Linux build to download, so the engine is compiled from crates.io: 722
+  packages, Blitz, Servo, boa, BoringSSL. That build does not happen on a 4 core
+  laptop, so it happens in `.github/workflows/oxi-probe.yml`.
+- `crates/engine/src/proses.rs` is the piece that came out of writing the second
+  adapter. The M1 rule (SIGTERM to the whole group, wait 5 seconds, SIGKILL) lived
+  inside `ShellEngine`; a second engine that copied it would have drifted, so it
+  moved into one `Proc` with `spawn` (always `process_group(0)`), `is_running`,
+  `kill_group`, and `stop`. `ShellEngine` now calls it, `OxiEngine` now calls it,
+  and two tests prove the group is gone by `killpg(pgid, None) == ESRCH` instead
+  of trusting our own flag.
+- `crates/engine/src/oxi.rs` exists because OxiBrowser speaks CDP with different
+  keys. Its `/json/version` returns `browser`, `protocolVersion`, `userAgent`,
+  `webkitVersion`, `webSocketDebuggerUrl` in camelCase, while Chromium returns
+  `Browser`, `User-Agent`, `Protocol-Version`. `info_dari_json` accepts both
+  spellings and the test locks both, because a boot that fails on a lowercase
+  letter is a boot that fails.
+- The engine also refuses to talk to a private address by default (SSRF guard),
+  so the adapter passes `--allow-private-ips` only when the caller asks for it in
+  `extra_args`. The guard is never disabled inside the adapter; that decision
+  stays with whoever writes the config, where it can be read.
+- `penggerak_untuk(kind)` in `crates/engine/src/slot.rs` replaces the `match` that
+  only knew `shell`. `daemon.rs` no longer bails with "only 'shell'": `--engine`
+  accepts `oxi`, `dari_config` accepts `kind = "oxi"`, and `pencarian_biner`
+  picks the right discovery path (`discover_shell` or `discover_oxi`, the latter
+  reading `OXI_BIN`, `~/.cargo/bin/oxibrowser`, `~/.local/bin/oxibrowser`).
+  `shell_binary` and `shell_args` stay gated to `kind == "shell"` so an oxi
+  config cannot be booted with Chromium flags.
+- `crates/policy/src/select.rs` stops pretending. `Catalog::dari_mesin` used to
+  report every capability as `true` for every recognized kind, which is a guess
+  dressed as a capability table. It now reads named constants: `TERUKUR_SHELL`
+  (measured), `TERUKUR_FULL` (no adapter, so `false`), and `TERUKUR_OXI` (all
+  `false` until the probe records otherwise). The honest default for an
+  unmeasured engine is `false`.
+
 ## AI Agent Rules
 
 Read the PRD once per session, then the files that changed. Do not repeat

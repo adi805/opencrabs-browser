@@ -279,6 +279,15 @@ Limits that stay honest:
 | not yet tagged | `oxi` adapter, only if the capability test passes | M5 |
 | not yet tagged | `chrome-full` + xvfb + `cloakbrowser` artifact path | M6 |
 
+The `oxi` row is honest about its own condition: the adapter is wired
+(`kind = "oxi"` boots the engine, shared process-group stop, `/json/version`
+accepts both key spellings), but the milestone only counts once a probe has
+measured what OxiBrowser actually supports. That probe runs in
+`.github/workflows/oxi-probe.yml`, because Oxi ships macOS-only binaries and
+building it on Linux is a 722-package compile, and its output lands in
+`docs/prd/BUKTI-OXI`. Until those numbers exist, `crates/policy` reports every
+oxi capability as `false` rather than guessing.
+
 The milestone numbers in this table follow `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex). The `0.1.0` version in `Cargo.toml` has not been bumped since M0: what grows is the contents, not the number. **There is no tag yet**, because a repository that carries a `0.1.0` tag while people still cannot use it is a fake release.
 
 ## Policy
