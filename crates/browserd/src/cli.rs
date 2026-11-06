@@ -169,7 +169,7 @@ pub struct ServeArgs {
     #[arg(long)]
     pub bind: Option<String>,
 
-    /// Jenis mesin. v0.1 hanya mendukung `shell`.
+    /// Jenis mesin: `shell` (chrome-headless-shell) atau `oxi` (oxibrowser).
     #[arg(long, default_value = "shell")]
     pub engine: String,
 

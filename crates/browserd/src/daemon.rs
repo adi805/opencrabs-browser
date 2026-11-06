@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use axum::Router;
 use cdp::{EnginePool, ProxyState};
 use control::Registry;
-use engine::{Engine, Keadaan, ShellEngine, Slot, discover_shell};
+use engine::{Engine, Keadaan, Slot, discover_oxi, discover_shell, slot::penggerak_untuk};
 use lifecycle::reaper::{ReapReason, ReapReport, ReaperConfig, idle_reap_due};
 use lifecycle::{Counters, Event, Gudang, Machine};
 use tokio::net::TcpListener;
@@ -34,9 +34,11 @@ const DETACHED_ENV: &str = "OCB_BROWSERD_DETACHED";
 pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Result<()> {
     let resolved = Resolved::resolve(&args, &file)?;
 
-    if args.engine != "shell" {
+    // Daftar jenis yang punya adapter. Disimpan di sini supaya pesan errornya
+    // menyebut pilihan yang benar-benar ada, bukan "v0.1" yang sudah basi.
+    if penggerak_untuk(&args.engine).is_none() {
         bail!(
-            "engine '{}' belum didukung v0.1; hanya 'shell'",
+            "engine '{}' belum punya adapter; yang tersedia: 'shell', 'oxi'",
             args.engine
         );
     }
@@ -397,12 +399,21 @@ async fn nyalakan(mesin: &Mesin, timeout_ms: u64) -> Result<Arc<dyn Engine>> {
         "menyalakan mesin"
     );
 
+    // Penggerak dipilih dari jenis mesin, bukan dari satu biner tetap: itulah
+    // yang membuat `[engines.oxi]` bisa hidup berdampingan dengan shell dalam
+    // satu proses daemon.
+    let penggerak = penggerak_untuk(&mesin.kind).with_context(|| {
+        format!(
+            "mesin '{}': jenis '{}' belum punya adapter",
+            mesin.id, mesin.kind
+        )
+    })?;
+
     // Spawn proses dan polling port adalah kerja blocking. Menjalankannya
     // langsung di runtime akan menahan worker tokio selama mesin boot.
-    tokio::task::spawn_blocking(move || ShellEngine::launch(spec, timeout_ms))
+    tokio::task::spawn_blocking(move || penggerak.nyalakan(&spec, timeout_ms))
         .await
         .context("task peluncuran mesin panik")?
-        .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
         .map_err(|err| anyhow::anyhow!("mesin '{}' gagal dinyalakan: {err}", mesin.id))
 }
 
@@ -1002,17 +1013,32 @@ fn wajib_absolut(path: &Path, apa: &str) -> Result<()> {
     Ok(())
 }
 
+/// Penemuan biner bawaan untuk satu jenis mesin. Dipakai dua jalur (CLI dan
+/// config) supaya "tidak ketemu biner" tidak pernah bergantung pada jalur mana
+/// yang dipakai.
+fn pencarian_biner(kind: &str) -> Option<PathBuf> {
+    match kind {
+        "shell" => discover_shell(),
+        "oxi" => discover_oxi(),
+        _ => None,
+    }
+}
+
 /// Jalur lama: satu mesin dari argumen CLI dan `[engines.chrome_shell]`.
 fn dari_cli(args: &ServeArgs, file: &FileConfig) -> Result<Mesin> {
+    let kind = args.engine.clone();
+    // `[engines.chrome_shell].binary` hanya berlaku untuk shell: menyalakan oxi
+    // dengan biner shell menghasilkan boot yang gagal dengan pesan membingungkan.
     let binary = args
         .engine_binary
         .clone()
-        .or_else(|| file.shell_binary())
-        .or_else(discover_shell)
-        .context(
-            "biner engine tidak ditemukan. Set --engine-binary, atau OCB_ENGINE_BINARY, \
-             atau engines.chrome_shell.binary di config",
-        )?;
+        .or_else(|| (kind == "shell").then(|| file.shell_binary()).flatten())
+        .or_else(|| pencarian_biner(&kind))
+        .with_context(|| {
+            format!(
+                "biner engine '{kind}' tidak ditemukan. Set --engine-binary atau `binary` di config"
+            )
+        })?;
     wajib_absolut(&binary, "biner engine")?;
 
     let user_data_dir = args
@@ -1030,12 +1056,18 @@ fn dari_cli(args: &ServeArgs, file: &FileConfig) -> Result<Mesin> {
             .unwrap_or(0)
     };
 
-    let mut engine_args = file.shell_args();
+    // Flag bawaan `[engines.chrome_shell].args` adalah flag Chrome. Memberikannya
+    // ke mesin lain hanya menghasilkan `unexpected argument` saat boot.
+    let mut engine_args = if kind == "shell" {
+        file.shell_args()
+    } else {
+        Vec::new()
+    };
     engine_args.extend(args.extra_arg.iter().cloned());
 
     Ok(Mesin {
         id: args.engine.clone(),
-        kind: args.engine.clone(),
+        kind,
         binary,
         user_data_dir,
         port: engine_port,
@@ -1066,8 +1098,10 @@ fn dari_config(args: &ServeArgs, file: &FileConfig) -> Result<Vec<Mesin>> {
 
     for (id, section) in file.machines() {
         let kind = section.kind.clone().unwrap_or_else(|| "shell".to_owned());
-        if kind != "shell" {
-            bail!("mesin '{id}': jenis '{kind}' belum didukung v0.1; hanya 'shell'");
+        if penggerak_untuk(&kind).is_none() {
+            bail!(
+                "mesin '{id}': jenis '{kind}' belum punya adapter; yang tersedia: 'shell', 'oxi'"
+            );
         }
 
         let binary = section
@@ -1075,9 +1109,11 @@ fn dari_config(args: &ServeArgs, file: &FileConfig) -> Result<Vec<Mesin>> {
             .as_ref()
             .map(|raw| config::expand_home(raw))
             .or_else(|| args.engine_binary.clone())
-            .or_else(discover_shell)
+            .or_else(|| pencarian_biner(&kind))
             .with_context(|| {
-                format!("mesin '{id}': biner engine tidak ditemukan; set `binary` untuk mesin ini")
+                format!(
+                    "mesin '{id}': biner engine '{kind}' tidak ditemukan; set `binary` untuk mesin ini"
+                )
             })?;
         wajib_absolut(&binary, &format!("biner mesin '{id}'"))?;
 

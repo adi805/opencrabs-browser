@@ -124,12 +124,16 @@ impl Catalog {
 impl Catalog {
     /// Katalog dari daftar mesin yang **benar-benar terpasang** di host ini.
     ///
-    /// Kemampuan diisi dari apa yang sudah diuji untuk tiap jenis mesin, bukan
-    /// dari harapan: `chrome-headless-shell` lolos uji layout, script, cookie,
-    /// dan input di milestone 1. Jenis mesin yang tidak ada di daftar berarti
-    /// tidak terpasang (`None`), dan itu yang membuat aturan config yang
-    /// menunjuk mesin hilang bisa ditolak saat start, bukan saat klien pertama
-    /// datang.
+    /// Kemampuan tiap jenis diambil dari konstanta `TERUKUR_*` di bawah, bukan
+    /// dari harapan. Jenis mesin yang tidak ada di daftar berarti tidak
+    /// terpasang (`None`), dan itu yang membuat aturan config yang menunjuk
+    /// mesin hilang bisa ditolak saat start, bukan saat klien pertama datang.
+    ///
+    /// Mesin yang **terpasang tapi belum diukur** tetap masuk katalog dengan
+    /// `Capabilities::default()` (semua `false`). Itu bukan kelalaian: mengisi
+    /// kemampuan tanpa bukti membuat permintaan yang tidak mungkin dipenuhi
+    /// diteruskan sampai gagal di tengah jalan, dan kegagalan seperti itu jauh
+    /// lebih mahal daripada satu penolakan yang jelas di depan.
     #[must_use]
     pub fn dari_mesin<'a>(ids: impl IntoIterator<Item = &'a str>) -> Self {
         let mut katalog = Self::default();
@@ -137,11 +141,10 @@ impl Catalog {
             let Some(kind) = EngineKind::parse(id) else {
                 continue;
             };
-            let caps = Capabilities {
-                layout: true,
-                script: true,
-                cookies: true,
-                input: true,
+            let caps = match kind {
+                EngineKind::Shell => TERUKUR_SHELL,
+                EngineKind::Full => TERUKUR_FULL,
+                EngineKind::Oxi => TERUKUR_OXI,
             };
             match kind {
                 EngineKind::Shell => katalog.shell = Some(caps),
@@ -152,6 +155,44 @@ impl Catalog {
         katalog
     }
 }
+
+/// Kemampuan `chrome-headless-shell` yang **sudah diukur**.
+///
+/// Bukti: selftest milik `browserd` membuka tab sungguhan, menjalankan skrip,
+/// membaca cookie, dan mengirim input ke mesin ini; keempatnya lolos sejak
+/// milestone 1. Kalau salah satu berhenti lolos, ubah konstanta ini, jangan
+/// ubah test-nya.
+pub const TERUKUR_SHELL: Capabilities = Capabilities {
+    layout: true,
+    script: true,
+    cookies: true,
+    input: true,
+};
+
+/// Kemampuan Chromium penuh. **Belum pernah diukur di repo ini**, dan adapter
+/// `chrome-full` belum ada. Semua `false` sampai ada bukti, bukan karena
+/// diragukan.
+pub const TERUKUR_FULL: Capabilities = Capabilities {
+    layout: false,
+    script: false,
+    cookies: false,
+    input: false,
+};
+
+/// Kemampuan `oxibrowser` yang **sudah diukur** oleh
+/// `crates/browserd/tests/oxi_probe.rs`.
+///
+/// Nilainya diisi dari keluaran probe, bukan dari README proyek itu: Oxi
+/// mengklaim CDP kompatibel, dan justru klaim itulah yang harus dibuktikan.
+/// Selama putaran probe belum tercatat di `docs/prd/BUKTI-OXI *.md`, mesin oxi
+/// tetap `false` di sini sehingga permintaan yang butuh kemampuan itu ditolak
+/// di depan alih-alih gagal di tengah jalan.
+pub const TERUKUR_OXI: Capabilities = Capabilities {
+    layout: false,
+    script: false,
+    cookies: false,
+    input: false,
+};
 
 /// Satu permintaan yang butuh mesin.
 #[derive(Debug, Clone, Default)]

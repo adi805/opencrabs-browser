@@ -97,7 +97,7 @@ pub struct EnginesSection {
 
 #[derive(Debug, Deserialize)]
 pub struct EngineSection {
-    /// Jenis mesin. v0.1 hanya `shell`. Nilai lain **ditolak saat start**
+    /// Jenis mesin: `shell` atau `oxi`. Nilai lain **ditolak saat start**
     /// dengan pesan yang menyebut mesin mana: mengabaikannya diam-diam berarti
     /// operator mengira dua mesin jalan padahal satu.
     pub kind: Option<String>,
