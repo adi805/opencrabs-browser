@@ -1,0 +1,87 @@
+name: Oxi probe
+
+# Milestone 5: adapter `oxi`.
+#
+# OxiBrowser hanya menerbitkan biner macOS (tag v0.25.0 ke atas: aset
+# `oxibrowser`/`oxibrowser-unsigned` adalah Mach-O). Untuk Linux tidak ada aset
+# rilis, jadi satu-satunya jalan menguji kapabilitasnya adalah membangun dari
+# crates.io. Build itu berat (722 package, termasuk tumpukan Blitz/Servo,
+# boa, dan BoringSSL), dan kebijakan repo ini jelas: build berat di CI, bukan di
+# laptop 4 core dengan sisa disk 6 GB.
+#
+# Workflow ini sengaja `workflow_dispatch` saja. Ia memakan puluhan menit runner
+# dan hanya dipakai saat versi oxi yang dipin berubah atau saat bukti
+# kapabilitas perlu diambil ulang.
+
+on:
+  workflow_dispatch:
+    inputs:
+      oxi_version:
+        description: "Versi oxibrowser dari crates.io"
+        default: "0.28.0"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "4"
+
+jobs:
+  probe:
+    name: probe kapabilitas OxiBrowser
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # Prasyarat build tumpukan Blitz/vello/parley/fontconfig. Tanpa ini
+      # `cargo install` gagal di `fontconfig-sys`, bukan di kode kita.
+      - name: Dependensi sistem
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev libexpat1-dev
+
+      # Toolchain dipin oleh rust-toolchain.toml, bukan action yang bergerak
+      # sendiri. `cargo install` di langkah berikut memakai toolchain yang sama
+      # dengan repo supaya biner oxi yang diuji dibangun dengan compiler yang
+      # kita klaim.
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          cargo -V
+
+      - name: Disk sebelum build
+        run: df -h /
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: oxi-${{ inputs.oxi_version || '0.28.0' }}
+
+      - name: Build oxibrowser dari crates.io
+        run: |
+          set -eu
+          VERSI="${{ inputs.oxi_version || '0.28.0' }}"
+          # Profil release (bawaan): probe mengukur perilaku mesin, dan build
+          # debug membuat layout serta JavaScript jauh lebih lambat sehingga
+          # anggaran boot 30 detik jadi soal kecepatan runner, bukan soal mesin.
+          cargo install oxibrowser --version "$VERSI" --features browser --locked
+          "$HOME/.cargo/bin/oxibrowser" version
+
+      # `oxi_probe` bicara ke biner oxi langsung: itu bukti kapabilitas.
+      # `oxi_live` menyalakan daemon kita dengan mesin jenis oxi: itu bukti
+      # adapter. Keduanya dijalankan karena satu bisa lulus sementara yang lain
+      # gagal, dan milestone 5 menjanjikan yang kedua.
+      - name: Uji kapabilitas dan adapter
+        env:
+          OXI_BIN: /home/runner/.cargo/bin/oxibrowser
+        run: |
+          cargo test -p browserd --test oxi_probe --locked -- --nocapture
+          cargo test -p browserd --test oxi_live --locked -- --nocapture
+
+      - name: Disk sesudah probe
+        if: always()
+        run: df -h /
