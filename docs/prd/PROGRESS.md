@@ -20,18 +20,18 @@ One read must be enough to continue without asking the owner anything.
 
 | Field | Value |
 |---|---|
-| Active milestone | None open. All five PRD milestones are Done (milestone 5 covers both engine adapters). The next unit of work is the owner's call, with the open backlog listed under "Not built, not claimed" below |
+| Active milestone | None open in v0.1 (all five PRD milestones are Done). The next major architecture target is PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` (Native Rust engine, 99 tabs under 100 MB hard budget) |
 | Next exact command | `cargo xtask check` |
 | Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
-| Last passing check | `cargo xtask check` at `193abc4e` plus the edits in this commit: `fmt ok`, `clippy ok`, `test ok`, exit 0 (2026-11-06) |
-| Open blockers | None inside this repo. The three former owner decisions are defaults in PRD section 2 Review Focus. Permanent deletion of `adi805/opencrabs-web` is outside this repo and waits on `gh auth refresh -s delete_repo` |
+| Last passing check | `cargo xtask check` at `3c1d5cf` plus the PRD v0.2 senior contracts in this commit: `fmt ok`, `clippy ok`, `test ok`, exit 0, log at `/tmp/oc-browser-gate.log` (2026-11-07) |
+| Open blockers | None inside this repo. PRD v0.2 is drafted and validated with 0 blockers (`docs/prd/PRD-MESIN-RUST 071126-1413.md`). Permanent deletion of `adi805/opencrabs-web` is outside this repo and still waits on `gh auth refresh -s delete_repo` |
 
 ## Current State
 
-- PRD version: 0.1.0 (implementation)
+- PRD version: 0.1.0 (implementation complete) -> 0.2.0 (draft specification ready in `docs/prd/PRD-MESIN-RUST 071126-1413.md`)
 - Execution mode: native (no build has been requested for new requirements)
-- Active milestone / next action: milestones 1 to 5 are **Done** (eyes and
+- Active milestone / next action: v0.1 milestones 1 to 5 are **Done** (eyes and
   hands, failure classification + diagnostics, session and engine resilience,
   unified audit, and both engine adapters, `oxi` and `chrome-full`, each with a
   measured capability probe). Audit of 26 AC: **26 VERIFIED, 0 UNVERIFIED**,
@@ -40,6 +40,10 @@ One read must be enough to continue without asking the owner anything.
   routing to an engine) through an integration test, AC-019 (production port
   9222 isolation) through a Rust test that starts a real engine on a random
   port and then compares against 9222.
+  The next development phase is specified in PRD v0.2: a pure Rust native
+  browser engine replacing external Chromium binaries, targeting 99 managed
+  tabs under a 100 MB hard budget using a Virtual Tiered Tab LRU architecture.
+  Feasibility evidence is documented in `docs/prd/BUKTI-BUDGET 071126-1413.md`.
 - Build authority: the owner granted full execution permission on 3 November 2026.
 - Required unresolved input: none. The three owner decisions that used to be
   open questions are now defaults with a reversal cost in PRD section 2 Review Focus.

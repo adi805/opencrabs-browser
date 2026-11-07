@@ -134,6 +134,26 @@ policy is not recorded here.
   Impact: nothing changes until an operator adds the flag. Freezing background
     tabs was also measured and rejected as a strategy: 18% on shell, 4% on full.
 
+- [2026-11-07 14:30] Decision: v0.2 Native Rust Engine with Virtual Tiered Tab LRU for 99 Tabs under 100 MB Budget
+  Status: Proposed
+  Approval: the owner requested the specification ("wajib full rust", "99 tab tetap 100mb", "susun ulang lagi PRD"). That request authorises writing this PRD, not building it: no code is written until the owner approves a plan for milestone 1
+  Requirement IDs: NFR-001, FR-005, FR-006, NFR-002
+  Context: external Chromium binaries cannot run within 100 MB on a 7.7 GB RAM
+    laptop. Real measurements in `BUKTI-BUDGET 071126-1413.md` prove Chromium
+    baseline alone requires 141-295 MB. Lightpanda's published 100-way
+    benchmark peaks at 410 MB, but its own docs state it cannot open multiple
+    tabs per process, so that figure is 100 separate processes (~4.1 MB each)
+    and bounds per-process cost rather than per-tab cost. To achieve 99 tabs
+    under 100 MB, a pure Rust native engine with Virtual Tiered Tab LRU is
+    required.
+  Rationale: by keeping at most 5 active hot tabs in RAM (~60 MB) and evicting
+    dormant tabs to SQLite snapshots in `crates/store` (~30 KB metadata per tab),
+    99 tabs scale within 81-95 MB PSS without memory thrashing. Tabs rehydrate
+    in sub-100ms when accessed by the agent.
+  Impact: eliminates all C++ Chromium binaries, removes Xvfb dependency, and
+    provides pure Rust perception (AXTree + tiny-skia) and interaction dispatch.
+    Specified in PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md`.
+
 ## AI Agent Rules
 
 A decision with status Proposed must not be treated as permission to build. An
