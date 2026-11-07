@@ -61,6 +61,10 @@ globalThis.console = {
 };
 globalThis.window = globalThis;
 globalThis.document = globalThis.document || {};
+// Di browser sungguhan `document.title` selalu berupa string; tanpa `<title>`
+// nilainya string kosong. Dibiarkan `undefined`, `document.title === ""` jadi
+// salah dan skrip halaman mengambil cabang yang keliru.
+globalThis.document.title = "";
 "#;
 
 pub struct Isolat {

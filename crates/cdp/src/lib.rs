@@ -22,6 +22,7 @@ pub mod errors;
 pub mod framing;
 pub mod ids;
 pub mod mux;
+pub mod native_wire;
 pub mod passthrough;
 pub mod targets;
 

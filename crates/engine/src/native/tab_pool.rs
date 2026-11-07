@@ -318,6 +318,29 @@ impl<C: ColdStore> TabPool<C> {
         Ok(())
     }
 
+    /// Mengganti isi satu tab dengan dokumen baru, seperti satu navigasi.
+    ///
+    /// Tab yang sedang dingin dihidupkan dulu, karena mengganti dokumen tab
+    /// yang tidak ada di RAM berarti membuang snapshot lama tanpa pernah
+    /// memakainya. Isolat JavaScript ikut dibuat ulang: dokumen baru tidak
+    /// mewarisi variabel global dokumen lama, sama seperti browser sungguhan.
+    ///
+    /// `url` disimpan apa adanya. Fungsi ini tidak mengambil apa pun dari
+    /// jaringan; pemanggil yang menyediakan HTML-nya.
+    pub fn ganti_dokumen(&mut self, id: TabId, url: &str, html: &str) -> Result<(), PoolError> {
+        if !self.panas.iter().any(|t| t.id == id) {
+            self.hidupkan(id)?;
+        }
+        let baru = self.bangun(id, url, html)?;
+        match self.panas.iter_mut().find(|t| t.id == id) {
+            Some(t) => {
+                *t = baru;
+                Ok(())
+            }
+            None => Err(PoolError::TabTidakAda(id)),
+        }
+    }
+
     /// Perkiraan biaya RAM pool saat ini, memakai angka terukur per tab.
     #[must_use]
     pub fn perkiraan_mb(&self) -> f64 {
@@ -461,5 +484,55 @@ mod tests {
             p.hidupkan(a).is_err(),
             "tab yang ditutup tidak bisa dihidupkan"
         );
+    }
+
+    #[test]
+    fn ganti_dokumen_pada_tab_dingin_menghidupkannya_dulu() {
+        let mut p = pool(1, 99);
+        let a = p.buka("https://a.test", &halaman(1)).unwrap();
+        let b = p.buka("https://b.test", &halaman(1)).unwrap();
+        assert_eq!(p.jumlah_dingin().unwrap(), 1, "a tersingkir");
+
+        let baru =
+            "<!doctype html><html><head><title>baru</title></head><body><p>halo</p></body></html>";
+        p.ganti_dokumen(a, "https://a.test/kedua", baru).unwrap();
+
+        assert_eq!(p.jumlah_dialamat(), 2, "tidak ada tab yang hilang");
+        let tab = p.tab(a).expect("tab a panas setelah ganti dokumen");
+        assert_eq!(tab.url, "https://a.test/kedua");
+        assert_eq!(tab.dokumen.judul().as_deref(), Some("baru"));
+        assert!(
+            tab.dokumen.teks(tab.dokumen.root()).contains("halo"),
+            "isi dokumen baru terbaca"
+        );
+        assert!(
+            p.tab(b).is_none(),
+            "tab b tetap dingin, bukan ikut dihidupkan"
+        );
+    }
+
+    #[test]
+    fn ganti_dokumen_membuang_isolat_lama() {
+        let mut p = pool(2, 99);
+        let a = p.buka("https://a.test", &halaman(1)).unwrap();
+        p.tab(a)
+            .unwrap()
+            .isolat
+            .eval("globalThis.__sisa = 'ada'")
+            .unwrap();
+
+        p.ganti_dokumen(a, "https://a.test/kedua", &halaman(1))
+            .unwrap();
+        let sisa = p.tab(a).unwrap().isolat.eval("typeof globalThis.__sisa");
+        assert_eq!(sisa.unwrap(), "undefined", "state JS tidak ikut pindah");
+    }
+
+    #[test]
+    fn ganti_dokumen_menolak_tab_yang_tidak_ada() {
+        let mut p = pool(2, 99);
+        let err = p
+            .ganti_dokumen(TabId(77), "https://x.test", &halaman(1))
+            .unwrap_err();
+        assert!(matches!(err, PoolError::TabTidakAda(TabId(77))), "{err}");
     }
 }

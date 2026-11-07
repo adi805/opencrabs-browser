@@ -30,7 +30,11 @@ futures-util = "0.3"
 html5ever = "0.40"
 markup5ever_rcdom = "0.40"
 nix = { version = "0.30", features = ["signal", "process", "fs"] }
-rquickjs = "0.14"
+# `parallel` mengaktifkan `unsafe impl Send/Sync for Runtime` di rquickjs-core.
+# Tanpa fitur itu isolat tidak bisa hidup di dalam state axum/daemon yang
+# multi-thread, dan `Engine: Send + Sync` tidak bisa dipenuhi. Fitur ini cuma
+# menambah `std` + `tokio/rt-multi-thread`, bukan dependensi baru.
+rquickjs = { version = "0.14", features = ["parallel"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

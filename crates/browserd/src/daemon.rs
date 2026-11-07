@@ -15,10 +15,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
+use cdp::native_wire::{KIND as NATIVE_KIND, PenggerakNative};
 use cdp::{EnginePool, ProxyState};
 use control::Registry;
 use engine::{
-    Engine, Keadaan, Slot, discover_full, discover_oxi, discover_shell, slot::penggerak_untuk,
+    Engine, Keadaan, Penggerak, Slot, discover_full, discover_oxi, discover_shell,
+    slot::penggerak_untuk,
 };
 use lifecycle::reaper::{ReapReason, ReapReport, ReaperConfig, idle_reap_due};
 use lifecycle::{Counters, Event, Gudang, Machine};
@@ -38,10 +40,11 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
 
     // Daftar jenis yang punya adapter. Disimpan di sini supaya pesan errornya
     // menyebut pilihan yang benar-benar ada, bukan "v0.1" yang sudah basi.
-    if penggerak_untuk(&args.engine).is_none() {
+    if penggerak_kind(&args.engine).is_none() {
         bail!(
-            "engine '{}' belum punya adapter; yang tersedia: 'shell', 'oxi'",
-            args.engine
+            "engine '{}' belum punya adapter; yang tersedia: {}",
+            args.engine,
+            jenis_tersedia()
         );
     }
 
@@ -404,7 +407,7 @@ async fn nyalakan(mesin: &Mesin, timeout_ms: u64) -> Result<Arc<dyn Engine>> {
     // Penggerak dipilih dari jenis mesin, bukan dari satu biner tetap: itulah
     // yang membuat `[engines.oxi]` bisa hidup berdampingan dengan shell dalam
     // satu proses daemon.
-    let penggerak = penggerak_untuk(&mesin.kind).with_context(|| {
+    let penggerak = penggerak_kind(&mesin.kind).with_context(|| {
         format!(
             "mesin '{}': jenis '{}' belum punya adapter",
             mesin.id, mesin.kind
@@ -577,7 +580,9 @@ async fn loop_anggaran(
         ticker.tick().await;
         for (id, slot) in pool.slots() {
             // Mesin yang tidur tidak punya proses untuk diukur, dan itu bukan
-            // pelanggaran anggaran.
+            // pelanggaran anggaran. Mesin native juga tidak punya pid: ia hidup
+            // di dalam proses daemon ini, jadi PSS-nya sudah termasuk PSS daemon
+            // dan mengukurnya per mesin akan menghitung memori yang sama dua kali.
             let Some(pid) = slot.hidup().and_then(|engine| engine.process_id()) else {
                 continue;
             };
@@ -1015,6 +1020,36 @@ fn wajib_absolut(path: &Path, apa: &str) -> Result<()> {
     Ok(())
 }
 
+/// Penggerak untuk satu jenis mesin, termasuk mesin yang **tidak** punya biner.
+///
+/// `engine::slot::penggerak_untuk` sengaja tidak tahu soal mesin native: crate
+/// `engine` tidak boleh bergantung pada `cdp` (arah ketergantungannya justru
+/// sebaliknya, `cdp` yang memakai `engine`). Karena itu penggabungan dua daftar
+/// ini hidup di daemon, satu-satunya tempat yang melihat keduanya.
+fn penggerak_kind(kind: &str) -> Option<Arc<dyn Penggerak>> {
+    if kind == NATIVE_KIND {
+        return Some(Arc::new(PenggerakNative));
+    }
+    penggerak_untuk(kind)
+}
+
+/// Mesin yang hidup di dalam proses daemon: tidak ada biner yang dieksekusi.
+fn tanpa_biner(kind: &str) -> bool {
+    kind == NATIVE_KIND
+}
+
+/// Jenis yang benar-benar punya adapter, untuk pesan galat. Dihitung dari
+/// daftar yang sama dengan `penggerak_kind`, bukan diketik ulang: daftar yang
+/// diketik ulang akan basi setiap kali adapter baru masuk.
+fn jenis_tersedia() -> String {
+    ["shell", "oxi", "full", NATIVE_KIND]
+        .iter()
+        .filter(|kind| penggerak_kind(kind).is_some())
+        .map(|kind| format!("'{kind}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Penemuan biner bawaan untuk satu jenis mesin. Dipakai dua jalur (CLI dan
 /// config) supaya "tidak ketemu biner" tidak pernah bergantung pada jalur mana
 /// yang dipakai.
@@ -1036,17 +1071,25 @@ fn dari_cli(args: &ServeArgs, file: &FileConfig) -> Result<Mesin> {
     let kind = args.engine.clone();
     // `[engines.chrome_shell].binary` hanya berlaku untuk shell: menyalakan oxi
     // dengan biner shell menghasilkan boot yang gagal dengan pesan membingungkan.
-    let binary = args
-        .engine_binary
-        .clone()
-        .or_else(|| (kind == "shell").then(|| file.shell_binary()).flatten())
-        .or_else(|| pencarian_biner(&kind))
-        .with_context(|| {
-            format!(
-                "biner engine '{kind}' tidak ditemukan. Set --engine-binary atau `binary` di config"
-            )
-        })?;
-    wajib_absolut(&binary, "biner engine")?;
+    // Mesin native tidak mengeksekusi biner apa pun: `PenggerakNative`
+    // mengabaikan `LaunchSpec.binary`. Memaksa operator menyetel path biner
+    // untuknya hanya menghasilkan galat yang tidak bisa diperbaiki.
+    let binary = if tanpa_biner(&kind) {
+        PathBuf::new()
+    } else {
+        let binary = args
+            .engine_binary
+            .clone()
+            .or_else(|| (kind == "shell").then(|| file.shell_binary()).flatten())
+            .or_else(|| pencarian_biner(&kind))
+            .with_context(|| {
+                format!(
+                    "biner engine '{kind}' tidak ditemukan. Set --engine-binary atau `binary` di config"
+                )
+            })?;
+        wajib_absolut(&binary, "biner engine")?;
+        binary
+    };
 
     let user_data_dir = args
         .user_data_dir
@@ -1105,24 +1148,30 @@ fn dari_config(args: &ServeArgs, file: &FileConfig) -> Result<Vec<Mesin>> {
 
     for (id, section) in file.machines() {
         let kind = section.kind.clone().unwrap_or_else(|| "shell".to_owned());
-        if penggerak_untuk(&kind).is_none() {
+        if penggerak_kind(&kind).is_none() {
             bail!(
-                "mesin '{id}': jenis '{kind}' belum punya adapter; yang tersedia: 'shell', 'oxi'"
+                "mesin '{id}': jenis '{kind}' belum punya adapter; yang tersedia: {}",
+                jenis_tersedia()
             );
         }
 
-        let binary = section
-            .binary
-            .as_ref()
-            .map(|raw| config::expand_home(raw))
-            .or_else(|| args.engine_binary.clone())
-            .or_else(|| pencarian_biner(&kind))
-            .with_context(|| {
-                format!(
-                    "mesin '{id}': biner engine '{kind}' tidak ditemukan; set `binary` untuk mesin ini"
-                )
-            })?;
-        wajib_absolut(&binary, &format!("biner mesin '{id}'"))?;
+        let binary = if tanpa_biner(&kind) {
+            PathBuf::new()
+        } else {
+            let binary = section
+                .binary
+                .as_ref()
+                .map(|raw| config::expand_home(raw))
+                .or_else(|| args.engine_binary.clone())
+                .or_else(|| pencarian_biner(&kind))
+                .with_context(|| {
+                    format!(
+                        "mesin '{id}': biner engine '{kind}' tidak ditemukan; set `binary` untuk mesin ini"
+                    )
+                })?;
+            wajib_absolut(&binary, &format!("biner mesin '{id}'"))?;
+            binary
+        };
 
         let user_data_dir = section
             .user_data_dir
@@ -1358,6 +1407,42 @@ mod tests {
         let err = Resolved::resolve(&args, &FileConfig::default())
             .expect_err("path relatif harus ditolak");
         assert!(err.to_string().contains("absolut"));
+    }
+
+    #[test]
+    fn jenis_mesin_native_punya_penggerak_tanpa_biner() {
+        // Mesin native hidup di dalam proses daemon. Dua akibatnya diuji di
+        // sini: ia harus muncul di daftar penggerak (kalau tidak, operator yang
+        // menulis `kind = "rust-native"` dapat "belum punya adapter"), dan ia
+        // tidak boleh memaksa operator menyetel biner yang tidak akan
+        // dieksekusi.
+        assert!(
+            penggerak_kind(NATIVE_KIND).is_some(),
+            "kind native harus punya penggerak"
+        );
+        assert!(
+            jenis_tersedia().contains(NATIVE_KIND),
+            "pesan galat harus menyebut jenis yang benar-benar ada, dapat: {}",
+            jenis_tersedia()
+        );
+        assert!(tanpa_biner(NATIVE_KIND), "native tidak mengeksekusi biner");
+        assert!(!tanpa_biner("shell"), "shell tetap butuh biner");
+
+        // Jalur CLI tanpa biner untuk native: harus lolos resolve, bukan
+        // berhenti di "biner tidak ditemukan".
+        let mut args = args();
+        args.engine = NATIVE_KIND.to_owned();
+        args.engine_binary = None;
+        args.user_data_dir = None;
+        let resolved = Resolved::resolve(&args, &FileConfig::default())
+            .expect("native harus bisa ditentukan tanpa biner");
+        assert_eq!(resolved.machines.len(), 1);
+        assert_eq!(resolved.machines[0].kind, NATIVE_KIND);
+        assert!(
+            resolved.machines[0].binary.as_os_str().is_empty(),
+            "biner mesin native harus kosong, dapat: {}",
+            resolved.machines[0].binary.display()
+        );
     }
 
     #[test]

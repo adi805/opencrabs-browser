@@ -7,8 +7,14 @@
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
 //! selektor CSS, kaskade stylesheet, pewarisan properti, pengukuran teks,
-//! peristiwa DOM, raster, dan snapshot tab. Memanggil ini "mesin browser yang
-//! selesai" akan jadi klaim palsu.
+//! peristiwa DOM, raster, pengambilan dokumen dari jaringan, tipe nilai balik
+//! JavaScript, dan peristiwa CDP. Memanggil ini "mesin browser yang selesai"
+//! akan jadi klaim palsu.
+//!
+//! Permukaan CDP-nya **tidak** ada di sini. Crate ini sengaja nol pengetahuan
+//! protokol; yang menerjemahkan frame JSON-RPC jadi panggilan ke
+//! [`tab_pool::TabPool`] adalah `cdp::native_wire`, dan yang menyalakannya
+//! sebagai mesin adalah `cdp::native_wire::NativeEngine`.
 
 pub mod dom;
 pub mod js;
@@ -36,7 +42,15 @@ pub const CELAH: &[&str] = &[
     "pengukuran teks belum ada; node teks tidak menghasilkan kotak layout",
     "peristiwa DOM (klik, input, fokus) belum ada; itu tugas lapisan hands",
     "rasterisasi bitmap (`tiny-skia`) belum ada; itu tugas lapisan eyes",
-    "snapshot tab ke `crates/store` belum ada; itu tugas tab pool",
+    "pengambilan dokumen dari jaringan (HTTP/TLS) belum ada; HTML masuk lewat \
+     `Page.setDocumentContent`, dan `Page.navigate` hanya melayani `about:blank` \
+     serta `data:text/html`",
+    "nilai balik `Runtime.evaluate` dijadikan string; tipe JS (number, boolean, \
+     object) tidak dipertahankan",
+    "`document` di dalam isolat adalah objek biasa, bukan DOM sungguhan: skrip \
+     yang menulis `document.title` tidak mengubah pohon DOM",
+    "mesin tidak mengirim peristiwa CDP (`Runtime.consoleAPICalled`, `Page.loadEventFired`, \
+     `Network.*`); klien yang menunggu event akan menunggu selamanya",
 ];
 
 #[derive(Debug, thiserror::Error)]
