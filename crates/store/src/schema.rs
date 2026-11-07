@@ -20,13 +20,17 @@ use std::path::Path;
 use rusqlite::Connection;
 
 /// Versi skema yang dipahami biner ini.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Retensi baris, dalam detik. Dokumen 02 §6 menetapkannya dalam hari.
 pub const RETENSI_CAPTCHA_SECS: i64 = 90 * 24 * 60 * 60;
 pub const RETENSI_OTP_SECS: i64 = 7 * 24 * 60 * 60;
 pub const RETENSI_SESSION_SECS: i64 = 30 * 24 * 60 * 60;
 pub const RETENSI_ENGINE_RUN_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Tab dingin tidak punya arti setelah sesi induknya lama mati. Batasnya sama
+/// dengan sesi supaya tidak ada snapshot yang hidup lebih lama dari pemiliknya.
+pub const RETENSI_TAB_SNAPSHOT_SECS: i64 = RETENSI_SESSION_SECS;
 
 /// Kegagalan membuka atau memigrasi store.
 #[derive(Debug, thiserror::Error)]
@@ -57,12 +61,13 @@ pub struct SweepReport {
     pub otp_event: usize,
     pub session: usize,
     pub engine_run: usize,
+    pub tab_snapshot: usize,
 }
 
 impl SweepReport {
     #[must_use]
     pub fn total(&self) -> usize {
-        self.captcha_event + self.otp_event + self.session + self.engine_run
+        self.captcha_event + self.otp_event + self.session + self.engine_run + self.tab_snapshot
     }
 }
 
@@ -113,6 +118,101 @@ pub fn open(path: &Path) -> Result<Connection, SchemaError> {
     Ok(conn)
 }
 
+/// Skema versi 1, apa adanya.
+///
+/// Disimpan sebagai konstanta, bukan ditulis ulang di dalam `migrate`, karena
+/// tes naik-versi harus membangun database lama yang PERSIS, bukan tiruan yang
+/// perlahan berbeda dari aslinya.
+const MIGRASI_V1: &str = r"
+    BEGIN;
+    CREATE TABLE IF NOT EXISTS profile (
+      id            TEXT PRIMARY KEY,
+      name          TEXT UNIQUE NOT NULL,
+      meta_json     TEXT NOT NULL,
+      engine_hint   TEXT,
+      sticky        INTEGER NOT NULL DEFAULT 0,
+      created_at    INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS session (
+      id            TEXT PRIMARY KEY,
+      profile_id    TEXT REFERENCES profile(id) ON DELETE SET NULL,
+      engine        TEXT NOT NULL,
+      target_id     TEXT,
+      url           TEXT,
+      state         TEXT NOT NULL,
+      opened_at     INTEGER NOT NULL,
+      last_used_at  INTEGER NOT NULL,
+      sticky        INTEGER NOT NULL DEFAULT 0,
+      closed_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS session_state_idx ON session(state, last_used_at);
+
+    CREATE TABLE IF NOT EXISTS cookie (
+      profile_id    TEXT NOT NULL REFERENCES profile(id) ON DELETE CASCADE,
+      host          TEXT NOT NULL,
+      name          TEXT NOT NULL,
+      path          TEXT NOT NULL,
+      value_enc     BLOB NOT NULL,
+      expires       INTEGER,
+      secure        INTEGER NOT NULL DEFAULT 0,
+      http_only     INTEGER NOT NULL DEFAULT 0,
+      samesite      INTEGER,
+      updated_at    INTEGER NOT NULL,
+      PRIMARY KEY (profile_id, host, name, path)
+    );
+
+    CREATE TABLE IF NOT EXISTS captcha_event (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT, host TEXT, kind TEXT,
+      outcome TEXT,
+      at INTEGER NOT NULL, detail TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS otp_event (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT, source TEXT, host TEXT,
+      code_hash TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0,
+      at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS engine_run (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      engine TEXT NOT NULL, pid INTEGER,
+      started_at INTEGER NOT NULL, stopped_at INTEGER,
+      peak_pss INTEGER, reason TEXT
+    );
+
+    PRAGMA user_version = 1;
+    COMMIT;
+";
+
+/// Skema versi 2: tab dingin.
+///
+/// HTML disegel dengan kunci store, sama seperti nilai cookie. Halaman yang
+/// disingkirkan bisa memuat token sesi di dalam DOM, jadi menyimpannya sebagai
+/// plaintext akan membocorkan justru apa yang dilindungi skema ini.
+const MIGRASI_V2: &str = r"
+    BEGIN;
+    CREATE TABLE IF NOT EXISTS tab_snapshot (
+      session_id      TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+      tab_id          INTEGER NOT NULL,
+      url             TEXT NOT NULL,
+      title           TEXT,
+      html_enc        BLOB NOT NULL,
+      node_count      INTEGER NOT NULL,
+      evicted_at      INTEGER NOT NULL,
+      PRIMARY KEY (session_id, tab_id)
+    );
+    CREATE INDEX IF NOT EXISTS tab_snapshot_evicted_idx
+      ON tab_snapshot(evicted_at);
+
+    PRAGMA user_version = 2;
+    COMMIT;
+";
+
 /// Menjalankan migrasi ke [`SCHEMA_VERSION`]. Aman dipanggil berulang.
 pub fn migrate(conn: &Connection, path: &Path) -> Result<(), SchemaError> {
     let versi: i64 = conn.pragma_query_value(None, "user_version", |baris| baris.get(0))?;
@@ -127,75 +227,16 @@ pub fn migrate(conn: &Connection, path: &Path) -> Result<(), SchemaError> {
         return Ok(());
     }
 
-    // Satu transaksi: skema setengah jadi lebih buruk daripada skema lama,
-    // karena daemon berikutnya akan mengira migrasi sudah selesai.
-    conn.execute_batch(
-        r"
-        BEGIN;
-        CREATE TABLE IF NOT EXISTS profile (
-          id            TEXT PRIMARY KEY,
-          name          TEXT UNIQUE NOT NULL,
-          meta_json     TEXT NOT NULL,
-          engine_hint   TEXT,
-          sticky        INTEGER NOT NULL DEFAULT 0,
-          created_at    INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS session (
-          id            TEXT PRIMARY KEY,
-          profile_id    TEXT REFERENCES profile(id) ON DELETE SET NULL,
-          engine        TEXT NOT NULL,
-          target_id     TEXT,
-          url           TEXT,
-          state         TEXT NOT NULL,
-          opened_at     INTEGER NOT NULL,
-          last_used_at  INTEGER NOT NULL,
-          sticky        INTEGER NOT NULL DEFAULT 0,
-          closed_reason TEXT
-        );
-        CREATE INDEX IF NOT EXISTS session_state_idx ON session(state, last_used_at);
-
-        CREATE TABLE IF NOT EXISTS cookie (
-          profile_id    TEXT NOT NULL REFERENCES profile(id) ON DELETE CASCADE,
-          host          TEXT NOT NULL,
-          name          TEXT NOT NULL,
-          path          TEXT NOT NULL,
-          value_enc     BLOB NOT NULL,
-          expires       INTEGER,
-          secure        INTEGER NOT NULL DEFAULT 0,
-          http_only     INTEGER NOT NULL DEFAULT 0,
-          samesite      INTEGER,
-          updated_at    INTEGER NOT NULL,
-          PRIMARY KEY (profile_id, host, name, path)
-        );
-
-        CREATE TABLE IF NOT EXISTS captcha_event (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          session_id TEXT, host TEXT, kind TEXT,
-          outcome TEXT,
-          at INTEGER NOT NULL, detail TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS otp_event (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          session_id TEXT, source TEXT, host TEXT,
-          code_hash TEXT NOT NULL,
-          expires_at INTEGER NOT NULL,
-          used INTEGER NOT NULL DEFAULT 0,
-          at INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS engine_run (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          engine TEXT NOT NULL, pid INTEGER,
-          started_at INTEGER NOT NULL, stopped_at INTEGER,
-          peak_pss INTEGER, reason TEXT
-        );
-
-        PRAGMA user_version = 1;
-        COMMIT;
-        ",
-    )?;
+    // Satu transaksi per langkah: skema setengah jadi lebih buruk daripada
+    // skema lama, karena daemon berikutnya akan mengira migrasi sudah selesai.
+    // Langkah dipisah per versi supaya database lama benar-benar naik;
+    // `CREATE TABLE IF NOT EXISTS` saja tidak menaikkan `user_version`.
+    if versi < 1 {
+        conn.execute_batch(MIGRASI_V1)?;
+    }
+    if versi < 2 {
+        conn.execute_batch(MIGRASI_V2)?;
+    }
 
     Ok(())
 }
@@ -219,12 +260,17 @@ pub fn sweep(conn: &Connection, now: i64) -> Result<SweepReport, SchemaError> {
         "DELETE FROM engine_run WHERE started_at < ?1",
         [now - RETENSI_ENGINE_RUN_SECS],
     )?;
+    let tab_snapshot = conn.execute(
+        "DELETE FROM tab_snapshot WHERE evicted_at < ?1",
+        [now - RETENSI_TAB_SNAPSHOT_SECS],
+    )?;
 
     Ok(SweepReport {
         captcha_event,
         otp_event,
         session,
         engine_run,
+        tab_snapshot,
     })
 }
 
@@ -261,12 +307,94 @@ mod tests {
             "captcha_event",
             "otp_event",
             "engine_run",
+            "tab_snapshot",
         ] {
             assert!(
                 tabel.iter().any(|t| t == wajib),
                 "tabel {wajib} hilang: {tabel:?}"
             );
         }
+    }
+
+    /// Database versi 1 yang sudah berisi data harus NAIK ke versi 2, bukan
+    /// dilewati. Ini yang gampang salah: `CREATE TABLE IF NOT EXISTS` pada
+    /// semua tabel sekaligus tidak menaikkan `user_version`, jadi daemon baru
+    /// akan terus menulis ke skema lama.
+    #[test]
+    fn database_versi_1_naik_ke_versi_2_tanpa_kehilangan_data() {
+        let dir = TempDir::new("naik");
+        let path = dir.path().join("store.db");
+        {
+            // Skema v1 apa adanya: dibuat dengan SQL yang sama seperti rilis
+            // sebelumnya, lalu versinya dipatok 1.
+            let conn = Connection::open(&path).expect("buka v1");
+            conn.execute_batch(MIGRASI_V1).expect("skema v1");
+            conn.pragma_update(None, "user_version", 1).expect("set v1");
+            conn.execute(
+                "INSERT INTO profile (id, name, meta_json, sticky, created_at) VALUES ('p1', 'lama', '{}', 0, 1)",
+                [],
+            )
+            .expect("sisip v1");
+        }
+
+        let conn = open(&path).expect("migrasi ke v2");
+        let versi: i64 = conn
+            .pragma_query_value(None, "user_version", |b| b.get(0))
+            .expect("versi");
+        assert_eq!(versi, 2, "versi harus naik");
+        assert!(
+            nama_tabel(&conn).iter().any(|t| t == "tab_snapshot"),
+            "tabel tab_snapshot tidak dibuat saat naik dari v1"
+        );
+        let nama: String = conn
+            .query_row("SELECT name FROM profile WHERE id='p1'", [], |b| b.get(0))
+            .expect("data v1 selamat");
+        assert_eq!(nama, "lama");
+    }
+
+    #[test]
+    fn tab_snapshot_terhapus_saat_sesi_induk_dihapus() {
+        let dir = TempDir::new("cascade");
+        let (conn, _) = buka(&dir);
+        conn.execute_batch(
+            r"
+            INSERT INTO session (id, engine, state, opened_at, last_used_at)
+              VALUES ('s1', 'native', 'open', 1, 1);
+            INSERT INTO tab_snapshot (session_id, tab_id, url, title, html_enc, node_count, evicted_at)
+              VALUES ('s1', 1, 'https://a.test', 'a', x'00', 3, 1);
+            ",
+        )
+        .expect("sisip");
+        conn.execute("DELETE FROM session WHERE id='s1'", [])
+            .expect("hapus sesi");
+        let sisa: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tab_snapshot", [], |b| b.get(0))
+            .expect("hitung");
+        assert_eq!(sisa, 0, "snapshot yatim tertinggal");
+    }
+
+    #[test]
+    fn sweep_membuang_tab_snapshot_basi() {
+        let dir = TempDir::new("sweep-tab");
+        let (conn, _) = buka(&dir);
+        let now = 1_700_000_000i64;
+        conn.execute_batch(&format!(
+            r"
+            INSERT INTO session (id, engine, state, opened_at, last_used_at)
+              VALUES ('s1', 'native', 'open', {now}, {now});
+            INSERT INTO tab_snapshot (session_id, tab_id, url, title, html_enc, node_count, evicted_at)
+              VALUES ('s1', 1, 'https://a.test', 'a', x'00', 3, {}),
+                     ('s1', 2, 'https://b.test', 'b', x'00', 3, {now});
+            ",
+            now - RETENSI_TAB_SNAPSHOT_SECS - 1
+        ))
+        .expect("sisip");
+        let laporan = sweep(&conn, now).expect("sweep");
+        assert_eq!(laporan.tab_snapshot, 1, "hanya yang basi dibuang");
+        let sisa: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tab_snapshot", [], |b| b.get(0))
+            .expect("hitung");
+        assert_eq!(sisa, 1, "yang masih segar harus tinggal");
     }
 
     #[test]

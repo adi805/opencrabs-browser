@@ -13,10 +13,15 @@
 pub mod dom;
 pub mod js;
 pub mod layout;
+pub mod tab_pool;
 
 pub use dom::{Document, Node, NodeId, NodeKind};
 pub use js::{Isolat, PaguIsolat};
 pub use layout::{Kotak, LaporanLayout, Viewport};
+pub use tab_pool::{
+    AlasanSingkir, BASELINE_MB, ColdStore, MemoryColdStore, PAGU_MB, PSS_PER_TAB_MB, PoolError,
+    Snapshot, TabId, TabPool, tab_panas_maksimum,
+};
 
 use std::fmt;
 

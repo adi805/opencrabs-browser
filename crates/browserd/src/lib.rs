@@ -28,4 +28,5 @@ pub mod routing;
 pub mod runtime;
 pub mod selftest;
 pub mod storecmd;
+pub mod tabstore;
 pub mod wiring;

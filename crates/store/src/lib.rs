@@ -22,6 +22,8 @@ pub mod cookie;
 pub mod crypto;
 pub mod profile;
 pub mod schema;
+pub mod session;
+pub mod tab;
 
 #[cfg(test)]
 mod testutil;
@@ -30,6 +32,8 @@ pub use cookie::{Cookie, CookieError, MAX_COOKIE_BYTES, SaveReport};
 pub use crypto::{KeyError, StoreKey};
 pub use profile::{Profile, ProfileError, ProfileMeta};
 pub use schema::{SchemaError, SweepReport};
+pub use session::SessionError;
+pub use tab::{TabError, TabSnapshot};
 
 /// Kegagalan membuka store.
 #[derive(Debug, thiserror::Error)]
