@@ -64,63 +64,89 @@ sekali. Sebaliknya angka Chrome 42 MB per tab konsisten dengan pengukuran sendir
 
 ## 3. Aritmetika Anggaran: 99 Tab dalam 100 MB
 
-Target: **100 MB total PSS / RSS untuk 99 tab terkelola**.
+Target: **100 MB total PSS untuk 99 tab terkelola**.
 
-### Kasus A: 99 Tab Aktif Serentak di Memori (Semua DOM + JS Heap Hidup)
-- Baseline runtime engine Rust (tokio runtime, HTTP/WS CDP broker, connection pool): **15 - 20 MB**.
-- Sisa anggaran untuk 99 tab: `100 MB - 20 MB = 80 MB`.
-- Anggaran per tab: `80 MB / 99 = 808 KB per tab`.
-- **Fakta Realitas Web:**
-  - Dokumen web modern rata-rata memiliki 1.500 - 3.500 DOM node.
-  - Rust DOM node representation (`html5ever` + `taffy` layout): ~200 - 400 byte/node $\rightarrow$ ~700 KB.
-  - QuickJS execution context + global scope + script cache: ~800 KB - 1.5 MB.
-  - Total 1 tab aktif web riil = **1.5 MB - 3 MB**.
-  - 99 tab aktif serentak = `99 * 2 MB = ~198 MB` (+ baseline 20 MB = **~218 MB**).
-- **Kesimpulan Kasus A:** 99 tab yang *aktif serentak merender dan menjalankan JavaScript* dalam 100 MB adalah batasan fisik yang mustahil tanpa mengorbankan kelengkapan dokumen.
+### Kasus A: 99 tab aktif serentak. TERUKUR, dan hasilnya menutup jalur ini
 
-### Kasus B: 99 Tab Terkelola dengan Arsitektur Suspensi Virtual (Tiered Tab Memory)
-Agent berinteraksi dengan browser secara sekuensial atau semi-paralel (1-5 tab aktif dikendalikan dalam satu waktu, sementara 94 tab lainnya adalah konteks tersimpan).
+Harness di luar repo: `~/.opencrabs/projects/browser-audit/ukur-memori` (kode `src/main.rs`, hasil
+mentah `HASIL.txt` 103 baris). Yang diukur bukan perkiraan: `html5ever` 0.40 mem-parse halaman
+3000 kartu (3006 elemen), `taffy` 0.15 menghitung layout, satu `rquickjs` 0.14 context memuat 200
+objek dan 50 tautan per tab. PSS dibaca dari `/proc/self/smaps_rollup`.
 
-- **Baseline Engine Rust:** 18 MB.
-- **Hot Tier (5 Tab Aktif Penuh):**
-  - Memiliki DOM tree hidup, layout box, QuickJS context, network cache.
-  - Alokasi: $5 \times 12\text{ MB} = 60\text{ MB}$.
-- **Cold / Suspended Tier (94 Tab Tertidur):**
-  - DOM di-evict ke ring buffer disk / SQLite (`crates/store`).
-  - Menyimpan snapshot ringkas di RAM: URL, history stack, cookies, accessibility outline (~30 KB metadata per tab).
-  - Alokasi: $94 \times 30\text{ KB} = 2.82\text{ MB}$.
-- **CDP Broker & Buffer Cadangan:** 15 MB.
-- **Total PSS Terpakai:**
-  $$18\text{ MB} + 60\text{ MB} + 2.82\text{ MB} + 15\text{ MB} = \mathbf{95.82\text{ MB}} \le 100\text{ MB}$$
+| Jumlah tab | PSS total | Marjinal per tab |
+|---|---|---|
+| 1 | 5.9 MB | 4.4 MB (warmup tab pertama) |
+| 5 | 18.3 MB | 3.1 MB |
+| 10 | 33.8 MB | 3.1 MB |
+| 20 | 64.7 MB | 3.1 MB |
+| 50 | 157.4 MB | 3.1 MB |
+| 99 | **308.9 MB** | **3.10 MB** |
+
+Dua fakta mengunci keputusan ini:
+
+1. Marjinal **flat 3.10 MB** dari tab ke-2 sampai tab ke-99. Tidak ada kebocoran akumulatif di
+   desain DOM, layout dan JS.
+2. 99 tab hidup serentak = **308.9 MB**, yaitu **3.1x** anggaran. Jadi 100 MB tidak bisa dicapai
+   dengan membiarkan tab tetap hidup, seberapa pun rapinya kode. Angka ini bahkan lebih buruk dari
+   aritmetika lama yang menebak 198 sampai 297 MB.
+
+**Caveat yang wajib ikut dibaca:** 3.10 MB adalah **lower bound**. Yang diukur hanya DOM + layout +
+JS heap. Belum ada HTTP/TLS client, CSS computed style, image decode, renderer `tiny-skia`, atau
+CDP broker. Engine lengkap akan lebih mahal dari ini, bukan lebih murah.
+
+### Kasus B: tiering. Yang direvisi jumlah hot tab, bukan pagu
+
+Rumusnya diturunkan dari angka terukur, bukan dipilih:
+
+`hot_tab = floor((100 - baseline_engine) / 3.10)`
+
+| Baseline engine | Hot tab | Cold tab | RAM hot tab | Sisa anggaran |
+|---|---|---|---|---|
+| 10 MB | 29 | 70 | 99.9 MB | 0.1 MB |
+| 15 MB | 27 | 72 | 98.7 MB | 1.3 MB |
+| 20 MB | **25** | **74** | **97.5 MB** | 2.5 MB |
+| 25 MB | 24 | 75 | 99.4 MB | 0.6 MB |
+| 30 MB | 22 | 77 | 98.2 MB | 1.8 MB |
+
+Dengan baseline 20 MB (tokio runtime + HTTP/WS client + CDP broker + buffer cadangan):
+`25 x 3.10 MB = 77.5 MB`, plus baseline 20 MB = **97.5 MB <= 100 MB**, plus 74 tab dingin dengan
+metadata sekitar 1 KB per tab (bukan 30 KB seperti asumsi lama).
+
+**Perbandingan langsung dengan versi lama:** asumsi 12 MB per hot tab memberi 5 hot tab. Terukur
+3.10 MB per hot tab memberi **25 hot tab di pagu yang sama**. Asumsi lama 3.9x terlalu pesimis,
+dan efeknya besar: 5 tab aktif adalah mainan, 25 tab aktif adalah alat kerja.
 
 ---
 
-## 4. Status Tiap Angka: Terukur atau Diasumsikan
+## 4. Status Tiap Angka: TERUKUR atau Diasumsikan
 
-Ini bagian yang memisahkan anggaran dari angan-angan. Yang terukur punya perintah yang bisa
-dijalankan ulang di repo ini; yang diasumsikan punya nama uji yang harus lulus sebelum klaim
-100 MB boleh diucapkan.
+Bagian ini memisahkan anggaran dari angan-angan. Yang TERUKUR punya perintah yang bisa dijalankan
+ulang; yang masih diasumsikan punya nama uji yang harus lulus sebelum angka 100 MB boleh diucapkan.
 
 | Angka | Nilai | Status | Cara membuktikan |
 |---|---|---|---|
-| Baseline `chrome-headless-shell` | 142 MB PSS | **Terukur** | `crates/browserd/tests/biaya_tab.rs`, commit `3c1d5cf` |
-| Baseline `chrome-full` di Xvfb | 295 MB PSS | **Terukur** | idem |
-| Marjinal per tab Chrome | 12.8 sampai 32.7 MB | **Terukur** | idem |
-| Efek `--process-per-site` | 759 turun ke 555 MB | **Terukur** | idem |
-| Efek tab freeze | hemat 4 sampai 18 persen | **Terukur** | `Page.setWebLifecycleState`, idem |
-| Lightpanda 100 paralel | 410.2 MB | **Terukur pihak lain** | benchmark resmi, 100 proses terpisah |
-| Baseline engine Rust | 18 MB | **Diasumsikan** | harus dibuktikan uji `native_baseline_pss` di milestone 1 |
-| Biaya satu hot tab Rust | 12 MB | **Diasumsikan** | harus dibuktikan uji `native_hot_tab_cost` di milestone 1 |
-| Metadata tab dingin | 30 KB | **Diasumsikan** | harus dibuktikan uji `native_cold_tab_metadata` di milestone 4 |
-| Rehidrasi | di bawah 50 ms | **Diasumsikan** | harus dibuktikan `test_tab_rehydration_latency` di milestone 4 |
+| Baseline `chrome-headless-shell` | 142 MB PSS | **TERUKUR** | `crates/browserd/tests/biaya_tab.rs`, commit `3c1d5cf` |
+| Baseline `chrome-full` di Xvfb | 295 MB PSS | **TERUKUR** | idem |
+| Marjinal per tab Chrome | 12.8 sampai 32.7 MB | **TERUKUR** | idem |
+| Efek `--process-per-site` | 759 turun ke 555 MB | **TERUKUR** | idem |
+| Efek tab freeze | hemat 4 sampai 18 persen | **TERUKUR** | `Page.setWebLifecycleState`, idem |
+| Lightpanda 100 paralel | 410.2 MB | **TERUKUR pihak lain** | benchmark resmi, 100 proses terpisah |
+| Marjinal satu tab Rust (DOM+layout+JS) | **3.10 MB PSS, flat ke 99 tab** | **TERUKUR** | `ukur_memori 99`, hasil di `HASIL.txt`; harness mem-parse 3006 elemen, layout taffy, context rquickjs |
+| 99 tab Rust hidup serentak | **308.9 MB PSS** | **TERUKUR** | idem, baris `TAB99` dan `RINGKAS` |
+| Baseline engine Rust (tokio+HTTP+CDP) | 20 MB | **Diasumsikan** | harus dibuktikan uji `native_baseline_pss` di milestone 1 |
+| Biaya satu hot tab di engine lengkap | lebih dari 3.10 MB | **Diasumsikan** | uji `native_hot_tab_cost` di milestone 1, karena 3.10 MB belum memuat HTTP, CSS, renderer |
+| Metadata tab dingin | 1 KB | **Diasumsikan** | uji `native_cold_tab_metadata` di milestone 4 |
+| Rehidrasi | di bawah 50 ms | **Diasumsikan** | uji `test_tab_rehydration_latency` di milestone 4 |
 
-**Konsekuensi jujur.** Total 95.82 MB itu bukan hasil pengukuran, itu hasil penjumlahan empat
-asumsi. Kalau biaya hot tab ternyata 20 MB bukan 12 MB, maka 5 tab panas saja sudah 100 MB dan
-anggaran jebol sebelum satu tab dingin pun dihitung. Karena itu milestone 1 wajib mengukur dua
-angka pertama sebelum milestone 4 dimulai: mengukur setelah mesinnya selesai berarti membangun
-di atas anggaran yang belum pernah diuji. Kalau pengukuran milestone 1 keluar di atas asumsi,
-angka yang direvisi adalah **jumlah hot tab**, bukan pagu 100 MB.
+**Konsekuensi jujur.** Yang sekarang berdiri di atas pengukuran adalah biaya per tab (3.10 MB) dan
+konsekuensinya (99 tab hidup = 308.9 MB). Yang masih asumsi adalah baseline engine 20 MB, biaya tab
+di engine lengkap, metadata tab dingin, dan latency rehidrasi. Karena itu 97.5 MB di Kasus B adalah
+**proyeksi**, bukan hasil pengukuran, dan belum boleh ditulis sebagai bukti bahwa target tercapai.
 
+Milestone 1 wajib mengukur baseline engine sebelum milestone 4 memakai rumus ini. Kalau baseline
+keluar 30 MB bukan 20 MB, yang turun adalah jumlah hot tab (25 menjadi 22), bukan pagu 100 MB.
+Kalau biaya tab di engine lengkap ternyata 6 MB, hot tab jatuh ke 13. Keduanya masih di atas angka
+lama 5, jadi revisi ini tetap menang, tapi angkanya harus datang dari uji, bukan dari dokumen ini.
 
 ---
 

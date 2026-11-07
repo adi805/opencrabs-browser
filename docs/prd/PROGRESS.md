@@ -25,7 +25,8 @@ One read must be enough to continue without asking the owner anything.
 | Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
 | Last passing check | `cargo xtask check` at `3c1d5cf` plus the PRD v0.2 senior contracts in this commit: `fmt ok`, `clippy ok`, `test ok`, exit 0, log at `/tmp/oc-browser-gate.log` (2026-11-07) |
-| Open blockers | None inside this repo. PRD v0.2 is drafted and validated with 0 blockers (`docs/prd/PRD-MESIN-RUST 071126-1413.md`). Permanent deletion of `adi805/opencrabs-web` is outside this repo and still waits on `gh auth refresh -s delete_repo` |
+| Memory budget status | **Per-tab cost TERUKUR: 3.10 MB PSS marginal, flat from tab 2 to tab 99** (harness `~/.opencrabs/projects/browser-audit/ukur-memori`, `HASIL.txt`). 99 live tabs = 308.9 MB = 3.1x the ceiling, so the 100 MB target needs tiering. Revised design: 25 hot tabs (77.5 MB) plus a 20 MB engine baseline = 97.5 MB projected. The 20 MB baseline and the cold-tab metadata are still assumptions until milestone 1 measures them |
+| Open blockers | None inside this repo. PRD v0.2 is drafted and validated with 0 blockers and 10 senior contracts (`docs/prd/PRD-MESIN-RUST 071126-1413.md`). Permanent deletion of `adi805/opencrabs-web` is outside this repo and still waits on `gh auth refresh -s delete_repo` |
 
 ## Current State
 
@@ -44,6 +45,11 @@ One read must be enough to continue without asking the owner anything.
   browser engine replacing external Chromium binaries, targeting 99 managed
   tabs under a 100 MB hard budget using a Virtual Tiered Tab LRU architecture.
   Feasibility evidence is documented in `docs/prd/BUKTI-BUDGET 071126-1413.md`.
+  The per-tab cost is no longer an assumption: a measured harness shows **3.10 MB
+  PSS marginal per live tab, flat from tab 2 to tab 99**, and 99 live tabs at
+  **308.9 MB**. That measurement cut the old 12 MB assumption by 3.9x, so the same
+  100 MB ceiling now buys **25 hot tabs instead of 5**. The engine baseline (20 MB)
+  and cold-tab metadata are still unmeasured and belong to milestone 1.
 - Build authority: the owner granted full execution permission on 3 November 2026.
 - Required unresolved input: none. The three owner decisions that used to be
   open questions are now defaults with a reversal cost in PRD section 2 Review Focus.

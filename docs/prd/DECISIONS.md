@@ -146,13 +146,44 @@ policy is not recorded here.
     and bounds per-process cost rather than per-tab cost. To achieve 99 tabs
     under 100 MB, a pure Rust native engine with Virtual Tiered Tab LRU is
     required.
-  Rationale: by keeping at most 5 active hot tabs in RAM (~60 MB) and evicting
-    dormant tabs to SQLite snapshots in `crates/store` (~30 KB metadata per tab),
-    99 tabs scale within 81-95 MB PSS without memory thrashing. Tabs rehydrate
-    in sub-100ms when accessed by the agent.
+  Rationale: measured on 2026-11-07, one fully live tab (3006-node DOM, taffy
+    layout, QuickJS context) costs **3.10 MB PSS marginal, flat from tab 2 to tab
+    99**, and 99 live tabs cost **308.9 MB**. The 100 MB ceiling is therefore met
+    by tiering: `hot_tab = floor((100 - engine_baseline) / 3.10)`, which gives
+    **25 hot tabs** at a 20 MB baseline (77.5 MB hot + 20 MB = 97.5 MB), with 74
+    dormant tabs as SQLite snapshots at roughly 1 KB metadata each. The earlier
+    12 MB-per-tab figure was an assumption and 3.9x too pessimistic; it survived
+    only one revision cycle because nothing measured it. Tabs rehydrate in
+    sub-100ms when accessed by the agent.
   Impact: eliminates all C++ Chromium binaries, removes Xvfb dependency, and
     provides pure Rust perception (AXTree + tiny-skia) and interaction dispatch.
     Specified in PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md`.
+
+- [2026-11-07 15:40] Decision: Per-tab memory cost is measured, not assumed (3.10 MB marginal, flat to 99 tabs)
+  Status: Accepted
+  Approval: the owner asked for the memory target to be revised from measurement
+    ("Revisi target memori", "Harus terukur loh"). This decision changes a number
+    inside the v0.2 PRD, it does not authorise building the engine.
+  Requirement IDs: NFR-001, FR-005, AC-009
+  Context: v0.2 originally assumed 12 MB per hot tab, which produced a design of
+    5 hot tabs under a 100 MB ceiling. Nothing had measured one tab. A standalone
+    Rust harness (`~/.opencrabs/projects/browser-audit/ukur-memori`, outside this
+    repo) builds 1 to 99 live tabs using the same stack the engine will use
+    (`html5ever` DOM of 3006 nodes, `taffy` layout, `rquickjs` context) and reads
+    PSS from `/proc/self/smaps_rollup` after each tab is added.
+  Rationale: the measurement gives **3.10 MB PSS marginal per tab, flat from tab
+    2 through tab 99** (no superlinear growth), so 99 live tabs cost **308.9 MB**.
+    The old 12 MB figure was 3.9x too pessimistic. At the same 100 MB ceiling the
+    hot tier rises from 5 to **25 tabs** (77.5 MB) leaving 20 MB for the engine
+    baseline, and 74 tabs stay cold. Revising the target from a measurement also
+    replaced a failure-by-design AC: AC-009 used to demand 99 live tabs under
+    100 MB, which the measurement proves impossible, and now demands
+    `resident_count <= 25`.
+  Impact: PRD v0.2, `BUKTI-BUDGET`, `PROGRESS.md` and this file now all cite the
+    same measured numbers. Remaining unmeasured inputs are the engine baseline
+    (20 MB) and cold-tab metadata (1 KB), both assigned to milestone 1 rather
+    than to this decision. The harness stays outside the repo so nothing in the
+    shipped crate grows a benchmark dependency.
 
 ## AI Agent Rules
 
