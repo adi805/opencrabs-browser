@@ -32,7 +32,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::process::Child;
 use std::time::{Duration, Instant};
+
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 
 /// Batas menunggu kunci. Jauh lebih longgar daripada durasi uji mana pun: kalau
 /// batas ini tercapai, artinya ada uji lain yang menggantung, dan pesan
@@ -123,4 +127,30 @@ fn pemegang(path: &std::path::Path) -> String {
     std::fs::read_to_string(path)
         .map(|isi| isi.trim().to_string())
         .unwrap_or_default()
+}
+
+/// Batas menunggu daemon menutup mesinnya sendiri sesudah SIGTERM.
+///
+/// Daemon mematikan mesin satu per satu, dan tiap mesin punya lima detik
+/// sendiri untuk menutup profilnya.
+const SABAR_MATI: Duration = Duration::from_secs(20);
+
+/// Menutup daemon lewat SIGTERM, lalu SIGKILL hanya kalau dia membandel.
+///
+/// `Child::kill()` mengirim SIGKILL, dan daemon yang dibunuh begitu melewati
+/// `matikan_semua`: setiap `chrome_shell`-nya tinggal yatim memegang RAM, port,
+/// dan profil. Satu run gate pernah meninggalkan 26 mesin seperti itu; RAM
+/// habis, lalu test berikutnya gagal boot dalam 15 detik dan gate terbaca merah
+/// padahal kodenya tidak berubah.
+pub fn buang(child: &mut Child) {
+    let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
+    let mulai = Instant::now();
+    while mulai.elapsed() < SABAR_MATI {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }

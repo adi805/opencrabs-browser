@@ -28,6 +28,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
+mod common;
+
 const LISTEN: &str = "127.0.0.1";
 
 /// Halaman fixture. Skrip di dalamnya berjalan sendiri, jadi kemampuan
@@ -360,6 +362,11 @@ async fn probe_kapabilitas_full() {
         eprintln!("Dilewati: Xvfb tidak ditemukan, dan chrome-full tidak jalan tanpanya.");
         return;
     }
+
+    // Uji live lain memegang kunci yang sama: cargo menjalankan binary uji
+    // secara paralel, dan dua Chromium besar yang berebut RAM membuat batas
+    // waktu yang lolos sendirian jadi merah di gate.
+    let _kunci = common::kunci_live("penuh_probe");
 
     let profil = std::env::temp_dir().join(format!("ocb-penuh-probe-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&profil);

@@ -97,6 +97,22 @@ impl Proc {
     }
 }
 
+/// Jaring terakhir: `Proc` yang di-drop tanpa `stop()` tetap membunuh group-nya.
+///
+/// Tanpa ini, panic di tengah uji meninggalkan Chrome dan Xvfb yatim yang
+/// memegang port, display, dan memori sampai mesin reboot. Kejadian nyata:
+/// satu probe gagal di `Runtime.enable`, seluruh pohon browser bertahan, dan
+/// run berikutnya kehabisan waktu karena sisa run sebelumnya masih berjalan.
+/// Group yang sudah dihentikan rapi tidak disentuh lagi, jadi `drop` tidak
+/// mengubah hasil `stop()`.
+impl Drop for Proc {
+    fn drop(&mut self) {
+        if !self.stopped {
+            self.kill_group();
+        }
+    }
+}
+
 /// `stderr` mesin ditulis ke berkas di dalam direktori profil, bukan dibuang.
 /// Kegagalan boot yang bisu memaksa orang menebak, dan tebakan biasanya salah.
 pub(crate) fn stderr_ke_file(cmd: &mut Command, path: &std::path::Path) {
@@ -153,5 +169,26 @@ mod tests {
         let mut proc = Proc::spawn(cmd).expect("proses uji");
         proc.kill_group();
         assert!(!proc.is_running());
+    }
+
+    /// Jalur panic: tidak ada yang memanggil `stop()`, hanya `drop`. Group tetap
+    /// harus hilang, karena itulah satu-satunya yang menjaga test gagal tidak
+    /// mewariskan browser hidup ke run berikutnya.
+    #[test]
+    fn drop_tanpa_stop_tetap_mematikan_group() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 30 & wait");
+        let proc = Proc::spawn(cmd).expect("proses uji");
+        let pgid = proc.pgid();
+
+        drop(proc);
+
+        assert!(
+            matches!(
+                killpg(Pid::from_raw(pgid), None),
+                Err(nix::errno::Errno::ESRCH)
+            ),
+            "group proses harus benar-benar hilang sesudah drop"
+        );
     }
 }

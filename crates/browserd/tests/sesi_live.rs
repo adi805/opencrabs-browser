@@ -174,8 +174,9 @@ fn tunggu<F: FnMut() -> bool>(batas: Duration, mut cek: F) -> bool {
 }
 
 fn buang(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    // Satu implementasi untuk semua uji: SIGTERM dulu supaya daemon sempat
+    // memanggil matikan_semua, SIGKILL hanya kalau dia membandel.
+    common::buang(child);
 }
 
 fn token_dari(path: &Path) -> String {

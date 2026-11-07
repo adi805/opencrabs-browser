@@ -120,8 +120,9 @@ fn minta(port: u16, metode: &str, path: &str) -> (u16, String) {
 }
 
 fn buang(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    // Satu implementasi untuk semua uji: SIGTERM dulu supaya daemon sempat
+    // memanggil matikan_semua, SIGKILL hanya kalau dia membandel.
+    common::buang(child);
 }
 
 /// Satu tab yang dilaporkan `/json/list`, sudah ber-prefiks mesin.

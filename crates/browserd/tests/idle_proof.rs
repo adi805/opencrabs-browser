@@ -170,8 +170,9 @@ fn tulis_config(dir: &Path, biner: &Path, cdp_port: u16, control_port: u16) -> P
 }
 
 fn buang(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    // Satu implementasi untuk semua uji: SIGTERM dulu supaya daemon sempat
+    // memanggil matikan_semua, SIGKILL hanya kalau dia membandel.
+    common::buang(child);
 }
 
 /// Jalankan satu skrip di tab lewat WebSocket yang **diberikan proxy**, bukan

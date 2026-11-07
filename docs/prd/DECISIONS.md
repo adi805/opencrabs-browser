@@ -85,6 +85,40 @@ policy is not recorded here.
   Impact: needs a second piece of state (a per-session lease) that must have a TTL
     so it cannot leak memory.
 
+- [2026-11-07 08:17] Decision: a dropped `Proc` kills its process group
+  Status: Accepted
+  Approval: none needed; this is the teardown defect that made the milestone 6
+    probe fail after it had passed once
+  Requirement IDs: NFR-003
+  Context: `Proc` wrapped a `Child` and had no `Drop`, so a panic between launch
+    and `stop()` left Chrome and Xvfb alive. One failed probe left a 222 MB
+    Chrome tree and an Xvfb display behind, and the next run timed out at the
+    20 second CDP ceiling because of it.
+  Rationale: the process group is already the unit that must die, and the drop
+    path covers every exit including a panic, where no explicit `stop()` will
+    ever run. `stop()` remains the graceful path so the profile and its cookies
+    are closed properly first.
+  Impact: dropping an engine now terminates it. A caller that wants a graceful
+    shutdown still has to call `stop()` before the value goes out of scope.
+
+- [2026-11-07 08:52] Decision: live test suites close the daemon with SIGTERM, not `Child::kill()`
+  Status: Accepted
+  Approval: none needed; this is the teardown defect that made a full gate go red
+    on unchanged code
+  Requirement IDs: NFR-003
+  Context: five suites called `Child::kill()`, which sends SIGKILL, so the
+    daemon's graceful shutdown never ran and its engines were orphaned. A gate
+    failed in `sesi_live` with a 15 second boot timeout after 26 such machines
+    had accumulated, and `penuh_probe` was racing those suites because it did
+    not take the existing `kunci_live` lock.
+  Rationale: the daemon already stops its engines correctly on SIGTERM, which
+    was verified by reading the shutdown path before changing the helpers. The
+    escalation to SIGKILL stays as a ceiling, so a hung daemon still cannot hang
+    the suite.
+  Impact: live tests now take up to a few seconds longer per daemon on a slow
+    host, and leave no engines behind. A test binary killed from outside still
+    runs no destructor; that gap needs a process census in `xtask check`.
+
 ## AI Agent Rules
 
 A decision with status Proposed must not be treated as permission to build. An

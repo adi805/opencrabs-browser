@@ -472,6 +472,21 @@ One read must be enough to continue without asking the owner anything.
   reparented to `systemd --user`, holding 4.9 GB between them. Killing them
   brought boot back to 3.2 seconds. The probe now waits 60 seconds instead of 30,
   and the number it reports is still the measured time, not the ceiling.
+- A second leak, this one in the adapter's own path, showed up after the first
+  commit: a probe that failed at `Runtime.enable` left its whole tree alive
+  because `Proc` had no `Drop`, and the next run then looked flaky. `impl Drop
+  for Proc` sends SIGKILL to the group on every exit path except a graceful
+  `stop()`. Measured afterwards, two consecutive runs left zero processes behind
+  (boot 2253 ms and 12700 ms; the second was competing with unrelated builds).
+- The suites themselves leaked for the same reason one layer up: five of them
+  closed the daemon with `Child::kill()`, which is SIGKILL, so the graceful
+  handler never ran `matikan_semua` and every `chrome_shell` stayed behind. A
+  full gate then failed in `sesi_live` because earlier suites had eaten the RAM.
+  All five now call one `common::buang()` that sends SIGTERM and only escalates
+  to SIGKILL after 20 seconds. The same suite that failed passes alone in
+  2.55 s and passes in a full gate in 10.53 s, and
+  `~/.opencrabs/projects/oc-browser-leak-check.sh` reports zero leftover test
+  machines after the gate.
 - `TERUKUR_FULL` in `crates/policy/src/select.rs` now says `true` for `layout`,
   `script`, `cookies`, and `input`, and the doc comment on it names the probe and
   the evidence file. Nothing beyond that table is claimed: the anti-bot detection
@@ -485,7 +500,7 @@ Open items, each with the reason it is still open and what would close it.
 | Item | Why it is open | What would close it |
 |---|---|---|
 | `cloakbrowser` artifact path (the cookie handoff named in `crates/policy/src/challenge.rs:304`) | It was never part of the `chrome-full` adapter, and no test drives it. A path that reads another browser's cookie store has to be measured against a real challenge, not written against a guess. | A probe that takes a cookie jar produced by a real challenge and proves the cookie is usable through the daemon, with the file format locked by a test |
-| Leaked browsers from the live test suites | 36 orphaned `chrome-headless-shell` processes were found alive during this milestone, 4.9 GB RSS between them, from `sesi_live`, `m4_proof`, `diagnostik`, and `idle_proof`. The serialisation lock in `tests/common` limits how many start at once, it does not stop them surviving a killed run. | A teardown that is verified after a test is killed mid-run, not only after it returns, plus a check in `xtask check` that the process count returns to its starting value |
+| Leaked browsers from the live test suites | 36 orphaned `chrome-headless-shell` processes were found alive during this milestone, 4.9 GB RSS between them, from `sesi_live`, `m4_proof`, `diagnostik`, and `idle_proof`. The serialisation lock in `tests/common` limits how many start at once, it does not stop them surviving a killed run. **Partly closed:** `impl Drop for Proc` reaps the group on panic and on normal exit, and the five live suites now close their daemon with SIGTERM so `matikan_semua` runs, both measured as zero leftovers after a full `cargo xtask check`. Still open: a test binary that is itself SIGKILLed from outside runs no destructor, and nothing counts processes in `xtask check` yet. | A teardown that is verified after a test is killed mid-run, not only after it returns, plus a check in `xtask check` that the process count returns to its starting value |
 | `xtask e2e` | The command is referenced in the task list but does not exist yet | An `e2e` subcommand that runs the live suites in the same serialised way `cargo test` does |
 | Permanent deletion of `adi805/opencrabs-web` | Outside this repo, and it needs a token scope the host does not have | `gh auth refresh -s delete_repo`, then the delete, with the local backup at `~/oc-archive/opencrabs-web.git` (HEAD `2f22714`) kept until one clone from it succeeds |
 
