@@ -307,7 +307,7 @@ fixture loads, the page's own script runs, cookies round-trip, and a dispatched
 mouse event changes the DOM, with boot at 3.2 to 11.8 seconds and about 1.5 GB
 RSS for one tab. `TERUKUR_FULL` in `crates/policy` claims exactly that and
 nothing more; the table and raw output live in `docs/prd/BUKTI-FULL
-071126-0734.md`. The `cloakbrowser` artifact path that was listed next to it in
+071126-0734.md`, and five consecutive boots plus the process census and cost figures are in `docs/prd/BUKTI-AUDIT-FULL 071126-1329.md`. The `cloakbrowser` artifact path that was listed next to it in
 an earlier draft is still open and is not claimed anywhere.
 
 The milestone numbers in this table follow `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex), and M5 is the single PRD milestone that carries both extra engine adapters. The `0.1.0` version in `Cargo.toml` has not been bumped since M0: what grows is the contents, not the number. **There is no tag yet**, because a repository that carries a `0.1.0` tag while people still cannot use it is a fake release.
