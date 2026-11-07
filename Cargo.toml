@@ -27,10 +27,14 @@ axum = { version = "0.8", features = ["ws"] }
 chacha20poly1305 = "0.11"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+html5ever = "0.40"
+markup5ever_rcdom = "0.40"
 nix = { version = "0.30", features = ["signal", "process", "fs"] }
+rquickjs = "0.14"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+taffy = "0.15"
 thiserror = "2"
 tokio = { version = "1", features = [
     "rt-multi-thread",

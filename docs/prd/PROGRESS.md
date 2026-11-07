@@ -20,7 +20,7 @@ One read must be enough to continue without asking the owner anything.
 
 | Field | Value |
 |---|---|
-| Active milestone | None open in v0.1 (all five PRD milestones are Done). The next major architecture target is PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` (Native Rust engine, 99 tabs under 100 MB hard budget) |
+| Active milestone | PRD v0.2 milestone 1, part 1 done: native DOM, layout and JS foundations run and are tested (`crates/engine/src/native/`). Part 2 (tab pool, budget enforcement, CDP surface) not started. PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` |
 | Next exact command | `cargo xtask check` |
 | Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
@@ -503,12 +503,58 @@ One read must be enough to continue without asking the owner anything.
   rate on a real host, memory with six tabs, and stability over hours were not
   measured here, so they are not in any document as facts.
 
+### PRD v0.2, milestone 1 part 1: native engine foundations that actually run
+
+The first native code in the workspace, and the first time the PRD's stack is
+compiled rather than quoted. `crates/engine/src/native/` now contains three real
+pieces plus the list of what it does not do:
+
+| Piece | What it does | Evidence |
+|---|---|---|
+| `dom.rs` | `Document::parse_html` parses real HTML with `html5ever` 0.40.1 and converts the parser's `Rc<RefCell>` tree once into a `Vec<Node>` arena with `parent`/`children` indices. `to_html` renders the tree back to parseable HTML | 5 unit tests: node counting (`<p id="a">halo</p>` is 4 elements and 5 nodes once html/head/body exist), id lookup, serialise/reparse round trip, title extraction, and malformed markup that still parses |
+| `layout.rs` | `layout::hitung` builds a `taffy` 0.15.1 tree from the arena and computes boxes. Reads inline `style` only: `display`, `width`, `height`, `padding`, `margin`, `flex-direction`. Every declaration it cannot honour is recorded in `LaporanLayout::diabaikan` instead of being silently reinterpreted | 5 unit tests: stacked blocks, flex-row children laid side by side with equal gaps, `display:none` consuming no space, `height:2em` reported as ignored, and an empty document producing finite non-negative boxes |
+| `js.rs` | `Isolat` owns one `rquickjs` 0.14.0 runtime and context per tab, with a hard memory limit and stack limit, a narrow bridge (`console`, `window`, `document.title`) and no `require`, no filesystem, no network | 7 unit tests: expression evaluation, state persisting across calls, `console.log` capture, title bridge, `typeof require` = `undefined`, script errors surfaced rather than swallowed, and allocation above the memory limit failing |
+| `mod.rs` | `CELAH` is a `const` slice of the seven capabilities this foundation does **not** have, and a test fails if any of the four named ones is dropped from it | `native_foundations.rs`: `celah_dinyatakan_bukan_disembunyikan` |
+
+End-to-end, `crates/engine/tests/native_foundations.rs` proves the parts fit: a
+page is parsed, laid out, round-tripped through serialisation with **identical
+node counts and identical computed boxes**, and run in two separate isolates
+where a `var` set in one is `undefined` in the other. `cargo test -p engine`
+reports **69 passed, 0 failed** across three suites (62 lib, 2 `live_shell`,
+5 `native_foundations`), and `cargo clippy -p engine --all-targets --locked -D
+warnings` exits 0.
+
+Two findings came from the tests rather than from reading docs, and both are
+recorded because they would have become silent bugs:
+
+1. **`var` does not survive a nested `eval` in QuickJS.** The first version of
+   `Isolat::eval` wrapped the caller's source in `String(eval(...))` to get the
+   completion value. Measured with `rquickjs` 0.14: `eval('var x = 41')`
+   followed by `typeof x` returns `undefined`, so tab state would have vanished
+   between two evaluations while every individual call looked fine. The fix runs
+   the source as a program and coerces the result with `Coerced<String>`.
+2. **`drop_tanpa_stop_tetap_mematikan_group` was racy.** It asserted `ESRCH` from
+   `killpg` exactly once, microseconds after `drop`. A SIGKILLed grandchild stays
+   a zombie in the group until something reaps it, and a zombie still counts, so
+   the assertion failed once under the full suite and then passed five runs in a
+   row in isolation. The test now polls for the group to disappear within two
+   seconds. The gate is not loosened: the group still has to be gone.
+
+What this is **not**: it is not the PRD's engine. `CELAH` names the missing half
+in code, and the honest reading is that today the workspace can parse, lay out a
+box tree, and run sandboxed script, but cannot select by CSS selector, cascade a
+stylesheet, measure text, dispatch DOM events, rasterise a bitmap, or suspend a
+tab to `crates/store`. The tab pool, budget enforcement, and CDP surface remain
+unbuilt, so none of the v0.2 acceptance criteria that depend on them can be
+called met.
+
 ## Not built, not claimed
 
 Open items, each with the reason it is still open and what would close it.
 
 | Item | Why it is open | What would close it |
 |---|---|---|
+| Native engine half that is missing (PRD v0.2 milestone 1 part 2 and beyond) | Foundations landed: parse, box layout, sandboxed script. Not landed: CSS selectors, stylesheet cascade, property inheritance, text measurement, DOM events, raster, tab snapshot, tab pool, budget enforcement, CDP surface. The list is a `const` in code (`engine::native::CELAH`) so it cannot quietly shrink from a document edit | One entry removed from `CELAH` per capability, each with a test that fails before the capability exists, then the v0.2 acceptance criteria that depend on it |
 | `cloakbrowser` artifact path (the cookie handoff named in `crates/policy/src/challenge.rs:304`) | It was never part of the `chrome-full` adapter, and no test drives it. A path that reads another browser's cookie store has to be measured against a real challenge, not written against a guess. | A probe that takes a cookie jar produced by a real challenge and proves the cookie is usable through the daemon, with the file format locked by a test |
 | Leaked browsers from the live test suites | 36 orphaned `chrome-headless-shell` processes were found alive during this milestone, 4.9 GB RSS between them, from `sesi_live`, `m4_proof`, `diagnostik`, and `idle_proof`. The serialisation lock in `tests/common` limits how many start at once, it does not stop them surviving a killed run. **Partly closed:** `impl Drop for Proc` reaps the group on panic and on normal exit, and the five live suites now close their daemon with SIGTERM so `matikan_semua` runs, both measured as zero leftovers after a full `cargo xtask check`. Still open: a test binary that is itself SIGKILLed from outside runs no destructor, and nothing counts processes in `xtask check` yet. | A teardown that is verified after a test is killed mid-run, not only after it returns, plus a check in `xtask check` that the process count returns to its starting value |
 | `xtask e2e` | The command is referenced in the task list but does not exist yet | An `e2e` subcommand that runs the live suites in the same serialised way `cargo test` does |

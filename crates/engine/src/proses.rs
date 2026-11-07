@@ -174,6 +174,13 @@ mod tests {
     /// Jalur panic: tidak ada yang memanggil `stop()`, hanya `drop`. Group tetap
     /// harus hilang, karena itulah satu-satunya yang menjaga test gagal tidak
     /// mewariskan browser hidup ke run berikutnya.
+    ///
+    /// `killpg` tidak boleh diperiksa sekali saja. Anak yang dibunuh SIGKILL
+    /// menjadi zombie sampai ada yang mereapnya; zombie masih dihitung sebagai
+    /// anggota group, jadi `ESRCH` baru muncul beberapa milidetik kemudian.
+    /// Ditemukan sebagai kegagalan sekali di suite penuh lalu hijau lima kali
+    /// beruntun saat dijalankan sendiri, dan yang benar adalah menunggu
+    /// hilangnya group dalam batas waktu, bukan menghapus pemeriksaannya.
     #[test]
     fn drop_tanpa_stop_tetap_mematikan_group() {
         let mut cmd = Command::new("/bin/sh");
@@ -183,12 +190,19 @@ mod tests {
 
         drop(proc);
 
-        assert!(
-            matches!(
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if matches!(
                 killpg(Pid::from_raw(pgid), None),
                 Err(nix::errno::Errno::ESRCH)
-            ),
-            "group proses harus benar-benar hilang sesudah drop"
-        );
+            ) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "group proses masih hidup 2 detik sesudah drop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

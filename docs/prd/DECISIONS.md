@@ -12,6 +12,14 @@ policy is not recorded here.
 
 ## Decisions
 
+- [2026-11-07 21:02] Decision: the native engine parses into an arena, not the parser's `Rc<RefCell>`, and every known gap lives in a `const`
+  Status: Accepted
+  Approval: owner ("prdnya tuntaskan lalu eksekusi bro", plus "build nya di gh bukan di laptop")
+  Requirement IDs: FR-001 (HTML parsing into a queryable tree), FR-003 (layout), FR-002 (embedded JavaScript), FR-005 (tiered tabs, whose cold path needs a serialisable document)
+  Context: `markup5ever_rcdom` hands back `Rc<RefCell<Node>>`, which is convenient to parse into and useless downstream: it cannot be sent across threads, cannot be stored in `crates/store`, and cannot be compared for equality in a test. The cold-tab half of the memory design needs a document that can be written out and read back, because that is exactly what a suspended tab is.
+  Rationale: `Document::parse_html` converts the Rc tree once into `Vec<Node>` with `parent` and `children` indices. `NodeId` is then a plain `usize`, stable for as long as the document is not mutated, and `to_html` renders the tree back to parseable HTML. A round-trip test parses, serialises, reparses, and asserts that node counts, element counts, title, id lookups and the full computed layout are all identical. The alternative, keeping the Rc tree as the public type, would have pushed that conversion into the store layer where the constraint is invisible.
+  Impact: the gaps are a compile-time-visible list, `engine::native::CELAH`, and a test fails if any of the four named ones disappears from it. Today that list is: no CSS selectors, no stylesheet cascade, no property inheritance or non-px units, no text measurement, no DOM events, no rasterisation, no tab snapshot. A finished engine would have an empty list; this one does not, and the PRD must not describe it as finished.
+
 - [2026-11-07 20:29] Decision: the store backup unit is the `store.db` + `store.key` pair, and a restore drill is a dated artifact rather than a promise
   Status: Accepted
   Approval: owner ("Cek prd 4.4"), forced by prd-toolkit 4.4.0 gate `RESTORE_MISSING`

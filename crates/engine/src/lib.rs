@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod native;
 pub mod oxi;
 pub mod penuh;
 pub mod probe;
