@@ -7,7 +7,7 @@ total_milestones: 5
 type: "tool"
 tech_stack:
   - "Rust (workspace: engine, cdp, lifecycle, browserd, policy, control)"
-  - "Chromium headless_shell (engine chrome_shell), OxiBrowser 0.28.0 as a measured light engine (engine oxi), and full Chromium (chrome_full, not built yet)"
+  - "Chromium headless_shell (engine chrome_shell), OxiBrowser 0.28.0 as a measured light engine (engine oxi), and full Chromium running headed inside Xvfb (engine chrome_full, measured on the development laptop)"
   - "CDP (Chrome DevTools Protocol) as the only door to the engine"
   - "systemd user unit + tokio"
 created: "2026-11-04"
@@ -17,7 +17,7 @@ ai_instructions: "#builder-capability-routing-contract"
 
 # OpenCrabs Browser: a web-opening engine you can rely on
 
-> Status: **implementation**. Milestones 1, 3, 4 and 5 carry verified evidence; milestone 2 is still in progress. This document stays a specification, not permission to build.
+> Status: **implementation**. Milestones 1, 3, 4 and 5 carry verified evidence; milestone 2 is still in progress. Milestone 5 covers both engine adapters, `oxi` and `chrome-full`, each with its own measured capability probe. This document stays a specification, not permission to build.
 > What already exists in the repo (M0 to M5) is used as evidence of the starting
 > state, not as something considered done for the requirements below.
 
@@ -32,7 +32,7 @@ ai_instructions: "#builder-capability-routing-contract"
 | Users | The OpenCrabs agent (main user), the operator (Adi) who answers handoffs, and the builder who maintains the daemon. |
 | Scope and exclusions | Scope: universal perception (eyes) and action (hands), verification of every action, failure classification, evidence artifacts, tiered escalation, per-host engine selection, tab sessions that survive across tool calls, configuration that takes effect without a restart, and metrics. Excluded: non-Chromium engines as the render path (proven unworkable, see Research basis), a browser with a UI for humans, and fingerprint-level stealth (TLS/Canvas fingerprints) which needs its own decision. |
 | Decisions and assumptions | (1) The render engine stays Chromium; a light engine may only be the text path, never the screenshot path. (2) The number of record for tab counts is read from the engine (`/json/list`), not from a daemon counter. (3) The tab limit is a courtesy fence; the hard fence remains the memory budget plus reap. (4) Production port 9222 is never touched by this work. (5) Once `max_tabs` was enforced, the agent was in fact unaffected because the agent manager reuses one tab; that is what makes the session/lease requirement necessary. |
-| Research basis | Measured on the development laptop 2 to 3 Nov 2026: 6 empty tabs = 187 MB PSS, an empty engine = 26 MB; `--single-process` with 3 tabs = 522.8 MB versus 858.8 MB normally (39% saved, but one process dying = every tab dead); Firefox headless has no `/json/version` (404) and sits at 896 MB idle; Lightpanda is CDP-compatible but has zero layout (unstyled screenshots, `getBoundingClientRect()` throws, `querySelector('h1')` null). Also tested: `browser_click`/`browser_act` time out on the Google consent page, while `browser_eval` plus a JS `.click()` succeeds; the consent page uses custom elements so `querySelectorAll('[role="checkbox"]')` returns 0. What is **not** validated yet: the anti-bot detection rate on real hosts, and the behaviour of `chrome_full` inside xvfb (not built yet). |
+| Research basis | Measured on the development laptop 2 to 3 Nov 2026: 6 empty tabs = 187 MB PSS, an empty engine = 26 MB; `--single-process` with 3 tabs = 522.8 MB versus 858.8 MB normally (39% saved, but one process dying = every tab dead); Firefox headless has no `/json/version` (404) and sits at 896 MB idle; Lightpanda is CDP-compatible but has zero layout (unstyled screenshots, `getBoundingClientRect()` throws, `querySelector('h1')` null). Also tested: `browser_click`/`browser_act` time out on the Google consent page, while `browser_eval` plus a JS `.click()` succeeds; the consent page uses custom elements so `querySelectorAll('[role="checkbox"]')` returns 0. What is **not** validated yet: the anti-bot detection rate on real hosts. The behaviour of `chrome_full` inside xvfb was measured on 2026-11-07 (`docs/prd/BUKTI-FULL 071126-0734.md`): `navigator.webdriver` = `false`, layout, page script, cookies, and dispatched input all work, boot 3.2 to 11.8 s, about 1.5 GB RSS for one tab. |
 
 ### Layer 2: Machine Spec
 
@@ -55,7 +55,7 @@ question for the owner to answer before the next session starts.
 |---|---|---|---|
 | Anti-bot ceiling: try to pass challenges with proxies or fingerprinting, or detect and hand off to a human? | Detect and hand off as `butuh_manusia`; no bypass code is written | Trying to beat challenges turns this project into an anti-detection tool, and that is an ethical decision the owner has not made; detection plus handoff already covers the failures measured so far | One extra tier in the escalation chain plus one `policy` key, about a day of work; no AC changes |
 | Tabs per job: allow N parallel tabs, or hold one? | A lease with a per-session limit, enforced by `max_tabs` | Parallel work is already real (audit and publish side by side), and a lease is the only way `idle_reap` can tell a working tab from an orphan | `crates/lifecycle` lease type and AC-009 to AC-013, about two days |
-| `chrome_full` engine (xvfb, about 900 MB idle measured on Firefox) | Deferred; built only for hosts in `policy.stealth_hosts`, and only after FR-002 passes | It is not measured on this 7 GB laptop and it is not a precondition for any milestone that is already verified | One adapter in `crates/engine` plus a unit file, about two days; no existing AC changes |
+| `chrome_full` engine (xvfb, about 900 MB idle measured on Firefox) | Built and measured on 2026-11-07 after the owner asked for the `chrome-full` adapter: `crates/engine/src/penuh.rs` runs headed Chromium on an Xvfb display, and the probe records what it can do | It stayed deferred until then because it had never been measured on this 7 GB laptop. It is still not a default: `policy.stealth_hosts` is what routes a host to it, and a stealth host listed while the engine is missing is refused at start | `crates/policy` `TERUKUR_FULL`, the probe, and `penggerak_untuk("full")`; no existing AC changes |
 
 ### Requirements
 
@@ -231,7 +231,7 @@ Act on the current request: a PRD alone does not authorize building. At startup,
 | 2 | Diagnostics and escalation | Classification into 6 categories, a backoff chain capped at 2, host-to-engine routing, the `browser_open_failures_total` metric | Three local test pages produce three different categories with complete artifacts; the escalation of one network failure and one anti-bot failure is recorded (AC-001 to AC-004, AC-007, AC-008, AC-018) | 🔄 In Progress |
 | 3 | Session and engine resilience | Per-session leases, per-session tab limits, config reload through SIGHUP, memory budget plus recovery, handoffs with a TTL | A session's tab survives past `idle_reap`, `max_tabs` changes without a restart, a broken config does not lower the limit (AC-009 to AC-017, AC-020) | ✅ Verified |
 | 4 | Unified audit | Audit every FR/NFR/AC, run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo xtask check` | Every AC is either VERIFIED or UNVERIFIED with a reason; no claim without evidence (AC-019 is checked too) | ✅ Verified |
-| 5 | Light engine adapter (`oxi`) | `crates/engine/src/oxi.rs` plus the shared `Proc` in `crates/engine/src/proses.rs`, `penggerak_untuk("oxi")` in `slot.rs`, `discover_oxi()` in `probe.rs`, the capability probe in `crates/browserd/tests/oxi_probe.rs` and the live adapter test in `crates/browserd/tests/oxi_live.rs` | The probe records what the engine really does and `TERUKUR_OXI` claims only that: layout and cookies yes, page script and input dispatch no (`docs/prd/BUKTI-OXI 071126-0519.md`, CI run `42300230272`) | ✅ Verified |
+| 5 | **Engine adapters with a measured capability probe** | `crates/engine/src/oxi.rs` and `crates/engine/src/penuh.rs` behind the shared `Proc`, `penggerak_untuk` in `slot.rs`, `discover_oxi`/`discover_full`/`discover_xvfb` in `probe.rs`, the capability probes in `crates/browserd/tests/oxi_probe.rs` and `penuh_probe.rs`, and the live adapter test in `crates/browserd/tests/oxi_live.rs` | Both probes record what each engine really does and each capability table claims only that. `oxi`: layout and cookies yes, page script and input dispatch no (`docs/prd/BUKTI-OXI 071126-0519.md`, CI run `42300230272`). `chrome-full`: layout, page script, cookies and input all measured working, `navigator.webdriver` = `false` (`docs/prd/BUKTI-FULL 071126-0734.md`) | ✅ Verified |
 
 ### Authority Policy v1
 

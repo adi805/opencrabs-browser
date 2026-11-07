@@ -17,7 +17,9 @@ use anyhow::{Context, Result, bail};
 use axum::Router;
 use cdp::{EnginePool, ProxyState};
 use control::Registry;
-use engine::{Engine, Keadaan, Slot, discover_oxi, discover_shell, slot::penggerak_untuk};
+use engine::{
+    Engine, Keadaan, Slot, discover_full, discover_oxi, discover_shell, slot::penggerak_untuk,
+};
 use lifecycle::reaper::{ReapReason, ReapReport, ReaperConfig, idle_reap_due};
 use lifecycle::{Counters, Event, Gudang, Machine};
 use tokio::net::TcpListener;
@@ -1020,6 +1022,11 @@ fn pencarian_biner(kind: &str) -> Option<PathBuf> {
     match kind {
         "shell" => discover_shell(),
         "oxi" => discover_oxi(),
+        // Tiga ejaan, satu mesin. `policy::EngineKind::dari_nama` menerima
+        // ketiganya, jadi penemuan binernya pun harus menerima ketiganya:
+        // kalau tidak, operator yang menulis `engine = "full"` di config dapat
+        // "biner tidak ditemukan" padahal Chromium-nya terpasang.
+        "full" | "chrome-full" | "chrome_full" => discover_full(),
         _ => None,
     }
 }
@@ -1439,8 +1446,8 @@ user_data_dir = "/abs/sama"
     #[test]
     fn jenis_mesin_tidak_dikenal_ditolak_dengan_nama_mesin() {
         let text = r#"
-[engines.chrome_full]
-kind = "chrome-full"
+[engines.chrome_besar]
+kind = "chrome-besar"
 binary = "/abs/chrome"
 "#;
         let config: FileConfig = toml::from_str(text).expect("toml sah");
@@ -1449,7 +1456,7 @@ binary = "/abs/chrome"
         let err = Resolved::resolve(&args, &config).expect_err("harus ditolak");
         let pesan = err.to_string();
         assert!(
-            pesan.contains("chrome_full") && pesan.contains("chrome-full"),
+            pesan.contains("chrome_besar") && pesan.contains("chrome-besar"),
             "pesan harus menyebut mesin dan jenisnya, dapat: {pesan}"
         );
     }

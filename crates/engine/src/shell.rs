@@ -151,7 +151,11 @@ impl Engine for ShellEngine {
     }
 }
 
-fn wait_for_port_file(path: &Path, deadline: Instant, timeout_ms: u64) -> Result<u16, EngineError> {
+pub(crate) fn wait_for_port_file(
+    path: &Path,
+    deadline: Instant,
+    timeout_ms: u64,
+) -> Result<u16, EngineError> {
     loop {
         if let Ok(text) = std::fs::read_to_string(path)
             && let Some(port) = parse_devtools_port(&text)

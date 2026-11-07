@@ -12,6 +12,23 @@ policy is not recorded here.
 
 ## Decisions
 
+- [2026-11-07 07:34] Decision: the `chrome-full` adapter runs a real browser and patches nothing
+  Status: Accepted
+  Approval: owner ("Mulai milestone 6 chrome-full")
+  Requirement IDs: FR-004 (routing to an engine by host rule)
+  Context: the cheap way to make `navigator.webdriver` false is
+    `--disable-blink-features=AutomationControlled` plus a list of spoofed
+    properties. Every one of those flags changes engine behaviour for a claim
+    nobody here has measured.
+  Rationale: running Chromium headed on an Xvfb display already gives
+    `navigator.webdriver` = `false` and a desktop user agent, measured by
+    `crates/browserd/tests/penuh_probe.rs`. Fingerprint patching buys an
+    unmeasured advantage at the cost of a browser that no longer behaves like
+    the browser it claims to be.
+  Impact: `PENUH_FLAGS` in `crates/engine/src/penuh.rs` contains no
+    automation-hiding flag. If one is ever needed, it arrives with a measurement
+    that shows what it changes, not with a story about detection.
+
 - [2026-11-04 07:0x] Decision: the primary goal is eyes and hands in the browser
   Status: Accepted
   Approval: owner (translated from the Indonesian original: "You have hands, eyes, like that, in everything in this browser you can see and click everything")

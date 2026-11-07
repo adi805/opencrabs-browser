@@ -14,15 +14,17 @@
 #![forbid(unsafe_code)]
 
 pub mod oxi;
+pub mod penuh;
 pub mod probe;
 pub(crate) mod proses;
 pub mod shell;
 pub mod slot;
 
 pub use oxi::OxiEngine;
-pub use probe::{discover_oxi, discover_shell};
+pub use penuh::PenuhEngine;
+pub use probe::{discover_full, discover_oxi, discover_shell, discover_xvfb};
 pub use shell::ShellEngine;
-pub use slot::{Keadaan, Penggerak, PenggerakOxi, PenggerakShell, Slot, SlotError};
+pub use slot::{Keadaan, Penggerak, PenggerakOxi, PenggerakPenuh, PenggerakShell, Slot, SlotError};
 
 use std::path::PathBuf;
 
@@ -81,6 +83,15 @@ pub struct EngineInfo {
 pub enum EngineError {
     #[error("biner engine tidak ditemukan: {0}")]
     BinaryMissing(PathBuf),
+
+    #[error("Xvfb tidak ada; chrome-full butuh display X virtual")]
+    XvfbMissing,
+
+    #[error("Xvfb tidak siap dalam {0} ms")]
+    XvfbTimeout(u64),
+
+    #[error("tidak ada nomor display X yang bebas antara :{0} dan :{1}")]
+    DisplayPenuh(u32, u32),
 
     #[error("mesin tidak melaporkan port debug dalam {0} ms")]
     PortFileTimeout(u64),

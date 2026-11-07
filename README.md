@@ -39,7 +39,7 @@ One rule makes all of this worth something: **message contents are never rewritt
 |---|---|---|
 | `browserd` | binary, CLI, HTTP + WebSocket daemon | working |
 | `cdp` | framing, ids, pass-through, discovery, `/json/*` | working |
-| `engine` | `Engine` trait, shell adapter, probe, kill the whole process group | working |
+| `engine` | `Engine` trait, `shell`, `oxi` and `full` (headed Chromium inside Xvfb) adapters, probe, kill the whole process group | working |
 | `lifecycle` | when tabs and processes die, PSS ratchet | M1 |
 | `store` | sessions, profiles, encrypted cookies | M2 |
 | `policy` | engine selection, challenge page detection | M3 |
@@ -124,6 +124,11 @@ user_data_dir = "~/.cache/opencrabs-browser/dua-profile"
 ```
 
 The older shape of `[engines.chrome_shell]` without `[[engines]]` still works: the only thing that changed is how many engines may live inside it.
+
+`kind` decides which adapter boots the entry: `shell` for
+`chrome-headless-shell`, `oxi` for OxiBrowser, and `full` for a real Chromium on
+a virtual X display. An entry without `kind` is a shell, which is what the older
+config shape meant.
 
 What changes on the client side, and this is all: **target ids are prefixed with the engine id.** A client talking to the daemon sees the tab as `chrome_shell~A1B2…`, and `/json/close/chrome_shell~A1B2…` closes that tab on the correct engine. Other fields are untouched, `sessionId` is translated into the client's own id space so that two engines which happen to use the same value do not overwrite each other, and the websocket URL always points at the daemon, never at an engine port.
 
@@ -276,8 +281,7 @@ Limits that stay honest:
 | `0.1.0` (current) | store: profiles, cookies that survive a restart | M2 |
 | `0.1.0` (current) | policy, challenge detection, OTP handoff | M3 |
 | `0.1.0` (current) | CDP multiplex: several engines in one daemon | M4 |
-| `0.1.0` (current) | `oxi` adapter plus a measured capability probe | M5 |
-| not yet tagged | `chrome-full` + xvfb + `cloakbrowser` artifact path | M6 |
+| `0.1.0` (current) | `oxi` and `chrome-full` engine adapters, each with a measured capability probe | M5 |
 
 The `oxi` row is honest about what OxiBrowser turned out to be. The adapter is
 wired (`kind = "oxi"` boots the engine, shared process-group stop,
@@ -292,7 +296,21 @@ this engine. The full table and raw output live in
 compile, so it happens in `.github/workflows/oxi-probe.yml`, never on the
 machine the product runs on.
 
-The milestone numbers in this table follow `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex). The `0.1.0` version in `Cargo.toml` has not been bumped since M0: what grows is the contents, not the number. **There is no tag yet**, because a repository that carries a `0.1.0` tag while people still cannot use it is a fake release.
+The `chrome-full` row is measured the same way, on the machine the product runs
+on, because that engine needs a full Chromium and an X server. The adapter
+(`crates/engine/src/penuh.rs`) starts Xvfb with `-nolisten tcp` and runs
+`google-chrome` headed on that display, with a test that refuses any `--headless`
+in the argument list: with that flag the engine is a shell with extra steps and
+the reason it exists is gone. `crates/browserd/tests/penuh_probe.rs` measured
+the result on 2026-11-07: `navigator.webdriver` is the boolean `false`, the
+fixture loads, the page's own script runs, cookies round-trip, and a dispatched
+mouse event changes the DOM, with boot at 3.2 to 11.8 seconds and about 1.5 GB
+RSS for one tab. `TERUKUR_FULL` in `crates/policy` claims exactly that and
+nothing more; the table and raw output live in `docs/prd/BUKTI-FULL
+071126-0734.md`. The `cloakbrowser` artifact path that was listed next to it in
+an earlier draft is still open and is not claimed anywhere.
+
+The milestone numbers in this table follow `04-OPERASIONAL-ROADMAP` (M0 skeleton, M1 lifecycle, M2 store, M3 policy, M4 multiplex), and M5 is the single PRD milestone that carries both extra engine adapters. The `0.1.0` version in `Cargo.toml` has not been bumped since M0: what grows is the contents, not the number. **There is no tag yet**, because a repository that carries a `0.1.0` tag while people still cannot use it is a fake release.
 
 ## Policy
 

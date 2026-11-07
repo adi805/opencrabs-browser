@@ -70,6 +70,97 @@ fn oxi_di_home(home: &Path) -> Option<PathBuf> {
     kandidat.into_iter().find(|path| bisa_dijalankan(path))
 }
 
+/// Variabel lingkungan untuk menunjuk biner Chromium penuh secara eksplisit.
+///
+/// Alasannya sama dengan [`OXI_ENV`]: di host yang binernya tidak ada di `$PATH`
+/// (atau ada dua versi dan yang benar bukan yang pertama ketemu), menebak
+/// lokasi hanya menambah satu cara untuk salah.
+pub const CHROME_FULL_ENV: &str = "CHROME_FULL_BIN";
+
+/// Nama biner Chromium penuh, dari yang paling sering dipakai ke yang paling
+/// jarang. Urutannya berarti: `google-chrome` menang atas `chromium` kalau dua-
+/// duanya terpasang, karena itulah yang dipakai host ini dan yang paling stabil
+/// di antara keduanya.
+pub const NAMA_CHROME_PENUH: &[&str] = &[
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+];
+
+/// Direktori yang diperiksa kalau `$PATH` tidak memuat biner Chromium penuh.
+pub const CHROME_PENUH_DIR: &[&str] = &[
+    "/usr/bin",
+    "/usr/local/bin",
+    "/snap/bin",
+    "/opt/google/chrome",
+];
+
+/// Variabel lingkungan untuk menunjuk biner Xvfb.
+pub const XVFB_ENV: &str = "XVFB_BIN";
+
+/// Lokasi Xvfb yang lazim. `$PATH` diperiksa lebih dulu, daftar ini cadangan.
+pub const XVFB_KANDIDAT: &[&str] = &["/usr/bin/Xvfb", "/usr/local/bin/Xvfb"];
+
+/// Chromium penuh yang terpasang di mesin ini, kalau ada.
+///
+/// Yang diperiksa hanya berkas yang bisa dieksekusi, sama seperti
+/// [`discover_oxi`]: menjalankan `--version` untuk memastikan berarti menyalakan
+/// proses hanya demi sebuah kecurigaan.
+#[must_use]
+pub fn discover_full() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os(CHROME_FULL_ENV) {
+        let path = PathBuf::from(explicit);
+        return bisa_dijalankan(&path).then_some(path);
+    }
+    if let Some(path) = NAMA_CHROME_PENUH
+        .iter()
+        .find_map(|nama| di_path(nama).filter(|path| bisa_dijalankan(path)))
+    {
+        return Some(path);
+    }
+    penuh_dalam(&CHROME_PENUH_DIR.iter().map(Path::new).collect::<Vec<_>>())
+}
+
+/// Pencarian di dalam daftar direktori. Dipisah supaya bisa diuji tanpa
+/// menyentuh `$PATH` maupun `$CHROME_FULL_BIN` milik proses uji.
+fn penuh_dalam(dirs: &[&Path]) -> Option<PathBuf> {
+    dirs.iter().find_map(|dir| {
+        NAMA_CHROME_PENUH
+            .iter()
+            .map(|nama| dir.join(nama))
+            .find(|path| bisa_dijalankan(path))
+    })
+}
+
+/// Server display X virtual yang terpasang, kalau ada.
+///
+/// Tanpa Xvfb, `chrome-full` tidak punya tempat untuk menggambar window-nya,
+/// dan adapter-nya berhenti dengan [`crate::EngineError::XvfbMissing`] alih-alih
+/// mencoba `--headless` diam-diam.
+#[must_use]
+pub fn discover_xvfb() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os(XVFB_ENV) {
+        let path = PathBuf::from(explicit);
+        return bisa_dijalankan(&path).then_some(path);
+    }
+    di_path("Xvfb").or_else(|| {
+        XVFB_KANDIDAT
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| bisa_dijalankan(path))
+    })
+}
+
+/// Satu nama biner di dalam `$PATH`.
+fn di_path(nama: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(nama))
+        .find(|kandidat| bisa_dijalankan(kandidat))
+}
+
 fn bisa_dijalankan(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
@@ -95,6 +186,56 @@ mod tests {
             .join(SHELL_SUFFIX);
         fs::create_dir_all(bin.parent().expect("punya induk")).expect("folder build");
         fs::write(&bin, b"#!/bin/sh\n").expect("biner palsu bisa ditulis");
+    }
+
+    fn biner_palsu(dir: &Path, nama: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(nama);
+        fs::create_dir_all(dir).expect("folder");
+        fs::write(&path, b"#!/bin/sh\n").expect("tulis");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    #[test]
+    fn chrome_full_ditemukan_di_direktori_kandidat() {
+        let dir = temp_base("full");
+        let bin = biner_palsu(&dir, "google-chrome");
+        assert_eq!(penuh_dalam(&[dir.as_path()]), Some(bin));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Dua biner terpasang berarti satu harus menang, dan pilihannya tidak boleh
+    /// bergantung pada urutan `read_dir`. `google-chrome` yang dipakai host ini,
+    /// jadi dia yang menang.
+    #[test]
+    fn google_chrome_menang_atas_chromium() {
+        let dir = temp_base("urutan-full");
+        let chrome = biner_palsu(&dir, "google-chrome");
+        biner_palsu(&dir, "chromium");
+        assert_eq!(penuh_dalam(&[dir.as_path()]), Some(chrome));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn direktori_tanpa_chrome_dilewati() {
+        let kosong = temp_base("kosong-full");
+        let isi = temp_base("isi-full");
+        let bin = biner_palsu(&isi, "chromium");
+        assert_eq!(penuh_dalam(&[kosong.as_path(), isi.as_path()]), Some(bin));
+        fs::remove_dir_all(&kosong).ok();
+        fs::remove_dir_all(&isi).ok();
+    }
+
+    #[test]
+    fn chrome_tanpa_bit_eksekusi_bukan_kandidat() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_base("full-noexec");
+        let path = dir.join("google-chrome");
+        fs::write(&path, b"bukan-biner").expect("tulis");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert_eq!(penuh_dalam(&[dir.as_path()]), None);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

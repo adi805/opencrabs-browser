@@ -5,7 +5,7 @@ prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
 status: in-progress
 current_milestone: 5
 total_milestones: 5
-last_updated: "2026-11-07 05:21"
+last_updated: "2026-11-07 07:40"
 ---
 
 # OpenCrabs Browser Progress
@@ -20,8 +20,8 @@ One read must be enough to continue without asking the owner anything.
 
 | Field | Value |
 |---|---|
-| Active milestone | 6 (`chrome-full` + xvfb + the `cloakbrowser` artifact path); milestones 1 to 5 are Done |
-| Next exact command | `cargo xtask doctor` |
+| Active milestone | None open. All five PRD milestones are Done (milestone 5 covers both engine adapters). The next unit of work is the owner's call, with the open backlog listed under "Not built, not claimed" below |
+| Next exact command | `cargo xtask check` |
 | Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
 | Last passing check | `cargo xtask check` at `193abc4e` plus the edits in this commit: `fmt ok`, `clippy ok`, `test ok`, exit 0 (2026-11-06) |
@@ -33,9 +33,9 @@ One read must be enough to continue without asking the owner anything.
 - Execution mode: native (no build has been requested for new requirements)
 - Active milestone / next action: milestones 1 to 5 are **Done** (eyes and
   hands, failure classification + diagnostics, session and engine resilience,
-  unified audit, and the `oxi` adapter with a measured capability probe). Next is
-  milestone 6 (`chrome-full` + xvfb + the `cloakbrowser` artifact path). Audit of
-  26 AC: **26 VERIFIED, 0 UNVERIFIED**, full gate green.
+  unified audit, and both engine adapters, `oxi` and `chrome-full`, each with a
+  measured capability probe). Audit of 26 AC: **26 VERIFIED, 0 UNVERIFIED**,
+  full gate green.
   The two ACs that used to wait for automatic proof are closed: AC-007 (host
   routing to an engine) through an integration test, AC-019 (production port
   9222 isolation) through a Rust test that starts a real engine on a random
@@ -52,6 +52,7 @@ One read must be enough to continue without asking the owner anything.
 | 2 | §4 #2 Diagnostics + escalation | ✅ Done | `klasifikasi.rs` (6 categories, mandatory evidence, 12 tests), `artefak.rs` (4 files + quota, 6 tests), `eskalasi.rs` (wait -> retry with backoff max 2 -> switch engine -> handoff, 10 tests), host-to-engine routing + `validasi()` of rules at start, metric `browser_open_failures_total{kategori}`. `crates/browserd/tests/diagnostik.rs` proves it on a real engine: normal -> `Terbuka`/200, 403 flagged as a challenge -> `BlokAntiBot`, 2FA -> `ButuhManusia`, dead port -> `Jaringan`. `cargo test -p browserd --test diagnostik` = 1 passed |
 | 3 | §4 #3 Session + engine resilience | ✅ Done | `lifecycle::lease` (per-session lease store, zero TTL refused, the limit counted from leases still alive, 11 tests), `browserd::reload` (SIGHUP swaps the `max_tabs` map without a restart; a broken config keeps the old limit, 4 tests), `browserd::anggaran` (per-engine PSS supervisor, recovery promised under 30 seconds and 31 seconds counted as late, 8 tests), `cdp` fail-closed for unknown engines + fail-open for metrics that cannot be read. Live evidence in `crates/browserd/tests/sesi_live.rs` (4 tests): an answered handoff continues the same tab (`window.__sesi` survives), a cancelled handoff releases the tab, SIGHUP changes `max_tabs` 3 -> 1 -> 4 with the pid unchanged, a broken config during reload keeps the old limit. A handoff carries a title, a PNG under `<store_db>/handoff/`, and the `#challenge-form` selector |
 | 4 | §4 #4 Unified audit | ✅ Done | Audit of 26 AC in `docs/prd/AUDIT-AC 041126-1718.md`: 24 VERIFIED, 2 UNVERIFIED (AC-007 routing per host, AC-019 production port isolation), both with reasons. Those two were closed in the following round, so it is now 26 VERIFIED, 0 UNVERIFIED. One defect was found and fixed (`9ba1129`): the `--port` default of `browserd` pointed at 9222, the production browser port. Gate in the same tree as code `9ba1129`: fmt rc 0, clippy rc 0 with no warnings, `cargo test --workspace --no-fail-fast` 32 suites ok / 427 passed / 0 failed rc 0, `cargo xtask check` rc 0 |
+| 5 | §4 #5 Engine adapters with a measured capability probe | ✅ Done | `crates/engine/src/oxi.rs` behind the shared `Proc`, `penggerak_untuk("oxi")`, and `discover_oxi()`. CI run `42300230272` on commit `0315c95` measured the engine instead of trusting its README: DOM, `Runtime.evaluate`, cookies, and a real PNG came back ok, while page script and input dispatch failed, so `TERUKUR_OXI` keeps `script: false` and `input: false` (`docs/prd/BUKTI-OXI 071126-0519.md`). `crates/engine/src/penuh.rs` runs `google-chrome` headed on an Xvfb display (`-nolisten tcp`, two `Proc`s, a test that refuses any `--headless` in the argument list), `penggerak_untuk("full")` and discovery know it, and `crates/browserd/tests/penuh_probe.rs` measured it on the development laptop: `navigator.webdriver` = `false`, layout, page script, cookies, and dispatched input all ok, boot 3.2 to 11.8 s, about 1.5 GB RSS across 15 to 18 processes. `TERUKUR_FULL` now claims exactly those four (`docs/prd/BUKTI-FULL 071126-0734.md`) |
 
 ## Resume And Changes
 
@@ -428,6 +429,65 @@ One read must be enough to continue without asking the owner anything.
   (`crates/browserd/tests/oxi_live.rs`), the second ending with a process group
   that is gone, checked by `killpg(pgid, None) == ESRCH` instead of a flag we
   set ourselves.
+
+### Milestone 5, second half: `chrome-full` inside xvfb
+
+- This half was deferred in the PRD for one reason: a full browser was said
+  to be "not measured on this 7 GB laptop", and building it on an unmeasured
+  machine is how you end up with an engine nobody can run. The owner asked for
+  it on 2026-11-07, and the measurement came first, not the claim.
+- `crates/engine/src/penuh.rs` is two processes with one life. Xvfb is started
+  with `-nolisten tcp -noreset` on the first display whose socket **and** lock
+  are both free, then `google-chrome` is started with `DISPLAY` pointing at it.
+  Both go through the shared `Proc`, so the stop path is the same SIGTERM ->
+  5 second grace -> SIGKILL to the whole process group that every other engine
+  uses. If either step fails, everything already alive is killed before the
+  error is returned: an Xvfb left behind by a failed boot holds a display and its
+  memory until the next reboot and never shows up in a log.
+- The one flag that must never appear is `--headless`, and that is enforced by a
+  test rather than by care: with it, the engine is a `chrome-headless-shell`
+  with extra steps and the entire reason this adapter exists disappears. The same
+  file locks two other facts: `-nolisten tcp` (an X server listening on TCP is an
+  open door) and that caller-supplied arguments are appended last so they can
+  override a default.
+- `crates/engine/src/probe.rs` gained `discover_full()` and `discover_xvfb()`,
+  both reading an override (`CHROME_FULL_BIN`, `XVFB_BIN`) before the usual
+  paths. `penggerak_untuk("full")` in `slot.rs` and `pencarian_biner` in
+  `daemon.rs` route the kind to the adapter, so `kind = "full"` in a config or
+  `--engine full` on the CLI boots this engine and not a shell with a different
+  name.
+- The measurement is `crates/browserd/tests/penuh_probe.rs`, and it exists to
+  answer one question the PRD could not: does a real browser on a virtual
+  display actually behave differently, or is that a story? It does.
+  `navigator.webdriver` is the boolean `false` here, where the shell reports
+  `true`. Beyond that: the fixture loads over HTTP, the title and an element box
+  (1200x600) are read, the screenshot is a real PNG of 12820 base64 characters,
+  the page's own script runs (`dataset.skrip` = `ya`), a cookie survives a write
+  and read, and a dispatched mouse event changes the DOM. The probe also proves
+  teardown: after `stop()` the engine is gone and the X display is gone.
+- Boot time on this host measured 3.2 to 11.8 seconds and about 1.5 GB RSS across
+  15 to 18 processes. One run crossed the 30 second ready timeout, and the cause
+  was not the adapter: 36 browser instances leaked by earlier test suites
+  (`sesi_live`, `m4_proof`, `diagnostik`, `idle_proof`) were still alive,
+  reparented to `systemd --user`, holding 4.9 GB between them. Killing them
+  brought boot back to 3.2 seconds. The probe now waits 60 seconds instead of 30,
+  and the number it reports is still the measured time, not the ceiling.
+- `TERUKUR_FULL` in `crates/policy/src/select.rs` now says `true` for `layout`,
+  `script`, `cookies`, and `input`, and the doc comment on it names the probe and
+  the evidence file. Nothing beyond that table is claimed: the anti-bot detection
+  rate on a real host, memory with six tabs, and stability over hours were not
+  measured here, so they are not in any document as facts.
+
+## Not built, not claimed
+
+Open items, each with the reason it is still open and what would close it.
+
+| Item | Why it is open | What would close it |
+|---|---|---|
+| `cloakbrowser` artifact path (the cookie handoff named in `crates/policy/src/challenge.rs:304`) | It was never part of the `chrome-full` adapter, and no test drives it. A path that reads another browser's cookie store has to be measured against a real challenge, not written against a guess. | A probe that takes a cookie jar produced by a real challenge and proves the cookie is usable through the daemon, with the file format locked by a test |
+| Leaked browsers from the live test suites | 36 orphaned `chrome-headless-shell` processes were found alive during this milestone, 4.9 GB RSS between them, from `sesi_live`, `m4_proof`, `diagnostik`, and `idle_proof`. The serialisation lock in `tests/common` limits how many start at once, it does not stop them surviving a killed run. | A teardown that is verified after a test is killed mid-run, not only after it returns, plus a check in `xtask check` that the process count returns to its starting value |
+| `xtask e2e` | The command is referenced in the task list but does not exist yet | An `e2e` subcommand that runs the live suites in the same serialised way `cargo test` does |
+| Permanent deletion of `adi805/opencrabs-web` | Outside this repo, and it needs a token scope the host does not have | `gh auth refresh -s delete_repo`, then the delete, with the local backup at `~/oc-archive/opencrabs-web.git` (HEAD `2f22714`) kept until one clone from it succeeds |
 
 ## AI Agent Rules
 

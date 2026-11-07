@@ -169,14 +169,30 @@ pub const TERUKUR_SHELL: Capabilities = Capabilities {
     input: true,
 };
 
-/// Kemampuan Chromium penuh. **Belum pernah diukur di repo ini**, dan adapter
-/// `chrome-full` belum ada. Semua `false` sampai ada bukti, bukan karena
-/// diragukan.
+/// Kemampuan Chromium penuh yang **sudah diukur** oleh
+/// `crates/browserd/tests/penuh_probe.rs`.
+///
+/// Bukti: probe menyalakan `google-chrome` **headed** di atas Xvfb, membuka
+/// halaman fixture lewat jaringan, lalu membaca empat kemampuan itu dari
+/// halaman yang sama. Yang terukur: `navigator.webdriver` bernilai boolean
+/// `false` (bukan string kosong), judul halaman dan kotak elemen 1200x600
+/// terbaca, screenshot keluar sebagai PNG sah, skrip milik halaman jalan
+/// (`document.body.dataset.skrip` = `ya`), cookie yang ditulis lewat
+/// `Network.setCookie` terbaca lagi dengan nilai sama, dan klik lewat
+/// `Input.dispatchMouseEvent` benar-benar mengubah DOM.
+///
+/// Angka dari laptop pengembangan (2026-11-07): boot 3,2 sampai 11,8 detik,
+/// 1,5 sampai 1,7 GB RSS di 15 sampai 18 proses. Tabel dan keluaran mentah:
+/// `docs/prd/BUKTI-FULL 071126-0734.md`.
+///
+/// Yang **tidak** diukur di sini, dan karena itu tidak diklaim: tingkat deteksi
+/// anti-bot di host nyata, dan apakah `webdriver` = `false` cukup untuk lolos
+/// dari satu pun tantangan.
 pub const TERUKUR_FULL: Capabilities = Capabilities {
-    layout: false,
-    script: false,
-    cookies: false,
-    input: false,
+    layout: true,
+    script: true,
+    cookies: true,
+    input: true,
 };
 
 /// Kemampuan `oxibrowser` 0.28.0 yang **sudah diukur** oleh

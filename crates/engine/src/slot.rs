@@ -24,7 +24,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{Engine, EngineError, EngineInfo, LaunchSpec, OxiEngine, ShellEngine};
+use crate::{Engine, EngineError, EngineInfo, LaunchSpec, OxiEngine, PenuhEngine, ShellEngine};
 
 /// Kegagalan yang datang dari satu slot, bukan dari protokol.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +57,14 @@ pub struct PenggerakShell;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PenggerakOxi;
 
+/// Penggerak sungguhan: Chromium penuh di dalam Xvfb lewat [`PenuhEngine`].
+///
+/// Bedanya dengan [`PenggerakShell`] bukan sekadar flag: mesin ini browser
+/// **headed** yang menggambar ke display virtual, dan itu yang membuatnya
+/// dipilih untuk host di `policy.stealth_hosts`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PenggerakPenuh;
+
 /// Detik epoch sekarang.
 ///
 /// Satu-satunya tempat jam sistem dibaca. Logika [`Slot`] menerima waktu sebagai
@@ -75,6 +83,13 @@ pub fn ms_sekarang() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+impl Penggerak for PenggerakPenuh {
+    fn nyalakan(&self, spec: &LaunchSpec, timeout_ms: u64) -> Result<Arc<dyn Engine>, EngineError> {
+        PenuhEngine::launch(spec.clone(), timeout_ms)
+            .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
+    }
 }
 
 impl Penggerak for PenggerakShell {
@@ -101,6 +116,11 @@ pub fn penggerak_untuk(kind: &str) -> Option<Arc<dyn Penggerak>> {
     match kind {
         "shell" => Some(Arc::new(PenggerakShell)),
         "oxi" => Some(Arc::new(PenggerakOxi)),
+        // Tiga ejaan untuk satu mesin: `full`, `chrome-full`, dan `chrome_full`
+        // semuanya diterima `policy::EngineKind::dari_nama`. Satu ejaan yang
+        // lupa dipetakan di sini berubah jadi "mesin tidak dikenal" begitu
+        // operator memilihnya dari config.
+        "full" | "chrome-full" | "chrome_full" => Some(Arc::new(PenggerakPenuh)),
         _ => None,
     }
 }
