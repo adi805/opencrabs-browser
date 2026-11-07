@@ -5,7 +5,7 @@ prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
 status: in-progress
 current_milestone: 5
 total_milestones: 5
-last_updated: "2026-11-07 07:40"
+last_updated: "2026-11-07 20:29"
 ---
 
 # OpenCrabs Browser Progress
@@ -26,7 +26,7 @@ One read must be enough to continue without asking the owner anything.
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
 | Last passing check | `cargo xtask check` at `3c1d5cf` plus the PRD v0.2 senior contracts in this commit: `fmt ok`, `clippy ok`, `test ok`, exit 0, log at `/tmp/oc-browser-gate.log` (2026-11-07) |
 | Memory budget status | **Per-tab cost TERUKUR: 3.10 MB PSS marginal, flat from tab 2 to tab 99** (harness `~/.opencrabs/projects/browser-audit/ukur-memori`, `HASIL.txt`). 99 live tabs = 308.9 MB = 3.1x the ceiling, so the 100 MB target needs tiering. Revised design: 25 hot tabs (77.5 MB) plus a 20 MB engine baseline = 97.5 MB projected. The 20 MB baseline and the cold-tab metadata are still assumptions until milestone 1 measures them |
-| Open blockers | None inside this repo. PRD v0.2 is drafted and validated with 0 blockers and 10 senior contracts (`docs/prd/PRD-MESIN-RUST 071126-1413.md`). Permanent deletion of `adi805/opencrabs-web` is outside this repo and still waits on `gh auth refresh -s delete_repo` |
+| Open blockers | None inside this repo. PRD v0.2 is drafted and validated against prd-toolkit 4.4.0 with 0 blockers and 10 senior contracts (`docs/prd/PRD-MESIN-RUST 071126-1413.md`); the tenth is `Backup & Restore Drill Contract`, and the drill behind it ran on 2026-11-07 (`docs/prd/BUKTI-RESTORE 071126-2025.md`). Permanent deletion of `adi805/opencrabs-web` is outside this repo and still waits on `gh auth refresh -s delete_repo` |
 
 ## Current State
 
@@ -512,6 +512,7 @@ Open items, each with the reason it is still open and what would close it.
 | `cloakbrowser` artifact path (the cookie handoff named in `crates/policy/src/challenge.rs:304`) | It was never part of the `chrome-full` adapter, and no test drives it. A path that reads another browser's cookie store has to be measured against a real challenge, not written against a guess. | A probe that takes a cookie jar produced by a real challenge and proves the cookie is usable through the daemon, with the file format locked by a test |
 | Leaked browsers from the live test suites | 36 orphaned `chrome-headless-shell` processes were found alive during this milestone, 4.9 GB RSS between them, from `sesi_live`, `m4_proof`, `diagnostik`, and `idle_proof`. The serialisation lock in `tests/common` limits how many start at once, it does not stop them surviving a killed run. **Partly closed:** `impl Drop for Proc` reaps the group on panic and on normal exit, and the five live suites now close their daemon with SIGTERM so `matikan_semua` runs, both measured as zero leftovers after a full `cargo xtask check`. Still open: a test binary that is itself SIGKILLed from outside runs no destructor, and nothing counts processes in `xtask check` yet. | A teardown that is verified after a test is killed mid-run, not only after it returns, plus a check in `xtask check` that the process count returns to its starting value |
 | `xtask e2e` | The command is referenced in the task list but does not exist yet | An `e2e` subcommand that runs the live suites in the same serialised way `cargo test` does |
+| Off-host backup destination for `store.db` + `store.key` | The 2026-11-07 drill restored a copy in a temporary directory on the same host, which proves the restore path and proves nothing about surviving a dead laptop. No `rsync` target is provisioned | One snapshot pushed to a second host, then that snapshot restored on the second host and opened by `browserd cookies ls` with a non-zero cookie count |
 | Permanent deletion of `adi805/opencrabs-web` | Outside this repo, and it needs a token scope the host does not have | `gh auth refresh -s delete_repo`, then the delete, with the local backup at `~/oc-archive/opencrabs-web.git` (HEAD `2f22714`) kept until one clone from it succeeds |
 
 ## AI Agent Rules

@@ -12,6 +12,30 @@ policy is not recorded here.
 
 ## Decisions
 
+- [2026-11-07 20:29] Decision: the store backup unit is the `store.db` + `store.key` pair, and a restore drill is a dated artifact rather than a promise
+  Status: Accepted
+  Approval: owner ("Cek prd 4.4"), forced by prd-toolkit 4.4.0 gate `RESTORE_MISSING`
+  Requirement IDs: AC-011 (cold tab reloads from SQLite), AC-014 (SIGTERM flushes the store cleanly)
+  Context: prd-toolkit 4.4.0 (committed 2026-11-07 20:19 WIB) added a tenth senior gate,
+    `Backup & Restore Drill Contract`, so the v0.2 PRD stopped passing validation with
+    one blocker, `RESTORE_MISSING`. The cheap way out was to answer Backup scope with
+    "N/A" and let the gate skip the remaining fields, which the toolkit allows for a
+    product that persists nothing. This one does persist something: cookie values
+    encrypted under `store.key`, and a restored database without that key opens and
+    then reports zero cookies.
+  Rationale: the contract names both files as one unit, states that the copy must live
+    off the host, and carries a drill that actually ran on 2026-11-07: copy, restore
+    into a clean directory, `sha256sum` parity (`5e4f31eb`), the restored store opened
+    by `browserd cookies ls` at exit 0, per-table counts equal between source and
+    restore, plus `cargo test -p store --lib` reporting 43 passed including
+    `cookie_bertahan_setelah_store_dibuka_ulang`. Its limitation is written in the same
+    cell instead of hidden: the live store held zero cookie rows, so recovery of a real
+    profile's cookies stays unproven until a profile exists to recover.
+  Impact: PRD v0.2 carries the tenth senior contract and validates at 0 blockers against
+    prd-toolkit 4.4.0. The drill log is `docs/prd/BUKTI-RESTORE 071126-2025.md`. The
+    remaining gap is now stated in three places rather than inferred: no off-host backup
+    target exists, and nothing copies to one automatically.
+
 - [2026-11-07 07:34] Decision: the `chrome-full` adapter runs a real browser and patches nothing
   Status: Accepted
   Approval: owner ("Mulai milestone 6 chrome-full")

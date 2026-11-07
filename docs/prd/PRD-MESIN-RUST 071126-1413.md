@@ -376,6 +376,21 @@ Pause only for a blocking decision, material scope change, or a genuine new auth
 | Handover acceptance criteria | `cargo xtask check` exits 0 on the receiving machine, and the daemon the new owner starts answers 200 on GET /json/version |
 | Post-handover support window | 30 days after transfer, during which the previous owner answers questions but makes no code changes |
 
+### Backup & Restore Drill Contract
+
+| Field | Value |
+|---|---|
+| Backup scope | `store.db` (SQLite: `profile`, `session`, `cookie`, `otp_event`, `captcha_event`, `engine_run`) plus `store.key`, the 32-byte XChaCha20-Poly1305 key that decrypts every cookie value. Both files are the unit: a restored `store.db` without its matching key still opens and then reports zero cookies, because `crates/store/src/crypto.rs` refuses a missing, mis-moded or mismatched key instead of handing back ciphertext as data |
+| Backup destination | A second host reached with `rsync` over SSH, kept off the laptop that runs the daemon; an external drive stored away from the laptop counts as the same thing. No off-host target is provisioned yet, and that gap is what this contract exposes rather than hides |
+| Backup frequency | Daily, one snapshot per day, plus one manual snapshot before every `v0.2.x` tag |
+| Backup retention | 7 daily snapshots: the newest 7 are kept and the oldest is dropped when the 8th arrives |
+| Restore command | `cp <snapshot>/store.db ~/.opencrabs/browser-daemon/store.db && cp <snapshot>/store.key ~/.opencrabs/browser-daemon/store.key && chmod 600 ~/.opencrabs/browser-daemon/store.key && browserd cookies ls --profile scratch` |
+| Restore time target | Under 5 minutes from the decision to restore until `browserd cookies ls` answers again. The 2026-11-07 drill restored the 53,248-byte store in seconds, so the budget is dominated by fetching the snapshot, not by the restore itself |
+| Restore test cadence | Monthly, rehearsed on a copy in a temporary directory, never against the store the running daemon holds open |
+| Last verified restore | 2026-11-07, drill log `docs/prd/BUKTI-RESTORE 071126-2025.md`: sha256 `5e4f31eb840c087ee9a71577f8684ae1ff966ba58eb918dd152a8d435355b69a` matched between backup and restored copy, and the restored store opened with `browserd cookies ls` at exit 0. Recorded limitation: the live store held zero cookie rows, so this drill proves byte parity, key pairing and openability, while recovery of a real profile's cookies is proven only at crate level by `cargo test -p store --lib` (`cookie_bertahan_setelah_store_dibuka_ulang`, 43 passed) |
+| Restore verification | `sha256sum` of the restored `store.db` equal to the backup, `browserd cookies ls --db <restored> --key-file <restored>` exiting 0, and per-table row counts from `sqlite3` on the restored copy equal to the source. A run where only one of the three matches is a failed drill |
+| Restore owner | Adi, the only operator: he runs the drill, keeps the log, and decides whether a restore counts as passed |
+
 ---
 
 ## 5. Risks
