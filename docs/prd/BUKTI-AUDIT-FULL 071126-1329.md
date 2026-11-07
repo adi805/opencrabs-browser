@@ -141,3 +141,67 @@ the default path.
 | Several concurrent full engines | Only one engine ran at a time. Two engines on 4 cores / 7.6 GB is untested. |
 | Anti-bot detection beyond `navigator.webdriver` | One signal was measured; detection is a moving target and no claim is made. |
 | Automatic census inside `cargo xtask check` | The leak check is still a manual script. A test killed from outside never runs its destructor, so the gate can still pass with orphans alive. |
+
+## 8. Cost per tab, and what the 100 MB target would cost
+
+Measured by `crates/browserd/tests/biaya_tab.rs`: one engine at a time, one real
+page per tab (400 generated elements plus a script that builds them), tabs opened
+one by one, and the whole process group measured after each one. Two numbers are
+reported per point because they answer different questions:
+
+- **RSS sum** is what `ps` shows added up. It counts the shared Chrome binary once
+  per process, so it overstates real memory by a large factor.
+- **PSS sum** divides shared pages among their users. This is the number that
+  matches what the machine actually gives up.
+
+The table uses PSS; RSS is in the raw log because it is what an operator sees first.
+
+| Configuration | Baseline (1 blank tab) | 20 tabs | Marginal per tab |
+|---|---|---|---|
+| `shell` default | 142 MB | 796 MB | 32 MB |
+| `shell --process-per-site` | 141 MB | 629 MB | 24 MB |
+| `full` default | 295 MB | 759 MB | 23 MB |
+| `full --process-per-site` | 299 MB | 555 MB | 12 MB |
+
+Raw logs: `/tmp/oc-biaya-pss.log`, `/tmp/oc-biaya-psite.log`,
+`/tmp/oc-biaya-freeze.log`. Every run ended with `SISA ...: 0 proses`, so the cost
+measured is the cost while alive, not a cost that outlives the test.
+
+Two findings that change how the engine should be configured:
+
+1. **`--process-per-site` nearly halves the per-tab price** (full: 23 to 12 MB,
+   shell: 32 to 24 MB) because tabs on one origin share a renderer instead of
+   spawning one each. It is a flag, not new code, and it was measured on the same
+   launch path the daemon uses.
+2. **Freezing background tabs is cheap and weak.** `Page.setWebLifecycleState=frozen`
+   on 19 of 20 tabs saved 18% on shell (795 to 649 MB) and only 4% on full
+   (751 to 720 MB). The document stays resident; only timers stop. Freezing is not
+   a memory strategy on its own.
+
+### The 100 MB target
+
+100 MB is below the zero-tab floor of both engines: the headless shell needs 141 MB
+just to answer CDP with one blank tab, and full Chrome needs 295 MB. No flag, no
+tab cap and no hibernation policy brings a Chromium-based engine to 100 MB while it
+is running, because that budget is already gone before the first page loads. Anyone
+quoting 100 MB for this adapter is quoting a number that cannot be produced.
+
+What the measurement does support, all of it measured:
+
+| Goal | Reachable | How |
+|---|---|---|
+| 20 tabs under 600 MB | yes | `full --process-per-site`: 555 MB |
+| 20 tabs under 650 MB on the light path | yes | `shell --process-per-site`: 629 MB |
+| One engine under 150 MB | yes, shell only | 141 MB baseline, before any page |
+| One engine under 100 MB | no | the floor is the process, not the tabs |
+
+A budget of 100 MB with many live tabs needs a different engine class, not a
+different flag. The flag is reachable in production without a code change:
+`[engines.<id>].args` in the daemon config reaches `LaunchSpec.extra_args`
+(`crates/browserd/src/daemon.rs:391-393`), so an operator can add
+`"--process-per-site"` today. That path is exercised at runtime by
+`crates/browserd/tests/oxi_live.rs`, whose engine refuses private addresses
+unless its config `args` arrive. The repo also has a light adapter
+(`engine::oxi`), but `oxibrowser` is not installed on this host, so its cost is
+**unmeasured** and no number is claimed for it. Measuring it is the only honest
+route to a 100 MB claim.

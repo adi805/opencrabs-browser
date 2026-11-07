@@ -119,6 +119,21 @@ policy is not recorded here.
     host, and leave no engines behind. A test binary killed from outside still
     runs no destructor; that gap needs a process census in `xtask check`.
 
+- [2026-11-07 14:05] Decision: `--process-per-site` is an operator choice, not a default
+  Status: Proposed
+  Approval: none needed; measurement only, no behaviour changed
+  Requirement IDs: NFR-002
+  Context: measuring cost per tab on a real page showed `full` at 23 MB marginal
+    and 759 MB for 20 tabs. Adding `--process-per-site` cut that to 12 MB
+    marginal and 555 MB, because tabs on one origin share a renderer. The flag
+    is already reachable from `[engines.<id>].args`.
+  Rationale: the flag trades process isolation for memory. A crash or a
+    compromise in one renderer then covers every tab on that origin, which is a
+    security property the default preserves. A measurement is not a mandate to
+    change that default for every operator.
+  Impact: nothing changes until an operator adds the flag. Freezing background
+    tabs was also measured and rejected as a strategy: 18% on shell, 4% on full.
+
 ## AI Agent Rules
 
 A decision with status Proposed must not be treated as permission to build. An
