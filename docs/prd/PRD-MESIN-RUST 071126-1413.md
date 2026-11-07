@@ -161,6 +161,24 @@ Every remaining choice is a default with a written reversal cost. Nothing here i
 | **Linux & Headless Compatibility** | The engine must compile and run on pure CLI environments without requiring physical displays, X11 servers, or GPU hardware. |
 | **Deterministic Teardown** | All memory and disk structures must release cleanly on drop to avoid contaminating development worktrees. |
 
+### Out of Scope for v0.2
+
+"Full featured" needs a boundary, otherwise the first page that needs a feature outside this
+list becomes a surprise instead of a decision. These are deliberately excluded from v0.2 and
+must not be claimed when v0.2 ships:
+
+| Excluded | Why it is excluded | What a page needing it will see |
+|---|---|---|
+| WebGL, canvas GPU, and video decoding | Software rasterization via `tiny-skia` covers layout and text, not GPU pipelines; a GPU stack on a 7.7 GB laptop with no discrete GPU is the exact problem v0.2 exists to remove | a blank canvas element, reported as an unsupported surface rather than a silent empty box |
+| Full CSS coverage (grid subgrid, container queries, `:has()`) | `taffy` plus `cssparser` covers flexbox, basic grid and the common cascade; every unsupported property needs a named gap rather than a wrong layout | an element placed by the fallback box model, with the unsupported property listed in the layout report |
+| Extension support and Chrome Web Store | no extension API surface exists in this engine | extensions simply cannot be installed |
+| Multi-process site isolation | the 100 MB ceiling depends on one process; per-site processes are the thing being removed | one compromised page shares the process with the daemon, which is why FR-002 restricts the script surface instead |
+| Persistent profile sync across machines | snapshots are local and sealed per machine | a second machine starts with no cookies |
+| PDF rendering and printing | no print pipeline in v0.2 | `Page.printToPDF` returns an unsupported-method error |
+
+Anything on this list that turns out to be required is a new PRD with its own budget, not a
+silent addition to v0.2.
+
 ---
 
 ## 3. Architecture & Data Flow
