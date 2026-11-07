@@ -97,8 +97,9 @@ pub struct EnginesSection {
 
 #[derive(Debug, Deserialize)]
 pub struct EngineSection {
-    /// Jenis mesin: `shell` atau `oxi`. Nilai lain **ditolak saat start**
-    /// dengan pesan yang menyebut mesin mana: mengabaikannya diam-diam berarti
+    /// Jenis mesin: `shell`, `oxi`, atau `full` (ejaan `chrome-full` dan
+    /// `chrome_full` juga diterima). Nilai lain **ditolak saat start** dengan
+    /// pesan yang menyebut mesin mana: mengabaikannya diam-diam berarti
     /// operator mengira dua mesin jalan padahal satu.
     pub kind: Option<String>,
     pub binary: Option<String>,
