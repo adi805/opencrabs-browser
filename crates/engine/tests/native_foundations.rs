@@ -104,11 +104,17 @@ fn skrip_halaman_jalan_di_isolat_terpisah() {
 fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(!CELAH.is_empty());
     let semua = CELAH.join("\n");
+    // Daftar ini bergerak bersama [`CELAH`]: celah yang sudah ditutup wajib
+    // DICABUT dari sini, bukan dipertahankan supaya tes tetap hijau.
+    // "snapshot tab" dicabut di milis 4 karena `ColdStore` (simpan/muat/hapus)
+    // dan skema SQLite `tab_snapshot` sudah dikirim beserta 10 tes.
+    // Yang menggantikannya adalah celah yang masih benar-benar terbuka.
     for wajib in [
         "selektor CSS",
         "pengukuran teks",
         "rasterisasi",
-        "snapshot tab",
+        "jaringan",
+        "peristiwa CDP",
     ] {
         assert!(
             semua.contains(wajib),
