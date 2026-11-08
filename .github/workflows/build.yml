@@ -65,12 +65,24 @@ jobs:
         run: |
           set -eu
           PROFILE="${{ inputs.profile || 'release' }}"
+          # Cargo menamai direktori keluaran menurut profil BAWAAN yang dipetakan,
+          # bukan menurut nama profilnya: `--profile dev` mendarat di target/debug/.
+          # Tanpa peta ini `test -x` gagal tanpa satu baris pesan karena `set -eu`,
+          # dan itu yang terjadi di run 42445740212 (build ok, Paketkan exit 1).
+          case "$PROFILE" in
+            dev) DIR=debug ;;
+            *) DIR="$PROFILE" ;;
+          esac
           VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
-          BIN="target/${PROFILE}/browserd"
-          test -x "$BIN"
+          BIN="target/${DIR}/browserd"
+          if [ ! -x "$BIN" ]; then
+            echo "biner tidak ditemukan: $BIN (profil=$PROFILE, dir=$DIR)" >&2
+            ls -l "target/${DIR}" 2>/dev/null || ls -l target 2>/dev/null || true
+            exit 1
+          fi
           strip "$BIN" || true
           NAME="browserd-${VERSION}-x86_64-unknown-linux-gnu"
-          tar -C "target/${PROFILE}" -czf "${NAME}.tar.gz" browserd
+          tar -C "target/${DIR}" -czf "${NAME}.tar.gz" browserd
           sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
           ls -l "${NAME}.tar.gz"
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
