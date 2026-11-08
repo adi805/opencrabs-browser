@@ -1078,7 +1078,10 @@ cooldown_secs = 120
             .capabilities(EngineKind::Native)
             .expect("native terpasang");
         assert!(caps.script, "isolat rquickjs sudah menjalankan skrip");
-        assert!(!caps.layout, "printToPDF belum ada, jadi layout belum penuh");
+        assert!(
+            !caps.layout,
+            "printToPDF belum ada, jadi layout belum penuh"
+        );
         assert!(!caps.cookies, "cookie jar belum ada");
         assert!(!caps.input, "hands belum dibangun");
     }
