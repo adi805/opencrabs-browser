@@ -1,8 +1,8 @@
 ---
 project: "OpenCrabs Browser v0.2: Native Rust Engine"
 version: "0.2.0"
-status: "draft"
-current_milestone: 0
+status: "implementation"
+current_milestone: 3
 total_milestones: 5
 type: "tool"
 tech_stack:
@@ -140,7 +140,7 @@ Every remaining choice is a default with a written reversal cost. Nothing here i
 | AC-006 | FR-003 | Positive | `Accessibility.getFullAXTree` returns hierarchical roles (`button`, `heading`, `textbox`) matching the underlying DOM nodes. | `cargo test -p engine --lib test_axtree_hierarchy` passes with 0 errors. |
 | AC-007 | FR-004 | Positive | `Input.dispatchMouseEvent` targeting element coordinates triggers attached `onclick` event listener and updates DOM. | `cargo test -p engine --lib test_mouse_click_dispatch` passes with 0 errors. |
 | AC-008 | FR-004 | Boundary | Clicking an element obscured by an overlay returns an obstruction notice rather than silently failing. | `cargo test -p engine --lib test_overlay_obstruction_detection` passes with 0 errors. |
-| AC-009 | FR-005, NFR-001 | Positive | Opening 99 targets sequentially, with LRU eviction holding the resident count at 25, keeps total process PSS <= 100 MB as measured via `/proc/self/smaps_rollup`. The test must also assert that resident tabs never exceeded 25, because 99 resident tabs were measured at 308.9 MB and would break the ceiling. | `cargo test -p browserd --test native_99_tabs_budget` confirms smaps PSS <= 100 MB and resident_count <= 25. |
+| AC-009 | FR-005, NFR-001 | Positive | Opening 99 targets sequentially, with LRU eviction holding the resident count at 25, keeps total process PSS <= 100 MB as measured via `/proc/self/smaps_rollup`. The test must also assert that resident tabs never exceeded 25, because 99 resident tabs were measured at 308.9 MB and would break the ceiling. | `cargo test -p browserd --test native_99_tabs_budget` confirms smaps PSS <= 100 MB and resident_count <= 25. **Status 2026-11-08: the test does not exist and neither does the LRU, so AC-009 is unmet.** Only the capacity half is proven, by `native_tab_capacity_cap` (2 passed). |
 | AC-010 | FR-005, NFR-001 | Negative | Attempting to create tab #100 without closing or evicting returns a clear capacity error without exceeding 100 MB. | `cargo test -p browserd --test native_tab_capacity_cap` enforces 99 tab limit. |
 | AC-011 | FR-006 | Positive | Accessing a tab in cold suspended state reloads its DOM and context from SQLite in under 100 milliseconds. | `cargo test -p store --lib test_tab_rehydration_latency` measures latency < 100ms. |
 | AC-012 | FR-006 | Negative | Suspending a tab flushes its active JS isolate and drops DOM nodes from RAM completely. | `cargo test -p engine --lib test_suspended_tab_memory_release` verifies heap <= 50KB. |
@@ -300,11 +300,28 @@ This is a headless engine with no rendered product surface, so the visual fields
 
 | # | Milestone | Implementation Tasks | Done When | Status |
 |---|-----------|----------------------|-----------|--------|
-| 1 | **Native DOM & Layout Core, plus the first memory measurement** | Integrate `html5ever` and `taffy` into `crates/engine/src/native/`. Implement DOM tree parser, element tree navigation, and box coordinate computation. Measure the engine baseline PSS inside the repo. The per-tab marginal cost is already measured out-of-tree at 3.10 MB PSS (flat to 99 tabs), but the engine baseline is still an assumption, and the hot tab count `floor((100 - engine_baseline) / 3.10)` cannot be locked until that number exists (see `BUKTI-BUDGET` section 4). | Unit tests parse a complex HTML fixture and compute correct element bounding boxes without external dependencies (AC-001, AC-002), and `cargo test -p engine --lib native_baseline_pss` plus `native_hot_tab_cost` report the two measured numbers in the test output. If the engine baseline exceeds its 20 MB budget, milestone 4 reduces the hot tab count instead of the 100 MB ceiling. | ⬜ Not Started |
+| 1 | **Native DOM & Layout Core, plus the first memory measurement** | Integrate `html5ever` and `taffy` into `crates/engine/src/native/`. Implement DOM tree parser, element tree navigation, and box coordinate computation. Measure the engine baseline PSS inside the repo. The per-tab marginal cost is already measured out-of-tree at 3.10 MB PSS (flat to 99 tabs), but the engine baseline is still an assumption, and the hot tab count `floor((100 - engine_baseline) / 3.10)` cannot be locked until that number exists (see `BUKTI-BUDGET` section 4). | Unit tests parse a complex HTML fixture and compute correct element bounding boxes without external dependencies (AC-001, AC-002), and `cargo test -p engine --lib native_baseline_pss` plus `native_hot_tab_cost` report the two measured numbers in the test output. If the engine baseline exceeds its 20 MB budget, milestone 4 reduces the hot tab count instead of the 100 MB ceiling. | ✅ Verified |
 | 2 | **Agent Eyes & Hands** | Implement `tiny-skia` software rasterization for screenshots (`Page.captureScreenshot`), AXTree generator (`Accessibility.getFullAXTree`), and synthetic event dispatcher for clicks and typing. | Given a mock web form, agent inspects accessibility tree, locates submit button by coordinates, and verifies synthetic click event receipt (AC-005, AC-006, AC-007, AC-008). | ⬜ Not Started |
-| 3 | **Embedded JS Runtime** | Wire `rquickjs` into DOM core. Expose `window`, `document`, DOM query selectors, event dispatching, and timer loops with memory gas limits. | Synthetic test evaluates JS arithmetic, executes DOM manipulation scripts, and safely terminates infinite loop timeout (AC-003, AC-004, AC-017, AC-018). | ⬜ Not Started |
-| 4 | **Virtual Tab Manager & 100MB Gate** | Build LRU Virtual Tab Pool in `crates/engine/src/native/tab_pool.rs`. Implement serialization and sub-100ms rehydration to SQLite store. Benchmark 99 targets with a 25-tab resident cap. | PSS probe proves 99 open targets with at most 25 resident stay within <= 100 MB total process memory, and a dormant tab rehydrates in <100ms (AC-009, AC-010, AC-011, AC-012). | ⬜ Not Started |
-| 5 | **CDP Server & Full Agent Integration** | Connect native engine to `crates/cdp` and `crates/browserd`. Wire daemon configuration to route `kind = "rust-native"`. Run end-to-end agent automation suite. | `cargo xtask check` passes cleanly, daemon boots and serves CDP on port 9224 with zero external Chrome processes, and live test suite passes (AC-013, AC-014, AC-019, AC-020). | ⬜ Not Started |
+| 3 | **Embedded JS Runtime** | Wire `rquickjs` into DOM core. Expose `window`, `document`, DOM query selectors, event dispatching, and timer loops with memory gas limits. | Synthetic test evaluates JS arithmetic, executes DOM manipulation scripts, and safely terminates infinite loop timeout (AC-003, AC-004, AC-017, AC-018). | 🔄 In Progress |
+| 4 | **Virtual Tab Manager & 100MB Gate** | Build LRU Virtual Tab Pool in `crates/engine/src/native/tab_pool.rs`. Implement serialization and sub-100ms rehydration to SQLite store. Benchmark 99 targets with a 25-tab resident cap. | PSS probe proves 99 open targets with at most 25 resident stay within <= 100 MB total process memory, and a dormant tab rehydrates in <100ms (AC-009, AC-010, AC-011, AC-012). | 🔄 In Progress |
+| 5 | **CDP Server & Full Agent Integration** | Connect native engine to `crates/cdp` and `crates/browserd`. Wire daemon configuration to route `kind = "rust-native"`. Run end-to-end agent automation suite. | `cargo xtask check` passes cleanly, daemon boots and serves CDP on port 9224 with zero external Chrome processes, and live test suite passes (AC-013, AC-014, AC-019, AC-020). | 🔄 In Progress |
+
+### Milestone Evidence, 2026-11-08
+
+The status indicator is canonical; the evidence behind it is here, measured at `HEAD`.
+
+| # | Status | What exists today, and what does not |
+|---|--------|--------------------------------------|
+| 1 | ✅ Verified | `html5ever` + `taffy` DOM and box tree run. Baseline measured, not assumed: 20 MB RSS with 0 tabs, 37.6 MB with 99 tabs holding 403-node documents (0.08 MB/tab marginal). Evidence: `docs/prd/BUKTI-NATIVE-CDP 081126-1124.md` |
+| 2 | ⬜ Not Started | No `tiny-skia`, no `Page.captureScreenshot`, no `Accessibility.getFullAXTree`, no synthetic event dispatcher in the native engine. `engine::native::CELAH` names rasterisation and DOM events as missing |
+| 3 | 🔄 In Progress | `rquickjs` evaluates expressions with preserved state inside an isolate. No query selectors, no event dispatching, no timer loops |
+| 4 | 🔄 In Progress | `crates/engine/src/native/tab_pool.rs` holds 99 tabs and refuses the 100th with a capacity error (`crates/browserd/tests/native_tab_capacity_cap.rs`, 2 passed). No LRU eviction, no SQLite snapshot or rehydration, and no PSS budget test |
+| 5 | 🔄 In Progress | `/json/version` answers `RustNativeEngine/0.2.0` from the GitHub-built binary, `kind = "rust-native"` boots, and the CDP surface serves 24 commands end to end. The end-to-end agent suite cannot pass until the engine can fetch a page over HTTP. `cargo xtask check` exits 0 at `4292878` |
+
+A milestone is not marked done by editing this table: the ten missing capabilities are
+listed in code at `crates/engine/src/native/mod.rs:38` (`CELAH`), and each one is removed
+only with a test that failed before it existed.
+
 
 ### Authority Policy v1
 
@@ -322,7 +339,8 @@ Pause only for a blocking decision, material scope change, or a genuine new auth
 | **Linter** | `cargo clippy --workspace --all-targets -- -D warnings` | Exit code 0, 0 warnings | Pre-commit | Refactor code warnings |
 | **Unit Tests** | `cargo test --workspace` | Exit code 0, all tests pass | Pre-commit | Fix breaking logic |
 | **Full Gate** | `cargo xtask check` | `fmt ok`, `clippy ok`, `test ok` | Pre-push | Block merge and investigate |
-| **Memory Ceiling** | `cargo test -p browserd --test native_99_tabs_budget` | Memory <= 100 MB PSS | Milestone 4 | Refine LRU eviction threshold |
+| **Tab Capacity** | `cargo test -p browserd --test native_tab_capacity_cap` | 2 passed: 99 tabs accepted, the 100th refused with a capacity error | Pre-push | Fix the pool. `MAKS_TAB` is never raised to turn a test green |
+| **Memory Ceiling (not built)** | `cargo test -p browserd --test native_99_tabs_budget` | Would assert PSS <= 100 MB across 99 tabs. The test does not exist, so no run reports it and the memory ceiling stays unproven | Milestone 4 | Write the test first, then refine the LRU eviction threshold |
 
 
 ### Rollback & Release Safety Contract
@@ -362,7 +380,7 @@ Pause only for a blocking decision, material scope change, or a genuine new auth
 | Positioning statement | A browser engine an AI agent can run on a laptop without Chrome. |
 | Target audience | 1 operator today, bounded by the number of OpenCrabs installs that need a sub-100 MB browser, which is the 1 machine this build runs on |
 | Acquisition cost or budget | 0 IDR and 0 hours per week of paid acquisition, because no channel is bought |
-| Launch success metric | 0 signups expected. The verdict is 1 measured run where `cargo test -p browserd --test native_99_tabs_budget` reports 99 tabs under 100 MB PSS |
+| Launch success metric | 0 signups expected. Two runs decide launch: `cargo test -p browserd --test native_tab_capacity_cap` (exists today, 2 passed) and `cargo test -p browserd --test native_99_tabs_budget`, which must report 99 tabs under 100 MB PSS and does not exist yet |
 | Launch owner | Adi, who decides whether this ever becomes public |
 
 ### Handover & Ownership Transfer Contract
@@ -421,7 +439,7 @@ Pause only for a blocking decision, material scope change, or a genuine new auth
 | **Embedded JS Engine** | FR-002, NFR-004 | AC-003, AC-004 | JavaScript code snippets | Mutated DOM state and return values | `crates/engine` | 3 | `cargo test -p engine --lib test_js_runtime_dom_mutations` |
 | **Agent Eyes (Perception)** | FR-003 | AC-005, AC-006 | Active page DOM and styles | Full AXTree and PNG screenshot bytes | `crates/engine` | 2 | `cargo test -p engine --lib test_screenshot_png_magic_bytes` |
 | **Agent Hands (Interaction)** | FR-004 | AC-007, AC-008 | Coordinates and input events | Dispatched synthetic events and DOM mutation | `crates/engine` | 2 | `cargo test -p engine --lib test_mouse_click_dispatch` |
-| **Virtual Tab Pool** | FR-005, NFR-001 | AC-009, AC-010 | Up to 99 tab open requests, 25 resident cap | 99 targets under 100 MB PSS with resident_count <= 25 | `crates/engine` | 4 | `cargo test -p browserd --test native_99_tabs_budget` |
+| **Virtual Tab Pool** | FR-005, NFR-001 | AC-009, AC-010 | Up to 99 tab open requests, 25 resident cap | 99 tab open requests accepted and the 100th refused, resident_count <= 25 once the LRU exists | `crates/engine` | 4 | `cargo test -p browserd --test native_tab_capacity_cap` (capacity proven today). The PSS budget test `native_99_tabs_budget` is not built yet |
 | **Cold Tab Rehydration** | FR-006 | AC-011, AC-012 | Suspended tab activation | Restored hot DOM in under 100ms | `crates/store` | 4 | `cargo test -p store --lib test_tab_rehydration_latency` |
 | **CDP Wire Server** | FR-007, NFR-002 | AC-013 | Incoming WebSocket frames | Valid JSON-RPC response bodies | `crates/cdp` | 5 | `curl -s http://127.0.0.1:9224/json/version` |
 | **Clean Process Teardown** | NFR-003 | AC-014 | SIGTERM daemon shutdown signal | Zero leaked child processes and sockets | `crates/browserd` | 5 | `bash ~/.opencrabs/projects/oc-browser-leak-check.sh` |

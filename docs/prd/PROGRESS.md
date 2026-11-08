@@ -568,6 +568,29 @@ tab to `crates/store`. The tab pool, budget enforcement, and CDP surface remain
 unbuilt, so none of the v0.2 acceptance criteria that depend on them can be
 called met.
 
+### PRD record reconciliation, 2026-11-08
+
+`PRD-MESIN-RUST 071126-1413.md` is the spec for the v0.2 native engine and it was
+last edited before any of the engine ran. Read against the tree, three of its
+statements were no longer true, and only those three were touched:
+
+| Was | Now | Why |
+|---|---|---|
+| All five milestones `⬜ Not Started` | `✅ Verified`, `⬜ Not Started`, and three `🔄 In Progress` | Milestone 1 is measured, not planned: 20 MB RSS at 0 tabs, 37.6 MB at 99 tabs of 403-node documents. Milestones 3, 4 and 5 each have a real half (`rquickjs` isolate, `tab_pool` with a capacity test, the CDP surface) and a missing half, and the missing half is named in `CELAH` |
+| `current_milestone: 0`, `status: "draft"` | `current_milestone: 3`, `status: "implementation"` | Three milestones are in flight, so the document is no longer a draft nothing depends on |
+| A memory-ceiling gate on `cargo test -p browserd --test native_99_tabs_budget` | That name is marked **not built**, next to the test that does exist, `native_tab_capacity_cap` | The budget test was never written. A gate row that names a test nobody can run reads as a passing gate to anyone who does not try |
+
+AC-009 got the same treatment in place: the criterion stays what it is, and the
+cell now says the LRU and the budget test it depends on do not exist, so AC-009 is
+unmet. The `3.10 MB` per-tab figure in the architecture section was left alone on
+purpose: that number was really measured, on a 3006-node tab through
+`html5ever` + `taffy` + `rquickjs`, so it is evidence for a different input, not a
+lie about this one.
+
+Validator after the edits: `PASS`, blockers 0, errors 0, warnings 0. Structure is
+all a validator can check; the status cells were changed only where the tree
+already proved them.
+
 ## Not built, not claimed
 
 Open items, each with the reason it is still open and what would close it.
