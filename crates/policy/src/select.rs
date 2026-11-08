@@ -24,6 +24,17 @@ pub enum EngineKind {
     Full,
     /// Mesin pihak ketiga, hanya dipakai kalau uji kapabilitasnya lulus.
     Oxi,
+    /// Mesin Rust murni (`kind = "rust-native"`) yang hidup di dalam proses
+    /// daemon: nol biner Chrome, nol proses anak.
+    ///
+    /// Sengaja TIDAK dimasukkan ke pemilihan otomatis ([`choose_with_layout`],
+    /// [`cheapest_script`]): mesin ini belum punya tumpukan jaringan, jadi ia
+    /// hanya bisa memuat `about:blank` dan `data:text/html`. Memilihnya untuk
+    /// permintaan biasa berarti menukar mesin yang bisa membuka situs dengan
+    /// mesin yang tidak bisa, dan itu regresi yang tersembunyi. Ia dipakai
+    /// hanya kalau operator menyebutnya sendiri (`engine_default` di config
+    /// atau `openCrabsOptions.engine` di permintaan).
+    Native,
 }
 
 impl EngineKind {
@@ -33,6 +44,7 @@ impl EngineKind {
             Self::Shell => "chrome-shell",
             Self::Full => "chrome-full",
             Self::Oxi => "oxi",
+            Self::Native => "rust-native",
         }
     }
 
@@ -42,6 +54,7 @@ impl EngineKind {
             "chrome-shell" | "chrome_shell" | "shell" => Some(Self::Shell),
             "chrome-full" | "chrome_full" | "full" => Some(Self::Full),
             "oxi" => Some(Self::Oxi),
+            "rust-native" | "rust_native" | "native" => Some(Self::Native),
             _ => None,
         }
     }
@@ -97,6 +110,9 @@ pub struct Catalog {
     pub shell: Option<Capabilities>,
     pub full: Option<Capabilities>,
     pub oxi: Option<Capabilities>,
+    /// Mesin Rust murni. Terpasang berarti daemon-nya memang membawa mesin
+    /// ini, bukan berarti ia mampu membuka jaringan.
+    pub native: Option<Capabilities>,
 }
 
 impl Catalog {
@@ -106,6 +122,7 @@ impl Catalog {
             EngineKind::Shell => self.shell,
             EngineKind::Full => self.full,
             EngineKind::Oxi => self.oxi,
+            EngineKind::Native => self.native,
         }
     }
 
@@ -117,6 +134,7 @@ impl Catalog {
             shell: Some(shell),
             full: None,
             oxi: None,
+            native: None,
         }
     }
 }
@@ -145,11 +163,13 @@ impl Catalog {
                 EngineKind::Shell => TERUKUR_SHELL,
                 EngineKind::Full => TERUKUR_FULL,
                 EngineKind::Oxi => TERUKUR_OXI,
+                EngineKind::Native => TERUKUR_NATIVE,
             };
             match kind {
                 EngineKind::Shell => katalog.shell = Some(caps),
                 EngineKind::Full => katalog.full = Some(caps),
                 EngineKind::Oxi => katalog.oxi = Some(caps),
+                EngineKind::Native => katalog.native = Some(caps),
             }
         }
         katalog
@@ -217,6 +237,33 @@ pub const TERUKUR_OXI: Capabilities = Capabilities {
     layout: true,
     script: false,
     cookies: true,
+    input: false,
+};
+
+/// Kemampuan mesin Rust murni yang **sudah diukur** oleh tes di `crates/engine`
+/// dan `crates/cdp`.
+///
+/// Bukti yang ada:
+/// - `script`: `native::js::tests` menjalankan ekspresi, menjaga state antar
+///   panggilan, menangkap `console.log`, dan menghentikan alokasi besar lewat
+///   pagu memori. Isolat tidak punya `fs`, `net`, atau `require`.
+/// - `layout`: taffy menghitung kotak (`native::layout::tests`), tetapi
+///   `Page.printToPDF` belum ada. Definisi field ini menuntut dua-duanya, jadi
+///   nilainya `false` supaya permintaan cetak PDF tidak pernah diarahkan ke
+///   mesin yang tidak bisa mencetak.
+/// - `cookies`: belum ada cookie jar; tidak ada satu pun tes yang membuktikan
+///   cookie ditulis dan terbaca lagi.
+/// - `input`: `Input.dispatchMouseEvent` belum ada; `hands` belum dibangun.
+///
+/// Yang juga **belum** ada dan tidak diklaim di sini: tumpukan jaringan
+/// (mesin hanya memuat `about:blank` dan `data:text/html`), batas waktu/gas
+/// untuk `while(true){}`, dan event CDP keluar. Semua itu tercatat di
+/// `engine::native::CELAH`; menaikkan nilai di konstanta ini tanpa tes berarti
+/// mengulang persis kesalahan yang audit 7 Nov temukan.
+pub const TERUKUR_NATIVE: Capabilities = Capabilities {
+    layout: false,
+    script: true,
+    cookies: false,
     input: false,
 };
 
@@ -727,6 +774,7 @@ mod tests {
                 cookies: true,
                 input: true,
             }),
+            native: Some(TERUKUR_NATIVE),
         }
     }
 
@@ -914,6 +962,7 @@ mod tests {
                 cookies: true,
                 input: true,
             }),
+            native: None,
         };
         let request = Request {
             wants_screenshot: true,
@@ -1005,6 +1054,60 @@ cooldown_secs = 120
         assert!(katalog.shell.is_some());
         assert!(katalog.full.is_some());
         assert!(katalog.oxi.is_some());
+    }
+
+    #[test]
+    fn mesin_native_dikenali_dari_tiga_ejaan() {
+        // Tanpa ini daemon menolak start dengan "nama mesin 'rust-native'
+        // tidak dikenal" walau mesinnya benar-benar menyala. Ditemukan saat
+        // verifikasi AC-013 pada 8 Nov 2026.
+        for ejaan in ["rust-native", "rust_native", "native"] {
+            assert_eq!(
+                EngineKind::parse(ejaan),
+                Some(EngineKind::Native),
+                "ejaan {ejaan} harus diterima"
+            );
+            assert_eq!(EngineKind::Native.as_str(), "rust-native");
+        }
+    }
+
+    #[test]
+    fn katalog_mendaftarkan_native_dengan_kemampuan_terukur() {
+        let katalog = Catalog::dari_mesin(["rust-native"]);
+        let caps = katalog
+            .capabilities(EngineKind::Native)
+            .expect("native terpasang");
+        assert!(caps.script, "isolat rquickjs sudah menjalankan skrip");
+        assert!(!caps.layout, "printToPDF belum ada, jadi layout belum penuh");
+        assert!(!caps.cookies, "cookie jar belum ada");
+        assert!(!caps.input, "hands belum dibangun");
+    }
+
+    #[test]
+    fn native_tidak_dipilih_otomatis_karena_belum_punya_jaringan() {
+        // Mesin native hanya memuat about:blank dan data:text/html. Kalau ia
+        // ikut pemilihan otomatis, permintaan biasa bisa diarahkan ke mesin
+        // yang tidak bisa membuka situs. Ini penjaga regresi untuk itu.
+        let katalog = semua();
+        let butuh_skrip = Capabilities {
+            script: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            cheapest_script(&katalog, butuh_skrip),
+            Some(EngineKind::Oxi),
+            "oxi tetap yang termurah di antara mesin berjaringan"
+        );
+        let dipilih = choose_with_layout(
+            &katalog,
+            Capabilities {
+                layout: true,
+                ..Capabilities::default()
+            },
+            "uji",
+        )
+        .expect("ada mesin berlayout");
+        assert_ne!(dipilih.kind, EngineKind::Native);
     }
 
     #[test]
