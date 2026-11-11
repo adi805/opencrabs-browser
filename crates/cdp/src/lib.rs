@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod base64;
 pub mod batas;
 pub mod engines;
 pub mod errors;
