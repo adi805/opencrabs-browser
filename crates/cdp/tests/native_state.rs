@@ -272,3 +272,185 @@ fn set_document_content_mengganti_isi_tab_yang_sama() {
     assert!(teks.contains("kedua"), "dokumen harus berisi isi terakhir");
     assert!(!teks.contains("pertama"), "isi lama harus hilang: {dok}");
 }
+
+/// `DOM.querySelector` dan `querySelectorAll` menjawab node sungguhan, bukan
+/// galat "belum ada". Node yang dijawab harus bisa dipakai metode DOM lain,
+/// jadi tesnya merangkai: cari, baca HTML luar, lalu simpulkan.
+#[test]
+fn dom_query_selector_menjawab_node_sungguhan() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+
+    ok_sesi(
+        &state,
+        2,
+        "Page.setDocumentContent",
+        json!({"html": "<div class=\"kartu\"><p>satu</p><p id=\"dua\">dua</p></div>"}),
+        &sesi,
+    );
+
+    let satu = ok_sesi(
+        &state,
+        3,
+        "DOM.querySelector",
+        json!({"selector": "p"}),
+        &sesi,
+    );
+    let node = satu["nodeId"].as_u64().expect("nodeId harus angka");
+    let luar = ok_sesi(
+        &state,
+        4,
+        "DOM.getOuterHTML",
+        json!({"nodeId": node}),
+        &sesi,
+    );
+    assert_eq!(luar["outerHTML"], "<p>satu</p>");
+
+    let semua = ok_sesi(
+        &state,
+        5,
+        "DOM.querySelectorAll",
+        json!({"selector": "div.kartu > p"}),
+        &sesi,
+    );
+    assert_eq!(
+        semua["nodeIds"].as_array().map(Vec::len),
+        Some(2),
+        "dua p anak langsung .kartu: {semua}"
+    );
+
+    // Selektor yang tidak cocok menjawab `null`, bukan node dokumen (indeks 0).
+    let kosong = ok_sesi(
+        &state,
+        6,
+        "DOM.querySelector",
+        json!({"selector": "article"}),
+        &sesi,
+    );
+    assert!(
+        kosong["nodeId"].is_null(),
+        "tidak ketemu harus null: {kosong}"
+    );
+}
+
+#[test]
+fn dom_query_selector_menolak_selektor_rusak() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    let jawab = balas_sesi(
+        &state,
+        2,
+        "DOM.querySelector",
+        json!({"selector": "div >"}),
+        &sesi,
+    );
+    let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        pesan.contains("selektor tidak sah"),
+        "selektor rusak harus ditolak dengan alasan: {jawab}"
+    );
+}
+
+/// Pencarian dibatasi ke subtree `nodeId`, dan node di luar arena ditolak.
+#[test]
+fn dom_query_selector_menghormati_node_akar() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+
+    ok_sesi(
+        &state,
+        2,
+        "Page.setDocumentContent",
+        json!({"html": "<div id=\"a\"><p>x</p></div><div id=\"b\"><p>y</p></div>"}),
+        &sesi,
+    );
+    let akar = ok_sesi(
+        &state,
+        3,
+        "DOM.querySelector",
+        json!({"selector": "#b"}),
+        &sesi,
+    )["nodeId"]
+        .as_u64()
+        .expect("#b harus ketemu");
+
+    let dalam = ok_sesi(
+        &state,
+        4,
+        "DOM.querySelectorAll",
+        json!({"selector": "p", "nodeId": akar}),
+        &sesi,
+    );
+    let ids = dalam["nodeIds"].as_array().cloned().unwrap_or_default();
+    assert_eq!(ids.len(), 1, "hanya satu p di dalam #b: {dalam}");
+    let luar = ok_sesi(
+        &state,
+        5,
+        "DOM.getOuterHTML",
+        json!({"nodeId": ids[0]}),
+        &sesi,
+    );
+    assert_eq!(luar["outerHTML"], "<p>y</p>");
+
+    let salah = balas_sesi(
+        &state,
+        6,
+        "DOM.querySelectorAll",
+        json!({"selector": "p", "nodeId": 9999}),
+        &sesi,
+    );
+    assert!(
+        salah.get("error").is_some(),
+        "nodeId di luar arena harus galat: {salah}"
+    );
+}
+
+/// `DOM.resolveNode` mengembalikan pegangan yang menyebut elemennya, supaya
+/// klien tidak menerima objek tanpa keterangan.
+#[test]
+fn dom_resolve_node_menyebut_elemennya() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+
+    ok_sesi(
+        &state,
+        2,
+        "Page.setDocumentContent",
+        json!({"html": "<div id=\"utama\" class=\"kartu besar\">x</div>"}),
+        &sesi,
+    );
+    let node = ok_sesi(
+        &state,
+        3,
+        "DOM.querySelector",
+        json!({"selector": "#utama"}),
+        &sesi,
+    )["nodeId"]
+        .as_u64()
+        .expect("nodeId");
+
+    let simpul = ok_sesi(&state, 4, "DOM.resolveNode", json!({"nodeId": node}), &sesi);
+    assert_eq!(simpul["object"]["subtype"], "node");
+    assert_eq!(simpul["object"]["description"], "div#utama.kartu.besar");
+    assert_eq!(simpul["object"]["objectId"], format!("node-{node}"));
+}
+
+/// `DOM.getBoxModel` tetap jujur: kotak layout belum memisahkan padding,
+/// border, dan margin, jadi metodenya menjawab galat yang menyebut itu.
+#[test]
+fn dom_get_box_model_masih_menyebut_kekurangannya() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    let jawab = balas_sesi(&state, 2, "DOM.getBoxModel", json!({"nodeId": 1}), &sesi);
+    assert_eq!(jawab["error"]["code"].as_i64(), Some(-32601));
+    let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        pesan.contains("padding"),
+        "galat harus menyebut bagian yang kurang: {pesan}"
+    );
+}

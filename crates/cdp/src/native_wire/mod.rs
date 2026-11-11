@@ -332,6 +332,10 @@ async fn protokol() -> Json<Value> {
             ]},
             { "domain": "DOM", "commands": [
                 { "name": "getDocument" },
+                { "name": "querySelector" },
+                { "name": "querySelectorAll" },
+                { "name": "getOuterHTML" },
+                { "name": "resolveNode" },
                 { "name": "enable" },
                 { "name": "disable" }
             ]},

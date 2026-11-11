@@ -108,9 +108,11 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // DICABUT dari sini, bukan dipertahankan supaya tes tetap hijau.
     // "snapshot tab" dicabut di milis 4 karena `ColdStore` (simpan/muat/hapus)
     // dan skema SQLite `tab_snapshot` sudah dikirim beserta 10 tes.
+    // "selektor CSS" dicabut setelah `native::selectors` mencocokkan tag,
+    // kelas, id, atribut, kombinator, dan pseudo-kelas; tesnya ada di modul
+    // itu sendiri dan di `tests/native_state.rs` lewat `DOM.querySelector`.
     // Yang menggantikannya adalah celah yang masih benar-benar terbuka.
     for wajib in [
-        "selektor CSS",
         "pengukuran teks",
         "rasterisasi",
         "jaringan",
@@ -121,4 +123,11 @@ fn celah_dinyatakan_bukan_disembunyikan() {
             "celah `{wajib}` hilang dari daftar: {semua}"
         );
     }
+    // Penjaga arah sebaliknya: celah yang sudah ditutup tidak boleh muncul
+    // lagi di daftar. Kalau selektor dikembalikan ke `CELAH`, kemampuan yang
+    // sudah ada jadi diklaim belum ada, dan pembaca berikutnya salah paham.
+    assert!(
+        !semua.contains("selektor CSS"),
+        "selektor CSS sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
+    );
 }

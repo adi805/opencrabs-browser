@@ -135,8 +135,9 @@ impl Document {
             .count()
     }
 
-    /// Pencarian berdasarkan atribut `id`. Ini satu-satunya bentuk pencarian
-    /// yang ada hari ini; selektor CSS masuk daftar [`super::CELAH`].
+    /// Pencarian cepat berdasarkan atribut `id`.
+    ///
+    /// Untuk selektor umum, lihat [`Document::pilih`].
     #[must_use]
     pub fn cari_id(&self, id: &str) -> Option<NodeId> {
         self.nodes
@@ -176,6 +177,19 @@ impl Document {
         } else {
             Some(rapi.to_string())
         }
+    }
+
+    /// HTML luar satu elemen, termasuk turunannya.
+    ///
+    /// `None` kalau node itu bukan elemen: node teks dan node dokumen tidak
+    /// punya tag pembuka, jadi tidak ada "HTML luar" yang bisa ditulis.
+    #[must_use]
+    pub fn luar_html(&self, id: NodeId) -> Option<String> {
+        let node = self.node(id)?;
+        node.tag()?;
+        let mut out = String::new();
+        self.tulis(id, &mut out);
+        Some(out)
     }
 
     /// Menulis dokumen kembali sebagai HTML.
@@ -324,5 +338,19 @@ mod tests {
     fn html_rusak_tetap_diurai() {
         let doc = Document::parse_html("<div><p>tanpa penutup").unwrap();
         assert!(doc.jumlah_elemen() >= 2);
+    }
+
+    #[test]
+    fn luar_html_hanya_untuk_elemen() {
+        let doc = Document::parse_html("<div class=\"k\"><p>x</p></div>").unwrap();
+        let div = doc.pilih_satu("div").unwrap().expect("div harus ada");
+        assert_eq!(
+            doc.luar_html(div).as_deref(),
+            Some("<div class=\"k\"><p>x</p></div>")
+        );
+        assert!(
+            doc.luar_html(doc.root()).is_none(),
+            "node dokumen tidak punya HTML luar"
+        );
     }
 }

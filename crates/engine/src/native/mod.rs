@@ -2,11 +2,12 @@
 //!
 //! Ini **fondasi**, bukan mesin penuh. Yang ada di sini sudah jalan dan diuji:
 //! [`dom::Document::parse_html`] membangun pohon arena dari HTML sungguhan
-//! lewat `html5ever`, [`layout::hitung`] menempatkan kotak lewat `taffy`, dan
+//! lewat `html5ever`, [`selectors`] mencocokkan selektor CSS terhadap pohon
+//! itu, [`layout::hitung`] menempatkan kotak lewat `taffy`, dan
 //! [`js::Isolat`] menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
-//! selektor CSS, kaskade stylesheet, pewarisan properti, pengukuran teks,
+//! kaskade stylesheet, pewarisan properti, pengukuran teks,
 //! peristiwa DOM, raster, pengambilan dokumen dari jaringan, tipe nilai balik
 //! JavaScript, dan peristiwa CDP. Memanggil ini "mesin browser yang selesai"
 //! akan jadi klaim palsu.
@@ -19,11 +20,13 @@
 pub mod dom;
 pub mod js;
 pub mod layout;
+pub mod selectors;
 pub mod tab_pool;
 
 pub use dom::{Document, Node, NodeId, NodeKind};
 pub use js::{Isolat, PaguIsolat};
 pub use layout::{Kotak, LaporanLayout, Viewport};
+pub use selectors::{GalatSelektor, Kombinator, Kompleks, OpAtribut, Pola, Sederhana};
 pub use tab_pool::{
     AlasanSingkir, BASELINE_MB, ColdStore, MemoryColdStore, PAGU_MB, PSS_PER_TAB_MB, PoolError,
     Snapshot, TabId, TabPool, tab_panas_maksimum,
@@ -36,7 +39,6 @@ use std::fmt;
 /// Daftar ini adalah kontrak: menambah kemampuan berarti menghapus barisnya
 /// di sini dan menambah tesnya, bukan sekadar menambah kode.
 pub const CELAH: &[&str] = &[
-    "selektor CSS (`selectors`) belum ada; pencarian node hanya lewat atribut id",
     "kaskade stylesheet `<style>`/`<link>` belum ada; hanya atribut `style` inline",
     "pewarisan properti dan nilai non-px (em, rem, %) belum ada",
     "pengukuran teks belum ada; node teks tidak menghasilkan kotak layout",

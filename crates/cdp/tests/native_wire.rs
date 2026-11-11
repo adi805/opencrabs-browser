@@ -392,7 +392,9 @@ async fn metode_belum_ada_menjawab_galat_yang_menyebut_lapisannya() {
 
     for (nomor, metode, lapisan) in [
         (3, "Page.captureScreenshot", "eyes"),
-        (4, "DOM.querySelector", "selektor"),
+        // `DOM.querySelector` dulu di sini; sekarang dijawab sungguhan, jadi
+        // yang menguji cabang "belum ada" adalah tumpukan jaringan.
+        (4, "Network.enable", "jaringan"),
         (5, "Input.dispatchMouseEvent", "hands"),
     ] {
         let frame = json!({

@@ -49,11 +49,10 @@ impl Galat {
             | "Input.dispatchKeyEvent"
             | "Input.insertText"
             | "Input.dispatchTouchEvent" => "pengiriman peristiwa DOM belum ada; itu lapisan hands",
-            "DOM.querySelector"
-            | "DOM.querySelectorAll"
-            | "DOM.resolveNode"
-            | "DOM.getOuterHTML"
-            | "DOM.getBoxModel" => "selektor CSS belum ada; pencarian node hanya lewat atribut id",
+            "DOM.getBoxModel" => {
+                "kotak layout belum memisahkan padding, border, dan margin; \
+                 `DOM.getBoxModel` butuh keempatnya, dan mengarangnya jadi kebohongan"
+            }
             "Network.enable" | "Network.getCookies" | "Network.setCookie" => {
                 "tidak ada tumpukan jaringan di mesin ini; dokumen masuk lewat \
                  `Page.setDocumentContent`"
@@ -329,6 +328,10 @@ impl Dalam {
                 Ok(json!({}))
             }
             "DOM.getDocument" => self.dokumen(params, sesi),
+            "DOM.querySelector" => self.dom_pilih(params, sesi, false),
+            "DOM.querySelectorAll" => self.dom_pilih(params, sesi, true),
+            "DOM.getOuterHTML" => self.dom_luar_html(params, sesi),
+            "DOM.resolveNode" => self.dom_simpul(params, sesi),
             "Runtime.evaluate" => self.evaluasi(params, sesi),
             // Metode yang tidak mengubah apa pun di mesin ini. Dijawab `{}`
             // karena memang tidak ada yang perlu dilakukan, bukan karena
@@ -568,6 +571,103 @@ impl Dalam {
         Ok(json!({ "root": node_json(&t.dokumen, t.dokumen.root(), kedalaman, 0) }))
     }
 
+    /// `DOM.querySelector` dan `DOM.querySelectorAll`.
+    ///
+    /// Pencarian dibatasi ke subtree `nodeId` kalau parameter itu dikirim,
+    /// sama seperti Chrome. Tanpa `nodeId`, seluruh dokumen yang dicari.
+    ///
+    /// `nodeId` yang dikembalikan adalah indeks arena [`Document`], bukan
+    /// nomor stabil seumur halaman: `Page.setDocumentContent` membangun ulang
+    /// dokumen, jadi nomor lama tidak berlaku lagi setelahnya.
+    fn dom_pilih(
+        &mut self,
+        params: &Value,
+        sesi: Option<&str>,
+        banyak: bool,
+    ) -> Result<Value, Galat> {
+        let selektor = param_teks(params, "selector")?;
+        let akar = match params.get("nodeId") {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(param_node_id(params)?),
+        };
+        let tab = self.tab_dari_sesi(sesi)?;
+        if self.pool.tab(tab).is_none() {
+            self.pool.hidupkan(tab).map_err(pool_galat)?;
+        }
+        let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+        let hasil = match akar {
+            Some(n) => t.dokumen.pilih_dalam(n, &selektor),
+            None => t.dokumen.pilih(&selektor),
+        }
+        .map_err(|err| Galat::baru(-32000, err.to_string()))?;
+        if banyak {
+            Ok(json!({ "nodeIds": hasil }))
+        } else {
+            // Chrome menjawab `nodeId: 0` kalau tidak ketemu, dan 0 di arena
+            // ini adalah node dokumen. `null` lebih jujur daripada angka yang
+            // bisa disalahartikan sebagai node sungguhan.
+            Ok(json!({ "nodeId": hasil.first().copied() }))
+        }
+    }
+
+    /// `DOM.getOuterHTML`: HTML satu node beserta turunannya.
+    fn dom_luar_html(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
+        let id = param_node_id(params)?;
+        let tab = self.tab_dari_sesi(sesi)?;
+        if self.pool.tab(tab).is_none() {
+            self.pool.hidupkan(tab).map_err(pool_galat)?;
+        }
+        let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+        let html = t.dokumen.luar_html(id).ok_or_else(|| {
+            Galat::baru(
+                -32000,
+                format!("node {id} bukan elemen, jadi tidak punya HTML luar"),
+            )
+        })?;
+        Ok(json!({ "outerHTML": html }))
+    }
+
+    /// `DOM.resolveNode`: pegangan ke node untuk `Runtime.callFunctionOn`.
+    ///
+    /// Mesin ini belum punya registri objek jarak jauh, jadi `objectId` adalah
+    /// penanda `node-<id>` dan `Runtime.callFunctionOn` belum menerimanya.
+    /// Bentuk jawabannya tetap sesuai protokol supaya klien tidak bingung.
+    fn dom_simpul(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
+        let id = param_node_id(params)?;
+        let tab = self.tab_dari_sesi(sesi)?;
+        if self.pool.tab(tab).is_none() {
+            self.pool.hidupkan(tab).map_err(pool_galat)?;
+        }
+        let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+        let node = t
+            .dokumen
+            .node(id)
+            .ok_or_else(|| Galat::baru(-32000, format!("node {id} tidak ada")))?;
+        let tag = node
+            .tag()
+            .ok_or_else(|| Galat::baru(-32000, format!("node {id} bukan elemen")))?;
+        let mut keterangan = tag.to_owned();
+        if let Some(v) = node.attr("id") {
+            keterangan.push('#');
+            keterangan.push_str(v);
+        }
+        if let Some(v) = node.attr("class") {
+            for k in v.split_ascii_whitespace() {
+                keterangan.push('.');
+                keterangan.push_str(k);
+            }
+        }
+        Ok(json!({
+            "object": {
+                "type": "object",
+                "subtype": "node",
+                "className": "Node",
+                "description": keterangan,
+                "objectId": format!("node-{id}"),
+            }
+        }))
+    }
+
     fn evaluasi(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
         let ekspresi = param_teks(params, "expression")?;
@@ -626,6 +726,14 @@ fn param_teks(params: &Value, nama: &str) -> Result<String, Galat> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| Galat::baru(-32602, format!("parameter `{nama}` wajib berupa string")))
+}
+
+fn param_node_id(params: &Value) -> Result<usize, Galat> {
+    let n = params
+        .get("nodeId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Galat::baru(-32602, "parameter `nodeId` wajib berupa angka"))?;
+    usize::try_from(n).map_err(|_| Galat::baru(-32602, "`nodeId` tidak boleh negatif"))
 }
 
 fn pool_galat(err: engine::native::PoolError) -> Galat {
