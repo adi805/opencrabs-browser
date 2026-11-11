@@ -39,9 +39,9 @@ pub const PAGU_MB: f64 = 100.0;
 ///
 /// Probe daemon native mencatat 20 MB RSS baseline, jadi angkanya punya dasar,
 /// tapi itu RSS satu probe, bukan PSS dan bukan pengukuran ulang. Tetap
-/// diperlakukan sebagai asumsi sampai `native_baseline_pss` (milestone 1)
-/// menjalankan pengukurannya sendiri: turunnya baseline cuma menaikkan jumlah
-/// tab panas, sedangkan naiknya baseline otomatis menurunkannya.
+/// diperlakukan sebagai asumsi sampai pengukuran PSS di beban acceptance ada
+/// (AC-009): turunnya baseline cuma menaikkan jumlah tab panas, sedangkan
+/// naiknya baseline otomatis menurunkannya.
 pub const BASELINE_MB: f64 = 20.0;
 
 /// Jumlah tab panas maksimum menurut anggaran, dibulatkan ke bawah.

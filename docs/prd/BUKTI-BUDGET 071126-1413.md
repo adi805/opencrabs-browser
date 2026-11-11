@@ -133,15 +133,21 @@ ulang; yang masih diasumsikan punya nama uji yang harus lulus sebelum angka 100 
 | Lightpanda 100 paralel | 410.2 MB | **TERUKUR pihak lain** | benchmark resmi, 100 proses terpisah |
 | Marjinal satu tab Rust (DOM+layout+JS) | **3.10 MB PSS, flat ke 99 tab** | **TERUKUR** | `ukur_memori 99`, hasil di `HASIL.txt`; harness mem-parse 3006 elemen, layout taffy, context rquickjs |
 | 99 tab Rust hidup serentak | **308.9 MB PSS** | **TERUKUR** | idem, baris `TAB99` dan `RINGKAS` |
-| Baseline engine Rust (tokio+HTTP+CDP) | 20 MB | **Diasumsikan** | harus dibuktikan uji `native_baseline_pss` di milestone 1 |
-| Biaya satu hot tab di engine lengkap | lebih dari 3.10 MB | **Diasumsikan** | uji `native_hot_tab_cost` di milestone 1, karena 3.10 MB belum memuat HTTP, CSS, renderer |
+| Baseline engine Rust (tokio+HTTP+CDP) | 20 MB **RSS** | **TERUKUR (RSS, satu probe)** | probe daemon native lewat `bench/rss.py`, 0 tab: `BUKTI-NATIVE-CDP 081126-1124.md`. PSS di beban acceptance belum diukur |
+| Biaya satu hot tab di engine lengkap | 0.08 MB RSS marjinal pada dokumen 403 node; 3.10 MB PSS pada dokumen 3006 node | **TERUKUR sebagian** | 99 tab x 403 node = 37.6 MB RSS (`BUKTI-NATIVE-CDP 081126-1124.md`). Beban 3006 node di dalam daemon native dan PSS-nya belum diukur, jadi kedua angka itu tidak boleh disamakan |
 | Metadata tab dingin | 1 KB | **Diasumsikan** | uji `native_cold_tab_metadata` di milestone 4 |
 | Rehidrasi | di bawah 50 ms | **Diasumsikan** | uji `test_tab_rehydration_latency` di milestone 4 |
 
-**Konsekuensi jujur.** Yang sekarang berdiri di atas pengukuran adalah biaya per tab (3.10 MB) dan
-konsekuensinya (99 tab hidup = 308.9 MB). Yang masih asumsi adalah baseline engine 20 MB, biaya tab
-di engine lengkap, metadata tab dingin, dan latency rehidrasi. Karena itu 97.5 MB di Kasus B adalah
-**proyeksi**, bukan hasil pengukuran, dan belum boleh ditulis sebagai bukti bahwa target tercapai.
+**Konsekuensi jujur.** Yang sekarang berdiri di atas pengukuran adalah biaya per tab (3.10 MB PSS
+di harness terpisah), konsekuensinya (99 tab hidup = 308.9 MB), dan baseline daemon native
+(20 MB RSS, 37.6 MB RSS pada 99 tab dokumen 403 node). Yang masih asumsi adalah PSS daemon native
+di beban acceptance, metadata tab dingin, dan latency rehidrasi. Karena itu 97.5 MB di Kasus B
+adalah **proyeksi**, bukan hasil pengukuran, dan belum boleh ditulis sebagai bukti bahwa target tercapai.
+
+**Catatan nama uji.** Dokumen ini dulu menyebut uji `native_baseline_pss` dan `native_hot_tab_cost`
+sebagai pembuktian milestone 1. Kedua uji itu tidak pernah ada di repo ini (`grep -rn` atas `crates/`
+= 0 hasil), jadi angka baseline dan biaya per tab di atas datang dari probe `bench/rss.py`, bukan dari
+cargo test. Yang belum ada dan tetap harus dibuat adalah pengukuran PSS di beban acceptance (AC-009).
 
 Milestone 1 wajib mengukur baseline engine sebelum milestone 4 memakai rumus ini. Kalau baseline
 keluar 30 MB bukan 20 MB, yang turun adalah jumlah hot tab (25 menjadi 22), bukan pagu 100 MB.

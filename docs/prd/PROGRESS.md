@@ -1,11 +1,11 @@
 ---
 document_type: project-progress
 project: "OpenCrabs Browser: web-opening engine"
-prd: "PRD-MESIN-BUKA-WEB 041126-0631.md"
+prd: "PRD-MESIN-RUST 071126-1413.md"
 status: in-progress
-current_milestone: 5
+current_milestone: 1
 total_milestones: 5
-last_updated: "2026-11-11 11:51"
+last_updated: "2026-11-12 05:35"
 ---
 
 # OpenCrabs Browser Progress
@@ -26,11 +26,11 @@ One read must be enough to continue without asking the owner anything.
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
 | Last passing check | `cargo xtask check` at `6bce7d6` (the AX tree and rasteriser commit series): `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check.log`). The same tree counted by hand with `cargo test --workspace` = 44 suites, **597 passed, 0 failed** (log `/tmp/ws-test.log`), which is 40 more than the 557 recorded at `4292878`, a tree 10 commits behind this one that predates the selector engine, the accessibility tree and the rasteriser. The earlier `4292878` gate still stands as the last one that followed a GitHub-built binary; the `6bce7d6` gate was run locally, so its receipts are the local logs above. After that gate, measured on the same host: only 2 chrome processes carried a `remote-debugging-port` (the live daemon on 9224/9225 and the production instance on 9222), so the live suites inside the gate left no new debugging browser behind. The raw total drifts while the daemon runs (`pgrep -c -x chrome` read 12 on one sample and 13 on the next, with `chrome_crashpad_handler` helpers alongside), so the two debugging-port processes are the signal, not the total. An earlier note in this row cited 53 chrome processes and an `oc-browser-leak-check.sh` run; that script is not present at `~/.opencrabs/scripts/` any more, so the counts above are the evidence for this gate. The packaged binary from GitHub run `42445976171` (head `2633095`, `sha256sum -c` OK, and predating the AX tree and rasteriser, hence 24 of today's 30 commands) served a full CDP round trip on `127.0.0.1:9234` and exited 0: `RustNativeEngine/0.2.0` in `/json/version`, 24 commands in `/json/protocol`, `Page.setDocumentContent` receipt `node: 8`, `DOM.getDocument depth=-1` 12 nodes, `Runtime.evaluate 6*7` = `"42"`, then a clean SIGTERM. Receipts in `docs/prd/BUKTI-NATIVE-CDP 081126-1124.md` |
 | Memory budget status | The separate `ukur-memori` harness measured 3.10 MB PSS marginal per tab for 3006-node documents, not `chrome-full` and not the native daemon (`docs/prd/BUKTI-BUDGET 071126-1413.md`). The native daemon probe measured 20 MB RSS baseline and 37.6 MB RSS with 99 tabs holding 403-node documents. Different workloads and RSS versus PSS prevent direct comparison. Native PSS at the acceptance workload, LRU eviction, and the 100 MB ceiling remain unverified (`docs/prd/BUKTI-NATIVE-CDP 081126-1124.md`). |
-| Open blockers | None inside this repo. PRD v0.2 is drafted and validated against prd-toolkit 4.4.0 with 0 blockers and 10 senior contracts (`docs/prd/PRD-MESIN-RUST 071126-1413.md`); the tenth is `Backup & Restore Drill Contract`, and the drill behind it ran on 2026-11-07 (`docs/prd/BUKTI-RESTORE 071126-2025.md`). One measurement is contaminated rather than blocked: `oc-browser-leak-check.sh` exits 1 because of a pre-existing orphan (`chrome-headless-shell`, pid `598510`, started 2026-11-07 21:46, reparented to `systemd --user`), not because of this repo's tests; the host-wide `chrome` count is unchanged before and after the SIGTERM. Permanent deletion of `adi805/opencrabs-web` is outside this repo and still waits on `gh auth refresh -s delete_repo` |
+| Open blockers | None inside this repo. PRD v0.2 is drafted and validated against prd-toolkit 4.4.0 with 0 blockers and 10 senior contracts (`docs/prd/PRD-MESIN-RUST 071126-1413.md`); the tenth is `Backup & Restore Drill Contract`, and the drill behind it ran on 2026-11-07 (`docs/prd/BUKTI-RESTORE 071126-2025.md`). One measurement is contaminated rather than blocked: `oc-browser-leak-check.sh` exits 1 because of a pre-existing orphan (`chrome-headless-shell`, pid `598510`, started 2026-11-07 21:46, reparented to `systemd --user`), not because of this repo's tests; the host-wide `chrome` count is unchanged before and after the SIGTERM. Permanent deletion of `adi805/opencrabs-web` is outside this repo and still waits on `gh auth refresh -s delete_repo`. One toolkit finding is a false positive, recorded so the next session does not "fix" a correct command: `prd.mjs verify-commands` reports `FLAG_UNKNOWN` for `bench/cdp-smoke.mjs --endpoint`, while the flag is read by `argv.indexOf('--endpoint')` at `bench/cdp-smoke.mjs:18-24` and listed in that script's usage header |
 
 ## Current State
 
-- PRD version: 0.1.0 (implementation complete) -> 0.2.0 (draft specification ready in `docs/prd/PRD-MESIN-RUST 071126-1413.md`)
+- PRD version: 0.1.0 (implementation complete) -> 0.2.0 (implementation in progress in `docs/prd/PRD-MESIN-RUST 071126-1413.md`)
 - Execution mode: native (no build has been requested for new requirements)
 - Active milestone / next action: v0.1 milestones 1 to 5 are **Done** (eyes and
   hands, failure classification + diagnostics, session and engine resilience,
@@ -48,8 +48,15 @@ One read must be enough to continue without asking the owner anything.
   The per-tab cost is no longer an assumption: a measured harness shows **3.10 MB
   PSS marginal per live tab, flat from tab 2 to tab 99**, and 99 live tabs at
   **308.9 MB**. That measurement cut the old 12 MB assumption by 3.9x, so the same
-  100 MB ceiling now buys **25 hot tabs instead of 5**. The engine baseline (20 MB)
-  and cold-tab metadata are still unmeasured and belong to milestone 1.
+  100 MB ceiling now buys **25 hot tabs instead of 5**, a provisional budget taken
+  from the harness, not from a native measurement. The engine baseline is measured
+  in RSS: 20 MB with 0 tabs and 37.6 MB at 99 tabs holding 403-node documents
+  (`docs/prd/BUKTI-NATIVE-CDP 081126-1124.md`). PSS at the acceptance workload,
+  cold-tab metadata and rehydration latency remain unmeasured.
+  Milestone counters: v0.2 stands at 1 of 5 verified (milestone 1), milestones 2
+  to 5 are In Progress, so this file's `current_milestone` reads 1 rather than the
+  5 that v0.1 finished at. v0.1 is shipped and its own record stays in
+  `docs/prd/PRD-MESIN-BUKA-WEB 041126-0631.md`.
 - Build authority: the owner granted full execution permission on 3 November 2026.
 - Required unresolved input: none. The three owner decisions that used to be
   open questions are now defaults with a reversal cost in PRD section 2 Review Focus.
