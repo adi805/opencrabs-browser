@@ -3,12 +3,14 @@
 //! Ini **fondasi**, bukan mesin penuh. Yang ada di sini sudah jalan dan diuji:
 //! [`dom::Document::parse_html`] membangun pohon arena dari HTML sungguhan
 //! lewat `html5ever`, [`selectors`] mencocokkan selektor CSS terhadap pohon
-//! itu, [`layout::hitung`] menempatkan kotak lewat `taffy`, dan
-//! [`js::Isolat`] menjalankan skrip lewat `rquickjs` dengan pagu memori.
+//! itu, [`layout::hitung`] menempatkan kotak lewat `taffy`, [`axtree::pohon`]
+//! membaca isi halaman sebagai pohon aksesibilitas, [`paint::lukis`]
+//! merasterkan kotak menjadi PNG lewat `tiny-skia`, dan [`js::Isolat`]
+//! menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
 //! kaskade stylesheet, pewarisan properti, pengukuran teks,
-//! peristiwa DOM, raster, pengambilan dokumen dari jaringan, tipe nilai balik
+//! peristiwa DOM, pengambilan dokumen dari jaringan, tipe nilai balik
 //! JavaScript, dan peristiwa CDP. Memanggil ini "mesin browser yang selesai"
 //! akan jadi klaim palsu.
 //!
@@ -17,9 +19,11 @@
 //! [`tab_pool::TabPool`] adalah `cdp::native_wire`, dan yang menyalakannya
 //! sebagai mesin adalah `cdp::native_wire::NativeEngine`.
 
+pub mod axtree;
 pub mod dom;
 pub mod js;
 pub mod layout;
+pub mod paint;
 pub mod selectors;
 pub mod tab_pool;
 
@@ -43,7 +47,14 @@ pub const CELAH: &[&str] = &[
     "pewarisan properti dan nilai non-px (em, rem, %) belum ada",
     "pengukuran teks belum ada; node teks tidak menghasilkan kotak layout",
     "peristiwa DOM (klik, input, fokus) belum ada; itu tugas lapisan hands",
-    "rasterisasi bitmap (`tiny-skia`) belum ada; itu tugas lapisan eyes",
+    "raster hanya melukis latar kotak dari atribut `style` inline; teks, gambar, \
+     gradien, bayangan, garis (`border`), dan `border-radius` tidak dilukis, jadi \
+     halaman yang isinya teks saja menghasilkan kanvas kosong",
+    "`Page.captureScreenshot` hanya PNG pada skala 1 dengan viewport bawaan \
+     800x600: `captureBeyondViewport`, `optimizeForSpeed`, `fromSurface`, dan \
+     `clip.scale` tidak didukung, dan JPEG ditolak alih-alih dikirim sebagai PNG",
+    "pohon aksesibilitas belum menghitung `aria-labelledby` berantai, status \
+     *focusable*/*selected*/*expanded*, dan konten di dalam `<iframe>`",
     "pengambilan dokumen dari jaringan (HTTP/TLS) belum ada; HTML masuk lewat \
      `Page.setDocumentContent`, dan `Page.navigate` hanya melayani `about:blank` \
      serta `data:text/html`",
@@ -68,6 +79,9 @@ pub enum NativeError {
 
     #[error("skrip JavaScript gagal: {0}")]
     Script(String),
+
+    #[error("rasterisasi gagal: {0}")]
+    Raster(String),
 }
 
 impl NativeError {
@@ -86,5 +100,9 @@ impl NativeError {
 
     pub(crate) fn script(err: impl fmt::Debug) -> Self {
         Self::Script(format!("{err:?}"))
+    }
+
+    pub(crate) fn raster(pesan: impl Into<String>) -> Self {
+        Self::Raster(pesan.into())
     }
 }

@@ -14,4 +14,5 @@ rquickjs.workspace = true
 serde_json.workspace = true
 taffy.workspace = true
 thiserror.workspace = true
+tiny-skia.workspace = true
 tracing.workspace = true

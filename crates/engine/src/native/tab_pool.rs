@@ -23,13 +23,25 @@ use super::dom::Document;
 use super::js::{Isolat, PaguIsolat};
 use super::layout::{LaporanLayout, Viewport, hitung};
 
-/// Biaya PSS marginal satu tab hidup, dalam MB. Terukur, bukan taksiran.
+/// Biaya PSS marginal satu tab hidup, dalam MB.
+///
+/// Terukur, tapi bukan di daemon native ini: angkanya dari harness terpisah
+/// (`html5ever` + `taffy` + `rquickjs`, dokumen 3006 node, datar sampai 99 tab).
+/// Probe daemon native mengukur RSS, bukan PSS, dan dengan dokumen 403 node,
+/// jadi kedua angka tidak boleh dibandingkan langsung. Jangan kutip ini sebagai
+/// hasil ukur daemon sampai ada probe native dengan beban yang setara.
 pub const PSS_PER_TAB_MB: f64 = 3.10;
 
 /// Pagu memori proses, dalam MB. Ini angka yang dijanjikan ke owner.
 pub const PAGU_MB: f64 = 100.0;
 
-/// Baseline mesin sebelum tab pertama. **Asumsi** 20 MB, diukur di milestone 1.
+/// Baseline mesin sebelum tab pertama. **Asumsi** 20 MB.
+///
+/// Probe daemon native mencatat 20 MB RSS baseline, jadi angkanya punya dasar,
+/// tapi itu RSS satu probe, bukan PSS dan bukan pengukuran ulang. Tetap
+/// diperlakukan sebagai asumsi sampai `native_baseline_pss` (milestone 1)
+/// menjalankan pengukurannya sendiri: turunnya baseline cuma menaikkan jumlah
+/// tab panas, sedangkan naiknya baseline otomatis menurunkannya.
 pub const BASELINE_MB: f64 = 20.0;
 
 /// Jumlah tab panas maksimum menurut anggaran, dibulatkan ke bawah.

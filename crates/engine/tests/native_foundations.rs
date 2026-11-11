@@ -111,10 +111,13 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // "selektor CSS" dicabut setelah `native::selectors` mencocokkan tag,
     // kelas, id, atribut, kombinator, dan pseudo-kelas; tesnya ada di modul
     // itu sendiri dan di `tests/native_state.rs` lewat `DOM.querySelector`.
+    // "rasterisasi bitmap" dicabut setelah `native::paint` melukis kotak
+    // layout ke PNG sungguhan lewat `tiny-skia`; yang tersisa bukan lagi
+    // "belum ada raster", tapi batas raster yang sebenarnya.
     // Yang menggantikannya adalah celah yang masih benar-benar terbuka.
     for wajib in [
         "pengukuran teks",
-        "rasterisasi",
+        "raster hanya melukis",
         "jaringan",
         "peristiwa CDP",
     ] {
@@ -129,5 +132,9 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("selektor CSS"),
         "selektor CSS sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
+    );
+    assert!(
+        !semua.contains("rasterisasi bitmap"),
+        "rasterisasi sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
     );
 }
