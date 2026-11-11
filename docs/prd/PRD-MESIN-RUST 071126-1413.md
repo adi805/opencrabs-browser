@@ -7,7 +7,7 @@ total_milestones: 5
 type: "tool"
 tech_stack:
   - "Rust 1.85+ (workspace crates: engine, cdp, lifecycle, browserd, policy, store, testing)"
-  - "HTML5 & CSS: html5ever (DOM parser) + cssparser + taffy (flexbox/grid layout engine) + selectors"
+  - "HTML5 & CSS: html5ever (DOM parser) + taffy (flexbox/grid layout engine). Selector matching is an in-repo documented subset (`crates/engine/src/native/selectors.rs`) rather than the `selectors`/`cssparser` crates, to keep the engine dependency-light; the subset and its limits are stated in that module"
   - "JavaScript Runtime: rquickjs (QuickJS bindings, ultra-light footprint <1.5MB per execution context)"
   - "Visual Rasterizer: tiny-skia (software 2D rasterizer for on-demand headless screenshots, zero GPU dependency)"
   - "CDP Broker: crates/cdp async WebSocket server delivering standard DevTools JSON-RPC"
@@ -312,9 +312,9 @@ The status indicator is canonical; the evidence behind it is here, measured at `
 
 | # | Status | What exists today, and what does not |
 |---|--------|--------------------------------------|
-| 1 | ✅ Verified | `html5ever` + `taffy` DOM and box tree run. Baseline measured, not assumed: 20 MB RSS with 0 tabs, 37.6 MB with 99 tabs holding 403-node documents (0.08 MB/tab marginal). Evidence: `docs/prd/BUKTI-NATIVE-CDP 081126-1124.md` |
+| 1 | ✅ Verified | `html5ever` + `taffy` DOM and box tree run, and CSS selectors (tag, class, id, attribute operators, descendant and child combinators, `:first-child`/`:nth-child()`/`:not()`) match against that same tree in `crates/engine/src/native/selectors.rs`, answered over CDP by `DOM.querySelector`/`querySelectorAll`/`getOuterHTML`/`resolveNode`. Baseline measured, not assumed: 20 MB RSS with 0 tabs, 37.6 MB with 99 tabs holding 403-node documents (0.08 MB/tab marginal). Evidence: `docs/prd/BUKTI-NATIVE-CDP 081126-1124.md` |
 | 2 | ⬜ Not Started | No `tiny-skia`, no `Page.captureScreenshot`, no `Accessibility.getFullAXTree`, no synthetic event dispatcher in the native engine. `engine::native::CELAH` names rasterisation and DOM events as missing |
-| 3 | 🔄 In Progress | `rquickjs` evaluates expressions with preserved state inside an isolate. No query selectors, no event dispatching, no timer loops |
+| 3 | 🔄 In Progress | `rquickjs` evaluates expressions with preserved state inside an isolate. Selectors exist in Rust and over CDP, but `document.querySelector` **inside the isolate** still does not exist (the isolate's `document` is a plain object, named in `CELAH`). No event dispatching, no timer loops |
 | 4 | 🔄 In Progress | `crates/engine/src/native/tab_pool.rs` holds 99 tabs and refuses the 100th with a capacity error (`crates/browserd/tests/native_tab_capacity_cap.rs`, 2 passed). No LRU eviction, no SQLite snapshot or rehydration, and no PSS budget test |
 | 5 | 🔄 In Progress | `/json/version` answers `RustNativeEngine/0.2.0` from the GitHub-built binary, `kind = "rust-native"` boots, and the CDP surface serves 24 commands end to end. The end-to-end agent suite cannot pass until the engine can fetch a page over HTTP. `cargo xtask check` exits 0 at `4292878` |
 
