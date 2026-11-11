@@ -327,6 +327,7 @@ async fn protokol() -> Json<Value> {
                 { "name": "setDocumentContent" },
                 { "name": "getFrameTree" },
                 { "name": "bringToFront" },
+                { "name": "captureScreenshot" },
                 { "name": "enable" },
                 { "name": "disable" }
             ]},
@@ -344,7 +345,10 @@ async fn protokol() -> Json<Value> {
                 { "name": "enable" },
                 { "name": "disable" }
             ]},
-            { "domain": "Log", "commands": [{ "name": "enable" }, { "name": "clear" }]}
+            { "domain": "Log", "commands": [{ "name": "enable" }, { "name": "clear" }]},
+            { "domain": "Accessibility", "commands": [
+                { "name": "getFullAXTree" }
+            ]}
         ]
     }))
 }

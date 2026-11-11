@@ -391,7 +391,9 @@ async fn metode_belum_ada_menjawab_galat_yang_menyebut_lapisannya() {
         .to_owned();
 
     for (nomor, metode, lapisan) in [
-        (3, "Page.captureScreenshot", "eyes"),
+        // `Page.captureScreenshot` dulu di sini; sekarang dijawab sungguhan,
+        // jadi yang menguji cabang "belum ada" adalah MHTML dan PDF.
+        (3, "Page.printToPDF", "PDF"),
         // `DOM.querySelector` dulu di sini; sekarang dijawab sungguhan, jadi
         // yang menguji cabang "belum ada" adalah tumpukan jaringan.
         (4, "Network.enable", "jaringan"),
@@ -517,6 +519,173 @@ async fn stop_menutup_port_dan_tidak_menyisakan_soket() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("port {port} masih menerima koneksi setelah stop");
+}
+
+/// Menyiapkan satu tab berisi HTML lalu mengembalikan `sessionId`-nya.
+///
+/// Dipakai tes di bawah supaya yang diuji benar-benar jalur protokol, bukan
+/// pemanggilan fungsi internal.
+async fn tab_dengan(soket: &mut Klien, html: &str) -> String {
+    let buat = minta_cdp(
+        soket,
+        1,
+        "Target.createTarget",
+        json!({"url": "about:blank"}),
+    )
+    .await;
+    let id = buat["result"]["targetId"]
+        .as_str()
+        .expect("targetId")
+        .to_owned();
+    let lekat = minta_cdp(
+        soket,
+        2,
+        "Target.attachToTarget",
+        json!({"targetId": id, "flatten": true}),
+    )
+    .await;
+    let sesi = lekat["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
+    let isi = minta_cdp_sesi(
+        soket,
+        3,
+        "Page.setDocumentContent",
+        json!({"frameId": "FRAME-0", "html": html}),
+        &sesi,
+    )
+    .await;
+    assert!(isi.get("error").is_none(), "setDocumentContent: {isi}");
+    sesi
+}
+
+/// AC: agen bisa membaca halaman tanpa penglihatan lewat protokol.
+#[tokio::test]
+async fn accessibility_get_full_ax_tree_mengirim_peran_dan_nama() {
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+    let mut soket = sambung(port, "/devtools/browser").await;
+    let sesi = tab_dengan(
+        &mut soket,
+        "<html><body><h1>Judul</h1><a href='/x'>Beranda</a>\
+         <button aria-label='Tutup'>X</button></body></html>",
+    )
+    .await;
+
+    let balas = minta_cdp_sesi(
+        &mut soket,
+        10,
+        "Accessibility.getFullAXTree",
+        json!({}),
+        &sesi,
+    )
+    .await;
+    assert!(balas.get("error").is_none(), "getFullAXTree: {balas}");
+    let simpul = balas["result"]["nodes"].as_array().expect("nodes array");
+    let peran: Vec<&str> = simpul
+        .iter()
+        .filter_map(|n| n["role"]["value"].as_str())
+        .collect();
+    assert!(peran.contains(&"heading"), "harus ada heading: {peran:?}");
+    assert!(peran.contains(&"link"), "harus ada link: {peran:?}");
+
+    let heading = simpul
+        .iter()
+        .find(|n| n["role"]["value"] == "heading")
+        .expect("simpul heading");
+    assert_eq!(heading["name"]["value"], "Judul");
+    assert_eq!(heading["name"]["type"], "computedString");
+    assert!(
+        heading["backendDOMNodeId"].as_u64().is_some(),
+        "AX harus bisa dilacak balik ke node DOM: {heading}"
+    );
+    assert!(
+        heading["parentId"].is_string(),
+        "simpul selain akar punya induk: {heading}"
+    );
+
+    let tombol = simpul
+        .iter()
+        .find(|n| n["role"]["value"] == "button")
+        .expect("simpul button");
+    assert_eq!(
+        tombol["name"]["value"], "Tutup",
+        "aria-label menang atas isi teks"
+    );
+
+    mesin.stop().expect("berhenti");
+}
+
+/// AC: tangkapan layar adalah PNG sungguhan dengan ukuran yang diminta, dan
+/// format yang belum didukung ditolak, bukan diganti diam-diam.
+#[tokio::test]
+async fn page_capture_screenshot_mengirim_png_asli_dan_menolak_format_lain() {
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+    let mut soket = sambung(port, "/devtools/browser").await;
+    let sesi = tab_dengan(
+        &mut soket,
+        "<html><body><div style='width:50px;height:50px;background-color:#ff0000'>\
+         </div></body></html>",
+    )
+    .await;
+
+    let balas = minta_cdp_sesi(
+        &mut soket,
+        10,
+        "Page.captureScreenshot",
+        json!({"format": "png", "clip": {"x": 0, "y": 0, "width": 120, "height": 90}}),
+        &sesi,
+    )
+    .await;
+    assert!(balas.get("error").is_none(), "captureScreenshot: {balas}");
+    let data = balas["result"]["data"].as_str().expect("data base64");
+    let png = cdp::base64::dekode(data).expect("base64 yang dikirim harus sah");
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "harus PNG asli");
+    let lebar = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let tinggi = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    assert_eq!((lebar, tinggi), (120, 90), "ukuran mengikuti clip");
+    assert_eq!(
+        balas["result"]["receipt"]["kotakDilukis"], 1,
+        "satu kotak berlatar harus dilukis: {balas}"
+    );
+
+    let jpeg = minta_cdp_sesi(
+        &mut soket,
+        11,
+        "Page.captureScreenshot",
+        json!({"format": "jpeg"}),
+        &sesi,
+    )
+    .await;
+    assert_eq!(
+        jpeg["error"]["code"],
+        json!(-32602),
+        "JPEG harus ditolak, bukan dikirim sebagai PNG: {jpeg}"
+    );
+    assert!(
+        jpeg["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("PNG")),
+        "pesan galat harus menyebut format yang didukung: {jpeg}"
+    );
+
+    let skala = minta_cdp_sesi(
+        &mut soket,
+        12,
+        "Page.captureScreenshot",
+        json!({"clip": {"x": 0, "y": 0, "width": 10, "height": 10, "scale": 2}}),
+        &sesi,
+    )
+    .await;
+    assert_eq!(
+        skala["error"]["code"],
+        json!(-32602),
+        "scale != 1 harus ditolak, bukan diabaikan: {skala}"
+    );
+
+    mesin.stop().expect("berhenti");
 }
 
 async fn tunggu_id(soket: &mut Klien, id: i64) -> Value {

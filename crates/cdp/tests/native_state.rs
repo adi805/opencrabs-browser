@@ -454,3 +454,138 @@ fn dom_get_box_model_masih_menyebut_kekurangannya() {
         "galat harus menyebut bagian yang kurang: {pesan}"
     );
 }
+
+/// `Accessibility.getFullAXTree` menjawab pohon sungguhan dari DOM yang sudah
+/// dimuat, bukan `{}` kosong. Yang diperiksa: peran, nama, dan tautan
+/// `backendDOMNodeId` yang bisa dilacak balik ke `DOM.*`.
+#[test]
+fn accessibility_get_full_ax_tree_membawa_peran_dan_nama() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({
+            "frameId": "utama",
+            "html": "<html><head><title>Halaman</title></head>\
+                     <body><h1>Judul</h1><p>isi</p>\
+                     <button aria-label=\"Tutup\">X</button></body></html>"
+        }),
+        &sesi,
+    );
+    let hasil = ok_sesi(&state, 4, "Accessibility.getFullAXTree", json!({}), &sesi);
+    let simpul = hasil["nodes"].as_array().expect("nodes array");
+    assert!(!simpul.is_empty(), "pohon AX tidak boleh kosong");
+
+    let peran = |role: &str| -> Vec<&Value> {
+        simpul
+            .iter()
+            .filter(|n| n["role"]["value"].as_str() == Some(role))
+            .collect()
+    };
+    let judul = peran("heading");
+    assert_eq!(judul.len(), 1, "satu heading: {simpul:#?}");
+    assert_eq!(judul[0]["name"]["value"].as_str(), Some("Judul"));
+    assert!(
+        judul[0]["backendDOMNodeId"].is_number(),
+        "heading harus punya backendDOMNodeId"
+    );
+    assert_eq!(peran("paragraph")[0]["name"]["value"].as_str(), Some("isi"));
+    let tombol = peran("button");
+    assert_eq!(
+        tombol[0]["name"]["value"].as_str(),
+        Some("Tutup"),
+        "nama diambil dari aria-label"
+    );
+    // Akar pohon adalah html, sama seperti Chrome.
+    assert_eq!(simpul[0]["role"]["value"].as_str(), Some("RootWebArea"));
+    // `head` dan `title` tidak muncul sebagai simpul.
+    assert!(
+        peran("generic")
+            .iter()
+            .all(|n| n["backendDOMNodeId"] != json!(0)),
+        "dokumen bukan simpul AX"
+    );
+}
+
+/// Tangkapan layar mengembalikan PNG sungguhan dalam base64, dengan ukuran
+/// yang diminta klip, bukan PNG kosong atau `{}`.
+#[test]
+fn capture_screenshot_mengembalikan_png_base64() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({
+            "frameId": "utama",
+            "html": "<body><div style=\"width:60px;height:40px;background-color:#ff0000\"></div></body>"
+        }),
+        &sesi,
+    );
+    let hasil = ok_sesi(
+        &state,
+        4,
+        "Page.captureScreenshot",
+        json!({"format": "png", "clip": {"x": 0, "y": 0, "width": 60, "height": 40}}),
+        &sesi,
+    );
+    let data = hasil["data"].as_str().expect("data base64");
+    let png = cdp::base64::dekode(data).expect("base64 sah");
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "harus PNG sungguhan");
+    let lebar = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let tinggi = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    assert_eq!((lebar, tinggi), (60, 40), "ukuran mengikuti klip");
+    assert_eq!(hasil["receipt"]["kotakDilukis"].as_u64(), Some(1));
+}
+
+/// JPEG ditolak dengan pesan yang menyebut yang didukung, bukan diam-diam
+/// mengirim PNG berlabel JPEG.
+#[test]
+fn capture_screenshot_menolak_format_selain_png() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    let jawab = balas_sesi(
+        &state,
+        3,
+        "Page.captureScreenshot",
+        json!({"format": "jpeg", "quality": 80}),
+        &sesi,
+    );
+    assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
+    let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        pesan.contains("PNG"),
+        "galat harus menyebut format yang didukung: {pesan}"
+    );
+}
+
+/// Klip dengan skala selain 1 ditolak: merasterisasi pada skala lain butuh
+/// penskalaan kanvas, dan mengabaikannya berarti mengirim ukuran yang salah.
+#[test]
+fn capture_screenshot_menolak_klip_berskala() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    let jawab = balas_sesi(
+        &state,
+        3,
+        "Page.captureScreenshot",
+        json!({
+            "format": "png",
+            "clip": {"x": 0, "y": 0, "width": 10, "height": 10, "scale": 2}
+        }),
+        &sesi,
+    );
+    assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
+    let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        pesan.contains("scale"),
+        "galat harus menyebut scale: {pesan}"
+    );
+}

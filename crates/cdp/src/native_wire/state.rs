@@ -12,11 +12,19 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use engine::native::{Document, MemoryColdStore, NodeId, NodeKind, TabId, TabPool};
+use engine::native::layout::Viewport;
+use engine::native::{Document, MemoryColdStore, NodeId, NodeKind, TabId, TabPool, axtree, paint};
 use serde_json::{Map, Value, json};
 
 /// Batas jumlah tab yang bisa dialamatkan, dari PRD v0.2 (FR-005).
 pub const MAKS_TAB: usize = 99;
+
+/// Ukuran jendela bawaan saat klien tidak menyebut ukuran apa pun.
+///
+/// 800x600 sama dengan bawaan Chrome headless baru. Angka ini dipakai apa
+/// adanya: mengubahnya diam-diam akan menggeser hasil layout tanpa ada yang
+/// meminta.
+pub const VIEWPORT_BAWAAN: (f32, f32) = (800.0, 600.0);
 
 /// Galat protokol, sudah dalam bentuk yang siap dikirim ke klien.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +50,8 @@ impl Galat {
     #[must_use]
     pub fn belum_ada(metode: &str) -> Self {
         let alasan = match metode {
-            "Page.captureScreenshot" | "Page.captureSnapshot" | "Page.printToPDF" => {
-                "rasterisasi bitmap belum ada; itu lapisan eyes (`tiny-skia`)"
+            "Page.captureSnapshot" | "Page.printToPDF" => {
+                "hanya PNG yang bisa dirasterkan; MHTML dan PDF belum ada"
             }
             "Input.dispatchMouseEvent"
             | "Input.dispatchKeyEvent"
@@ -322,6 +330,8 @@ impl Dalam {
             }
             "Page.setDocumentContent" => self.set_konten(params, sesi),
             "Page.getFrameTree" => self.pohon_frame(sesi),
+            "Page.captureScreenshot" => self.tangkap_layar(params, sesi),
+            "Accessibility.getFullAXTree" => self.pohon_ax(sesi),
             "Page.bringToFront" => {
                 let tab = self.tab_dari_sesi(sesi)?;
                 self.aktifkan_tab(tab)?;
@@ -560,6 +570,63 @@ impl Dalam {
         }))
     }
 
+    /// `Accessibility.getFullAXTree`: isi halaman dalam bentuk yang bisa
+    /// dibaca agen tanpa penglihatan.
+    ///
+    /// Simpul yang `ignored` tetap dikirim, sama seperti Chrome: klien yang
+    /// memutuskan apa yang dilewati, bukan mesin ini.
+    fn pohon_ax(&mut self, sesi: Option<&str>) -> Result<Value, Galat> {
+        let tab = self.tab_dari_sesi(sesi)?;
+        if self.pool.tab(tab).is_none() {
+            self.pool.hidupkan(tab).map_err(pool_galat)?;
+        }
+        let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+        Ok(axtree::json_pohon(&t.dokumen))
+    }
+
+    /// `Page.captureScreenshot`: rasterisasi kotak layout menjadi PNG.
+    ///
+    /// Hanya PNG. JPEG butuh encoder lain, dan mengaku bisa JPEG lalu mengirim
+    /// PNG adalah kebohongan yang baru ketahuan di klien.
+    fn tangkap_layar(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
+        let format = params
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("png");
+        if !format.eq_ignore_ascii_case("png") {
+            return Err(Galat::baru(
+                -32602,
+                format!("format '{format}' belum didukung: mesin native hanya mengeluarkan PNG"),
+            ));
+        }
+        let klip = klip_dari(params)?;
+        let tab = self.tab_dari_sesi(sesi)?;
+        if self.pool.tab(tab).is_none() {
+            self.pool.hidupkan(tab).map_err(pool_galat)?;
+        }
+        let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+        // Viewport harus memuat klip; kalau tidak, layout dihitung pada kanvas
+        // yang lebih kecil daripada potongan yang diminta dan kotaknya terpotong
+        // sebelum sampai ke raster.
+        let viewport = match klip {
+            Some(k) => Viewport::new((k.x + k.width).max(1.0), (k.y + k.height).max(1.0)),
+            None => Viewport::new(VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1),
+        };
+        let raster = paint::lukis(&t.dokumen, viewport, klip)
+            .map_err(|err| Galat::baru(-32000, format!("tangkapan layar gagal: {err}")))?;
+        Ok(json!({
+            "data": crate::base64::kodekan(&raster.png),
+            // Tanda terima, bukan hiasan: klien bisa tahu berapa kotak yang
+            // benar-benar dilukis dan deklarasi mana yang tidak didukung.
+            "receipt": {
+                "width": raster.width,
+                "height": raster.height,
+                "kotakDilukis": raster.kotak_dilukis,
+                "diabaikan": raster.diabaikan,
+            },
+        }))
+    }
+
     fn dokumen(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
         // `depth` bawaan Chrome adalah 1: akar dan anak langsungnya.
@@ -734,6 +801,47 @@ fn param_node_id(params: &Value) -> Result<usize, Galat> {
         .and_then(Value::as_i64)
         .ok_or_else(|| Galat::baru(-32602, "parameter `nodeId` wajib berupa angka"))?;
     usize::try_from(n).map_err(|_| Galat::baru(-32602, "`nodeId` tidak boleh negatif"))
+}
+
+/// Membaca `params.clip` menjadi potongan yang bisa dilukis.
+///
+/// `scale` ditolak kalau bukan 1: mesin ini belum menskalakan raster, dan
+/// menerima lalu mengabaikannya akan mengirim gambar dengan ukuran yang tidak
+/// diminta klien.
+fn klip_dari(params: &Value) -> Result<Option<paint::Klip>, Galat> {
+    let Some(k) = params.get("clip").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    if let Some(skala) = k.get("scale").and_then(Value::as_f64)
+        && (skala - 1.0).abs() > f64::EPSILON
+    {
+        return Err(Galat::baru(
+            -32602,
+            format!("clip.scale {skala} belum didukung: raster hanya pada skala 1"),
+        ));
+    }
+    // f64 -> f32 di sini aman untuk koordinat CSS: nilai di luar jangkauan f32
+    // bukan koordinat halaman yang masuk akal.
+    #[allow(clippy::cast_possible_truncation)]
+    let angka = |nama: &str| -> Result<f32, Galat> {
+        k.get(nama)
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .ok_or_else(|| Galat::baru(-32602, format!("clip.{nama} wajib berupa angka")))
+    };
+    let (x, y, width, height) = (angka("x")?, angka("y")?, angka("width")?, angka("height")?);
+    if width <= 0.0 || height <= 0.0 {
+        return Err(Galat::baru(
+            -32602,
+            "clip.width dan clip.height harus lebih besar dari nol",
+        ));
+    }
+    Ok(Some(paint::Klip {
+        x,
+        y,
+        width,
+        height,
+    }))
 }
 
 fn pool_galat(err: engine::native::PoolError) -> Galat {
