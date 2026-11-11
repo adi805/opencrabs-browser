@@ -48,8 +48,10 @@ impl PaguIsolat {
 ///
 /// Cakupannya sengaja sempit: hanya `console` dan alias `window`. Tidak ada
 /// `fetch`, tidak ada `require`, tidak ada akses berkas maupun jaringan dari
-/// dalam isolat. `fetch` masuk daftar [`super::CELAH`] sampai ada jalur
-/// jaringan yang lewat daemon, bukan langsung dari skrip.
+/// dalam isolat. Mesin ini sudah bisa memuat dokumen `http`/`https`, tapi itu
+/// jalur navigasi di `cdp::native_wire::jaringan`, bukan izin bagi skrip
+/// halaman untuk membuka koneksi sendiri; `fetch` tetap tercatat di
+/// [`super::CELAH`] sampai ada jalur yang melewati kebijakan daemon.
 const PEMBUKA: &str = r#"
 globalThis.__log = [];
 globalThis.console = {

@@ -5,8 +5,14 @@
 //! file ini, jadi seluruh perilakunya bisa diuji tanpa membuka port.
 //!
 //! Dua hal yang sengaja dijawab dengan galat alih-alih pura-pura bisa: metode
-//! yang belum dibangun (lihat [`Galat::belum_ada`]) dan navigasi ke URL
-//! jaringan, yang butuh klien HTTP yang belum ada di mesin ini.
+//! yang belum dibangun (lihat [`Galat::belum_ada`]) dan URL yang tidak bisa
+//! diambil, termasuk skema di luar `http`/`https`.
+//!
+//! Pengambilan dokumen dari jaringan **tidak** terjadi di dalam file ini.
+//! [`Dalam`] dipegang satu kunci, jadi menunggu jaringan sambil memegangnya
+//! akan menghentikan seluruh tab. Pemanggil async mengambil dokumennya lebih
+//! dulu lewat [`super::jaringan`], lalu menyerahkannya sebagai parameter ke
+//! [`NativeState::tangani_ambil`].
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -15,6 +21,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use engine::native::layout::Viewport;
 use engine::native::{Document, MemoryColdStore, NodeId, NodeKind, TabId, TabPool, axtree, paint};
 use serde_json::{Map, Value, json};
+
+use super::jaringan::{Ambilan, Sumber};
 
 /// Batas jumlah tab yang bisa dialamatkan, dari PRD v0.2 (FR-005).
 pub const MAKS_TAB: usize = 99;
@@ -177,16 +185,36 @@ impl NativeState {
 
     /// Menjawab satu frame dari soket browser. `None` berarti tidak ada balasan
     /// (notifikasi tanpa `id`).
+    ///
+    /// Tidak mengambil apa pun dari jaringan. Frame yang berisi navigasi
+    /// `http`/`https` dijawab dengan galat yang menyebut bahwa dokumennya harus
+    /// diserahkan lewat [`Self::tangani_ambil`].
     #[must_use]
     pub fn tangani(&self, teks: &str) -> Option<String> {
-        self.kunci().tangani(teks, None)
+        self.kunci().tangani(teks, None, None)
     }
 
     /// Menjawab satu frame dari soket satu halaman, yang tidak membawa
     /// `sessionId` karena tabnya sudah ditentukan oleh URL soket.
     #[must_use]
     pub fn tangani_halaman(&self, teks: &str, sesi: &str) -> Option<String> {
-        self.kunci().tangani(teks, Some(sesi))
+        self.kunci().tangani(teks, Some(sesi), None)
+    }
+
+    /// Menjawab satu frame dengan dokumen jaringan yang sudah diambil lebih
+    /// dulu.
+    ///
+    /// `ambilan` diisi pemanggil async **sebelum** kunci state diambil, supaya
+    /// satu navigasi yang lambat tidak membekukan tab lain. `None` berarti
+    /// frame ini tidak butuh jaringan.
+    #[must_use]
+    pub fn tangani_ambil(
+        &self,
+        teks: &str,
+        sesi: Option<&str>,
+        ambilan: Option<Result<Ambilan, Galat>>,
+    ) -> Option<String> {
+        self.kunci().tangani(teks, sesi, ambilan)
     }
 
     /// Daftar target dalam bentuk `/json/list` milik Chrome, tanpa URL soket
@@ -211,7 +239,17 @@ impl NativeState {
     }
 
     pub fn buka(&self, url: &str) -> Result<String, Galat> {
-        self.kunci().buat_target(url)
+        self.kunci().buat_target(url, None)
+    }
+
+    /// Sama dengan [`Self::buka`], tapi dokumen jaringannya sudah diambil
+    /// pemanggil lebih dulu.
+    pub fn buka_dengan(
+        &self,
+        url: &str,
+        ambilan: Option<Result<Ambilan, Galat>>,
+    ) -> Result<String, Galat> {
+        self.kunci().buat_target(url, ambilan)
     }
 
     pub fn tutup(&self, id: &str) -> Result<(), Galat> {
@@ -243,7 +281,12 @@ impl NativeState {
 }
 
 impl Dalam {
-    fn tangani(&mut self, teks: &str, sesi_paksa: Option<&str>) -> Option<String> {
+    fn tangani(
+        &mut self,
+        teks: &str,
+        sesi_paksa: Option<&str>,
+        ambilan: Option<Result<Ambilan, Galat>>,
+    ) -> Option<String> {
         let mut frame: Value = match serde_json::from_str(teks) {
             Ok(nilai) => nilai,
             Err(err) => {
@@ -274,7 +317,7 @@ impl Dalam {
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let hasil = self.jalankan(&metode, &params, sesi.as_deref());
+        let hasil = self.jalankan(&metode, &params, sesi.as_deref(), ambilan);
         // Notifikasi (tanpa `id`) tidak dijawab.
         let id = id?;
         Some(bingkai(id, hasil))
@@ -285,6 +328,7 @@ impl Dalam {
         metode: &str,
         params: &Value,
         sesi: Option<&str>,
+        ambilan: Option<Result<Ambilan, Galat>>,
     ) -> Result<Value, Galat> {
         match metode {
             "Browser.getVersion" => Ok(json!({
@@ -297,7 +341,7 @@ impl Dalam {
             "Target.getTargets" => Ok(json!({ "targetInfos": self.info_target() })),
             "Target.createTarget" => {
                 let url = param_teks(params, "url")?;
-                Ok(json!({ "targetId": self.buat_target(&url)? }))
+                Ok(json!({ "targetId": self.buat_target(&url, ambilan)? }))
             }
             "Target.closeTarget" => {
                 let id = param_teks(params, "targetId")?;
@@ -322,7 +366,7 @@ impl Dalam {
                 self.lepas(&s)?;
                 Ok(json!({}))
             }
-            "Page.navigate" => self.navigasi(params, sesi),
+            "Page.navigate" => self.navigasi(params, sesi, ambilan),
             "Page.reload" => {
                 let tab = self.tab_dari_sesi(sesi)?;
                 self.muat_ulang(tab)?;
@@ -378,14 +422,18 @@ impl Dalam {
             .collect()
     }
 
-    fn buat_target(&mut self, url: &str) -> Result<String, Galat> {
-        let html = dokumen_awal(url)?;
-        let id = self.pool.buka(url, &html).map_err(pool_galat)?;
+    fn buat_target(
+        &mut self,
+        url: &str,
+        ambilan: Option<Result<Ambilan, Galat>>,
+    ) -> Result<String, Galat> {
+        let dok = dokumen_awal(url, ambilan)?;
+        let id = self.pool.buka(&dok.url, &dok.html).map_err(pool_galat)?;
         let judul = self.pool.tab(id).and_then(|t| t.dokumen.judul());
         self.tabs.insert(
             id,
             MetaTab {
-                url: url.to_owned(),
+                url: dok.url,
                 judul,
                 id_target: id.0.to_string(),
             },
@@ -483,23 +531,38 @@ impl Dalam {
 /// membaca `result` tetap mendapat jawaban yang sah; klien yang ingin tahu
 /// apakah aksinya benar-benar mendarat membaca `receipt.status`.
 impl Dalam {
-    fn navigasi(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
+    fn navigasi(
+        &mut self,
+        params: &Value,
+        sesi: Option<&str>,
+        ambilan: Option<Result<Ambilan, Galat>>,
+    ) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
         let url = param_teks(params, "url")?;
-        let html = dokumen_awal(&url)?;
+        let dok = dokumen_awal(&url, ambilan)?;
         let sebelum = self.sidik(tab)?;
         self.pool
-            .ganti_dokumen(tab, &url, &html)
+            .ganti_dokumen(tab, &dok.url, &dok.html)
             .map_err(pool_galat)?;
         let judul = self.pool.tab(tab).and_then(|t| t.dokumen.judul());
         if let Some(meta) = self.tabs.get_mut(&tab) {
-            meta.url = url;
+            meta.url = dok.url.clone();
             meta.judul = judul;
         }
         let sesudah = self.sidik(tab)?;
         Ok(json!({
             "frameId": frame_id(tab),
             "loaderId": loader_id(tab),
+            // `sumber` hanya terisi kalau dokumennya datang dari jaringan.
+            // Klien yang ingin tahu status HTTP dan charset membacanya di sini
+            // alih-alih menebak dari isi halaman.
+            "sumber": dok.jaringan.as_ref().map(|a| json!({
+                "urlFinal": a.url,
+                "status": a.status,
+                "byte": a.byte,
+                "charset": a.charset,
+                "contentType": a.content_type,
+            })),
             "receipt": banding(&sebelum, &sesudah),
         }))
     }
@@ -848,34 +911,79 @@ fn pool_galat(err: engine::native::PoolError) -> Galat {
     Galat::baru(-32000, format!("tab pool: {err}"))
 }
 
-/// HTML awal untuk satu URL, atau galat yang menyebut apa yang belum ada.
+/// Dokumen yang siap dipasang ke tab.
 ///
-/// Hanya `about:blank` dan `data:text/html` yang bisa dibuka tanpa tumpukan
-/// jaringan. Skema lain ditolak dengan pesan yang menyebut jalan keluarnya,
-/// bukan dengan halaman kosong yang membuat klien mengira navigasinya berhasil.
-pub fn dokumen_awal(url: &str) -> Result<String, Galat> {
+/// `url` adalah alamat **final**: setelah pengalihan, bukan yang diminta. Itu
+/// yang dipakai `Page.getFrameTree` dan tanda terima, karena alamat akhir
+/// adalah halaman yang benar-benar sedang dibaca.
+pub struct DokumenAwal {
+    pub url: String,
+    pub html: String,
+    /// Terisi hanya kalau dokumennya datang dari jaringan.
+    pub jaringan: Option<Sumber>,
+}
+
+/// Mengubah satu URL menjadi dokumen, atau galat yang menyebut apa yang salah.
+///
+/// Empat skema yang dilayani: kosong/`about:blank`, `data:text/html`, `http`,
+/// dan `https`. Dua yang terakhir memakai dokumen yang sudah diambil pemanggil
+/// lewat [`super::jaringan`]; fungsi ini tidak pernah menunggu jaringan, karena
+/// pemanggilnya memegang kunci state.
+pub fn dokumen_awal(
+    url: &str,
+    ambilan: Option<Result<Ambilan, Galat>>,
+) -> Result<DokumenAwal, Galat> {
     if url.is_empty() || url == "about:blank" {
-        return Ok(String::new());
+        return Ok(DokumenAwal {
+            url: url.to_owned(),
+            html: String::new(),
+            jaringan: None,
+        });
     }
-    let Some(sisa) = url.strip_prefix("data:") else {
-        return Err(Galat::baru(
-            -32000,
-            format!(
-                "mesin native belum punya klien HTTP, jadi '{url}' tidak bisa dimuat; \
-                 buka `about:blank` lalu kirim dokumennya lewat `Page.setDocumentContent`"
-            ),
-        ));
-    };
-    let (meta, isi) = sisa
-        .split_once(',')
-        .ok_or_else(|| Galat::baru(-32000, "data URL tanpa pemisah koma"))?;
-    if !meta.starts_with("text/html") {
-        return Err(Galat::baru(
-            -32000,
-            format!("data URL '{meta}' bukan text/html"),
-        ));
+    if let Some(sisa) = url.strip_prefix("data:") {
+        let (meta, isi) = sisa
+            .split_once(',')
+            .ok_or_else(|| Galat::baru(-32000, "data URL tanpa pemisah koma"))?;
+        if !meta.starts_with("text/html") {
+            return Err(Galat::baru(
+                -32000,
+                format!("data URL '{meta}' bukan text/html"),
+            ));
+        }
+        return Ok(DokumenAwal {
+            url: url.to_owned(),
+            html: percent_decode(isi),
+            jaringan: None,
+        });
     }
-    Ok(percent_decode(isi))
+    if super::jaringan::butuh_jaringan(url) {
+        return match ambilan {
+            Some(Ok(a)) => {
+                let sumber = a.sumber();
+                Ok(DokumenAwal {
+                    url: a.url,
+                    html: a.html,
+                    jaringan: Some(sumber),
+                })
+            }
+            Some(Err(galat)) => Err(galat),
+            None => Err(Galat::baru(
+                -32000,
+                format!(
+                    "'{url}' butuh pengambilan jaringan, tapi dokumennya belum diambil; \
+                     panggil lewat jalur yang mengambilnya lebih dulu"
+                ),
+            )),
+        };
+    }
+    let skema = url.split_once(':').map_or(url, |(skema, _)| skema);
+    Err(Galat::baru(
+        -32000,
+        format!(
+            "skema '{skema}' tidak didukung: mesin ini memuat `about:blank`, \
+             `data:text/html`, `http`, dan `https`"
+        ),
+    ))
 }
 
 /// Mengurai escape persen pada URL `data:` dan query string.

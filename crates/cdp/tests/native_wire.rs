@@ -337,13 +337,15 @@ async fn navigasi_melaporkan_perubahan_dan_menolak_skema_tanpa_jaringan() {
         "URL dan dokumen sama berarti tidak ada yang berubah: {kedua}"
     );
 
-    // Skema yang butuh jaringan ditolak dengan pesan yang menyebut jalan
-    // keluarnya, bukan halaman kosong yang terlihat seperti sukses.
+    // Halaman http yang servernya tidak bisa dihubungi harus gagal dengan
+    // pesan yang menyebut URL-nya, bukan dokumen kosong yang terlihat seperti
+    // sukses. Port 1 di loopback menolak koneksi seketika, jadi tes ini tidak
+    // menyentuh internet sama sekali.
     let http = json!({
         "id": 5,
         "sessionId": sesi,
         "method": "Page.navigate",
-        "params": {"url": "https://example.com/"}
+        "params": {"url": "http://127.0.0.1:1/"}
     });
     soket
         .send(TsMessage::Text(http.to_string().into()))
@@ -352,8 +354,8 @@ async fn navigasi_melaporkan_perubahan_dan_menolak_skema_tanpa_jaringan() {
     let ditolak = tunggu_id(&mut soket, 5).await;
     let pesan = ditolak["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        pesan.contains("Page.setDocumentContent"),
-        "penolakan harus menyebut jalan keluarnya: {ditolak}"
+        pesan.contains("tidak bisa diambil") && pesan.contains("127.0.0.1:1"),
+        "kegagalan jaringan harus menyebut URL-nya: {ditolak}"
     );
 
     mesin.stop().expect("berhenti");
@@ -684,6 +686,136 @@ async fn page_capture_screenshot_mengirim_png_asli_dan_menolak_format_lain() {
         json!(-32602),
         "scale != 1 harus ditolak, bukan diabaikan: {skala}"
     );
+
+    mesin.stop().expect("berhenti");
+}
+
+/// Server HTTP yang sengaja lambat, dengan pemberitahuan saat permintaannya
+/// benar-benar sudah diterima.
+///
+/// Pemberitahuan itu penting: tanpa itu tes bisa lulus secara palsu, karena
+/// menanyai soket kedua sebelum pengambilan dimulai tidak membuktikan apa pun.
+fn server_lambat(tunda: Duration) -> (String, tokio::sync::oneshot::Receiver<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("port bebas");
+    let alamat = listener.local_addr().expect("alamat").to_string();
+    // Oneshot, bukan `std::sync::mpsc`: tesnya `#[tokio::test]` satu thread,
+    // jadi menunggu saluran blocking di dalam tes akan membekukan runtime
+    // yang juga melayani servernya sendiri.
+    let (kabar, tunggu) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let Ok((mut soket, _)) = listener.accept() else {
+            return;
+        };
+        // Baca kepala permintaan sampai baris kosong; kalau tidak dibaca,
+        // klien bisa menunggu pengiriman kita alih-alih menjawab.
+        {
+            let mut pembaca = std::io::BufReader::new(soket.try_clone().expect("klon soket"));
+            let mut baris = String::new();
+            while std::io::BufRead::read_line(&mut pembaca, &mut baris).unwrap_or(0) > 0 {
+                if baris.trim().is_empty() {
+                    break;
+                }
+                baris.clear();
+            }
+        }
+        let _ = kabar.send(());
+        std::thread::sleep(tunda);
+        let badan: &[u8] = b"<html><body><p>lambat</p></body></html>";
+        let kepala = format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\
+             content-type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+            badan.len()
+        );
+        let _ = std::io::Write::write_all(&mut soket, kepala.as_bytes());
+        let _ = std::io::Write::write_all(&mut soket, badan);
+    });
+    (alamat, tunggu)
+}
+
+/// Pengambilan jaringan yang lambat tidak boleh menahan kunci state.
+///
+/// Kalau `Page.navigate` mengambil dokumen sambil memegang kunci, seluruh tab
+/// berhenti menjawab selama server lambat. Tes ini menahan satu navigasi di
+/// server yang butuh dua detik, lalu menanyai soket **kedua** dengan perintah
+/// yang tidak butuh jaringan: jawabannya harus datang jauh sebelum navigasi
+/// selesai.
+#[tokio::test]
+async fn navigasi_lambat_tidak_menahan_kunci_state() {
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+
+    let mut a = sambung(port, "/devtools/browser").await;
+    let dibuat = minta_cdp(
+        &mut a,
+        1,
+        "Target.createTarget",
+        json!({"url": "about:blank"}),
+    )
+    .await;
+    let id = dibuat["result"]["targetId"]
+        .as_str()
+        .expect("targetId")
+        .to_owned();
+    let lekat = minta_cdp(
+        &mut a,
+        2,
+        "Target.attachToTarget",
+        json!({"targetId": id, "flatten": true}),
+    )
+    .await;
+    let sesi = lekat["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
+
+    let mut b = sambung(port, "/devtools/browser").await;
+
+    let (alamat, diterima) = server_lambat(Duration::from_secs(2));
+    let url = format!("http://{alamat}/lambat");
+    let frame = json!({
+        "id": 3,
+        "sessionId": sesi,
+        "method": "Page.navigate",
+        "params": {"url": url},
+    });
+    a.send(TsMessage::Text(frame.to_string().into()))
+        .await
+        .expect("mengirim navigasi");
+
+    // Tunggu sampai server benar-benar memegang permintaannya, jadi jeda di
+    // bawah diukur saat pengambilan sedang berjalan. Batas waktunya ada supaya
+    // versi yang mengambil di dalam kunci gagal dengan pesan, bukan menggantung
+    // sampai harness membunuhnya.
+    tokio::time::timeout(Duration::from_secs(5), diterima)
+        .await
+        .expect(
+            "permintaan tidak pernah sampai ke server dalam 5 detik: \
+             pengambilan berjalan sambil memegang kunci state",
+        )
+        .expect("saluran pemberitahuan ditutup");
+
+    let mulai = std::time::Instant::now();
+    let jawab = minta_cdp(&mut b, 4, "Browser.getVersion", json!({})).await;
+    let lama = mulai.elapsed();
+
+    assert!(
+        jawab["result"]["product"].is_string(),
+        "soket kedua harus dijawab: {jawab}"
+    );
+    assert!(
+        lama < Duration::from_millis(1200),
+        "jawaban tertahan {lama:?}: kunci state dipegang selama pengambilan jaringan"
+    );
+
+    let navigasi = tunggu_id(&mut a, 3).await;
+    assert!(
+        navigasi.get("error").is_none(),
+        "navigasi gagal: {navigasi}"
+    );
+    let akhir = navigasi["result"]["sumber"]["urlFinal"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(akhir, url, "URL akhir harus dilaporkan: {navigasi}");
 
     mesin.stop().expect("berhenti");
 }

@@ -242,6 +242,62 @@ fn data_url_bukan_html_ditolak() {
 }
 
 #[test]
+fn url_jaringan_tanpa_dokumen_ditolak_bukan_jadi_halaman_kosong() {
+    // `NativeState::tangani` tidak pernah menunggu jaringan: dokumennya harus
+    // diserahkan pemanggil lewat `tangani_ambil`. Kalau lapisan ini diam-diam
+    // menerima URL http dan memasang halaman kosong, klien akan mengira
+    // navigasinya berhasil dan membaca halaman kosong sebagai isi situs.
+    let state = NativeState::baru();
+    let gagal = balas(
+        &state,
+        1,
+        "Target.createTarget",
+        json!({"url": "https://contoh.test/halaman"}),
+    );
+    assert_eq!(gagal["error"]["code"], json!(-32000));
+    let pesan = gagal["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        pesan.contains("butuh pengambilan jaringan")
+            && pesan.contains("https://contoh.test/halaman"),
+        "penolakan harus menyebut URL dan alasannya: {gagal}"
+    );
+    assert_eq!(
+        state.jumlah_tab(),
+        0,
+        "tab yang gagal dibuat tidak boleh tertinggal di daftar"
+    );
+
+    // Jalur yang sama untuk `Page.navigate`: tab yang sudah ada harus tetap
+    // memegang dokumen lamanya, bukan diganti halaman kosong.
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({"frameId": id, "html": "<p>lama</p>"}),
+        &sesi,
+    );
+    let gagal = balas_sesi(
+        &state,
+        4,
+        "Page.navigate",
+        json!({"url": "https://contoh.test/lain"}),
+        &sesi,
+    );
+    assert!(
+        gagal.get("error").is_some(),
+        "navigate tanpa dokumen harus gagal: {gagal}"
+    );
+    let akar = ok_sesi(&state, 5, "DOM.getDocument", json!({"depth": -1}), &sesi);
+    let teks = akar.to_string();
+    assert!(
+        teks.contains("lama"),
+        "dokumen lama harus utuh setelah navigasi yang gagal: {akar}"
+    );
+}
+
+#[test]
 fn set_document_content_mengganti_isi_tab_yang_sama() {
     let state = NativeState::baru();
     let id = tab(&state);

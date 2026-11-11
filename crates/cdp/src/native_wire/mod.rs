@@ -7,15 +7,21 @@
 //! mengembalikan pid daemon akan membuat reaper mengirim SIGKILL ke daemon itu
 //! sendiri.
 //!
-//! Yang dijual di sini hanya yang benar-benar jalan. Tidak ada peristiwa CDP
-//! yang dikirim ke klien (mesin ini tidak punya `Runtime.consoleAPICalled` atau
-//! `Network.*`), tidak ada raster, dan tidak ada klien HTTP. Semua yang belum
-//! ada dijawab dengan galat yang menyebut lapisannya, bukan dengan jawaban
-//! kosong yang terlihat seperti sukses.
+//! Yang dijual di sini hanya yang benar-benar jalan. Mesin ini tidak mengirim
+//! peristiwa CDP (tidak ada `Runtime.consoleAPICalled` atau `Network.*`), dan
+//! raster yang ada hanya melukis latar kotak. Yang belum ada dijawab dengan
+//! galat yang menyebut lapisannya, bukan dengan jawaban kosong yang terlihat
+//! seperti sukses.
+//!
+//! Dokumen `http`/`https` diambil lewat [`jaringan`] **sebelum** kunci state
+//! dipegang: satu navigasi yang lambat tidak boleh membekukan tab lain.
 
+pub mod jaringan;
 pub mod state;
 
-pub use state::{Galat, MAKS_TAB, NativeState, Sidik, banding, dokumen_awal, percent_decode};
+pub use state::{
+    DokumenAwal, Galat, MAKS_TAB, NativeState, Sidik, banding, dokumen_awal, percent_decode,
+};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -274,7 +280,8 @@ async fn target_baru(State(app): State<App>, uri: Uri) -> Response {
         Some(query) => percent_decode(query),
         None => String::new(),
     };
-    match app.state.buka(&url) {
+    let ambilan = ambil_untuk_url(&url).await;
+    match app.state.buka_dengan(&url, ambilan) {
         Ok(id) => Json(json!({
             "id": id,
             "type": "page",
@@ -385,16 +392,39 @@ async fn layani(socket: WebSocket, state: NativeState, sesi: Option<String>) {
             Ok(AxumMessage::Close(_)) | Err(_) => break,
             Ok(_) => continue,
         };
-        let jawaban = match sesi.as_deref() {
-            Some(sesi) => state.tangani_halaman(&teks, sesi),
-            None => state.tangani(&teks),
-        };
+        // Jaringan diambil di sini, sebelum kunci state: frame yang tidak
+        // menavigasi ke `http`/`https` tidak menyentuh jaringan sama sekali.
+        let ambilan = ambil_untuk_frame(&teks).await;
+        let jawaban = state.tangani_ambil(&teks, sesi.as_deref(), ambilan);
         if let Some(jawaban) = jawaban
             && tx.send(AxumMessage::Text(jawaban.into())).await.is_err()
         {
             break;
         }
     }
+}
+
+/// Mengambil dokumen untuk satu URL kalau URL itu memang butuh jaringan.
+async fn ambil_untuk_url(url: &str) -> Option<Result<jaringan::Ambilan, Galat>> {
+    if !jaringan::butuh_jaringan(url) {
+        return None;
+    }
+    Some(jaringan::muat(url, jaringan::Batas::default()).await)
+}
+
+/// Sama dengan [`ambil_untuk_url`], tapi membaca URL dari frame JSON-RPC.
+///
+/// Frame yang bukan navigasi jaringan mengembalikan `None`, termasuk frame
+/// yang bukan JSON: frame rusak dijawab oleh penerjemah, bukan di sini.
+async fn ambil_untuk_frame(teks: &str) -> Option<Result<jaringan::Ambilan, Galat>> {
+    let frame: Value = serde_json::from_str(teks).ok()?;
+    let url = match frame.get("method")?.as_str()? {
+        "Page.navigate" | "Target.createTarget" => {
+            frame.get("params")?.get("url")?.as_str()?.to_owned()
+        }
+        _ => return None,
+    };
+    ambil_untuk_url(&url).await
 }
 
 fn jawab_galat(galat: Galat) -> Response {

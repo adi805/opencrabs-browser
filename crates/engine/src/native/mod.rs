@@ -9,10 +9,9 @@
 //! menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
-//! kaskade stylesheet, pewarisan properti, pengukuran teks,
-//! peristiwa DOM, pengambilan dokumen dari jaringan, tipe nilai balik
-//! JavaScript, dan peristiwa CDP. Memanggil ini "mesin browser yang selesai"
-//! akan jadi klaim palsu.
+//! kaskade stylesheet, pewarisan properti, pengukuran teks, peristiwa DOM,
+//! `fetch` di dalam isolat, tipe nilai balik JavaScript, dan peristiwa CDP.
+//! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
 //!
 //! Permukaan CDP-nya **tidak** ada di sini. Crate ini sengaja nol pengetahuan
 //! protokol; yang menerjemahkan frame JSON-RPC jadi panggilan ke
@@ -55,9 +54,9 @@ pub const CELAH: &[&str] = &[
      `clip.scale` tidak didukung, dan JPEG ditolak alih-alih dikirim sebagai PNG",
     "pohon aksesibilitas belum menghitung `aria-labelledby` berantai, status \
      *focusable*/*selected*/*expanded*, dan konten di dalam `<iframe>`",
-    "pengambilan dokumen dari jaringan (HTTP/TLS) belum ada; HTML masuk lewat \
-     `Page.setDocumentContent`, dan `Page.navigate` hanya melayani `about:blank` \
-     serta `data:text/html`",
+    "`fetch()` di dalam isolat JavaScript belum ada: dokumen `http`/`https` \
+     sudah bisa dimuat lewat `Page.navigate` (`cdp::native_wire::jaringan`), \
+     tapi skrip halaman belum punya jalur keluar ke jaringan",
     "nilai balik `Runtime.evaluate` dijadikan string; tipe JS (number, boolean, \
      object) tidak dipertahankan",
     "`document` di dalam isolat adalah objek biasa, bukan DOM sungguhan: skrip \

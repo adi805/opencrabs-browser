@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+encoding_rs.workspace = true
 engine.workspace = true
 futures-util.workspace = true
 lifecycle.workspace = true
@@ -16,6 +17,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 testing.workspace = true

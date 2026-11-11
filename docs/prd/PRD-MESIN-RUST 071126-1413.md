@@ -19,7 +19,7 @@ ai_instructions: "#builder-capability-routing-contract"
 
 # OpenCrabs Browser v0.2: Native Rust Engine
 
-> Status: **draft**. This document specifies v0.2 of OpenCrabs Browser: a fully native Rust browser engine engineered specifically for autonomous AI agents. It eliminates all external browser binaries (Chromium shell, full Chrome, Xvfb) and satisfies a strict memory ceiling: 99 managed tabs inside a 100 MB RAM budget using a tiered virtual tab memory architecture.
+> Status: **implementation**. This document specifies v0.2 of OpenCrabs Browser: a fully native Rust browser engine engineered specifically for autonomous AI agents. It eliminates all external browser binaries (Chromium shell, full Chrome, Xvfb) and satisfies a strict memory ceiling: 99 managed tabs inside a 100 MB RAM budget using a tiered virtual tab memory architecture.
 
 ```mermaid
 flowchart TD
@@ -113,13 +113,13 @@ Every remaining choice is a default with a written reversal cost. Nothing here i
 
 | ID | Requirement | Priority | Acceptance Criteria IDs |
 |---|---|---|---|
-| FR-001 | Native Rust HTML/CSS Parser & DOM Tree: Parse arbitrary web pages into a navigable DOM tree without invoking external C/C++ libraries. | Must | AC-001, AC-002 |
+| FR-001 | Native Rust HTML/CSS Parser & DOM Tree: Parse arbitrary web pages into a navigable DOM tree without invoking external C/C++ libraries. | Must | AC-001, AC-002, AC-021 |
 | FR-002 | Embedded JavaScript Execution: Execute inline and external scripts via `rquickjs` with basic DOM bindings (`document`, `window`, `console`, `fetch`). | Must | AC-003, AC-004 |
 | FR-003 | Agent Eyes (Perception): Deliver complete page observability through three tiers: DOM tree, full Accessibility Tree (AXTree), and on-demand PNG screenshot rendered via `tiny-skia`. | Must | AC-005, AC-006 |
 | FR-004 | Agent Hands (Interaction): Provide synthetic interaction dispatch for clicking, typing, scrolling, and form submission based on coordinates, CSS selectors, or accessibility roles. | Must | AC-007, AC-008 |
 | FR-005 | Virtual Tiered Tab Manager: Manage up to 99 tabs simultaneously with an LRU eviction mechanism that keeps at most 25 tabs in hot RAM and suspends the rest to local store. The 25 is a provisional budget from `floor((100 - 20) / 3.10)` against the out-of-tree harness (3.10 MB PSS per live tab on 3006-node documents), not a hand-picked number. The native daemon has not been measured at that workload: its 0.08 MB per tab marginal is RSS on 403-node documents, so the native hot-tab count stays unlocked until the PSS measurement at the acceptance workload exists (AC-009). | Must | AC-009, AC-010 |
 | FR-006 | Fast Tab Rehydration: Rehydrate a cold suspended tab into a hot active tab with full DOM and state restoration in under 100 milliseconds. | Must | AC-011, AC-012 |
-| FR-007 | CDP Wire Protocol Surface: Serve standard WebSocket JSON-RPC CDP commands allowing tools to attach and control the engine seamlessly. | Must | AC-013, AC-014 |
+| FR-007 | CDP Wire Protocol Surface: Serve standard WebSocket JSON-RPC CDP commands allowing tools to attach and control the engine seamlessly. | Must | AC-013, AC-014, AC-021 |
 | FR-008 | Traversal of Shadow DOM & Iframes: Inspect and interact with elements nested inside open/closed shadow roots and embedded iframe documents. | Should | AC-015, AC-016 |
 | FR-009 | Anti-Bot & Stealth Identity: Present a clean browser identity without `navigator.webdriver` leaks, automated flags, or unnatural JS globals. | Must | AC-017, AC-018 |
 | FR-010 | Action Verification & State Diffing: Verify every agent action by measuring DOM changes, URL updates, or visual state diffs before declaring completion. | Must | AC-019, AC-020 |
@@ -152,6 +152,7 @@ Every remaining choice is a default with a written reversal cost. Nothing here i
 | AC-018 | FR-009 | Negative | Engine does not inject telltale global properties like `window.cdc_adoQpoasnfa76pfcZLmcfl_Array`. | `cargo test -p policy --lib test_no_automation_globals` finds zero matches. |
 | AC-019 | FR-010 | Positive | A successful click action returns an execution receipt documenting the pre-action and post-action DOM delta. | `cargo test -p browserd --test native_action_receipt_diff` outputs non-empty mutation delta. |
 | AC-020 | FR-010 | Negative | An action producing no observable DOM, URL, or visual change is marked with status `NoObservableChange`. | `cargo test -p browserd --test native_no_observable_change` reports expected status. |
+| AC-021 | FR-001, FR-007, NFR-002 | Positive | `Page.navigate` to an `http`/`https` URL fetches the document over the network in-process, parses it, and reports the final URL after redirects along with the HTTP status. | `cargo test -p cdp --test jaringan` (12 passed) proves the fetch against a local server with no internet: status and body for 200 and 404, the final URL after a 302, ISO-8859-1 decoding from the `content-type` header, the byte cap, the timeout, refusal of a non-HTML `content-type`, refusal of a non-http scheme, and a refused connection naming the URL. `cargo test -p cdp --test native_wire` proves the same path over the CDP socket. The client is `ureq` with rustls, so no external HTTP binary and no openssl. |
 
 ### Constraints
 
@@ -190,8 +191,8 @@ silent addition to v0.2.
 | **Native Core Engine** | Parses HTML, calculates layout, hosts JS isolates, and renders bitmaps. | `html5ever`, `taffy`, `rquickjs`, `tiny-skia` | `crates/engine/src/native/` |
 | **Virtual Tab Pool** | Orchestrates hot tabs in RAM and evicts dormant tabs to local database. | `tokio`, LRU Cache, `crates/store` | `crates/engine/src/native/tab_pool.rs` |
 | **Agent Eyes (AXTree/Raster)** | Produces accessibility trees and software-rendered screenshots on demand. | `tiny-skia` | `crates/engine/src/native/axtree.rs`, `crates/engine/src/native/paint.rs` |
-| **Agent Hands (Event Dispatch)** | Translates selector/coordinate requests into synthetic DOM events. | Rust event pipeline | `crates/engine/src/native/hands.rs` |
-| **CDP Wire Server** | Translates incoming WebSocket JSON-RPC requests to native engine calls. | `tokio-tungstenite`, `axum` | `crates/cdp/src/native_wire.rs` |
+| **Agent Hands (Event Dispatch)** | Translates selector/coordinate requests into synthetic DOM events. **Not built:** no `crates/engine/src/native/hands.rs` exists; `Input.dispatchMouseEvent` and its siblings answer `belum_ada` from `crates/cdp/src/native_wire/state.rs` | Rust event pipeline | `crates/cdp/src/native_wire/state.rs` (refusal), `crates/engine/src/native/` (DOM events, named in `CELAH`) |
+| **CDP Wire Server** | Translates incoming WebSocket JSON-RPC requests to native engine calls. | `tokio-tungstenite`, `axum` | `crates/cdp/src/native_wire/` (a directory: `mod.rs`, `state.rs`, `jaringan.rs`) |
 
 ### Bootstrap & First-Run Contract
 
@@ -263,7 +264,7 @@ This is a headless engine with no rendered product surface, so the visual fields
 | Field | Value |
 |---|---|
 | Design tokens source | N/A for rendered UI: there are no tokens, because the engine renders the visited page's own CSS, not a product design system |
-| Component inventory | N/A for rendered UI: the public surface is the CDP command set in `crates/cdp/src/native_wire.rs`, not visual components |
+| Component inventory | N/A for rendered UI: the public surface is the CDP command set in `crates/cdp/src/native_wire/`, not visual components |
 | UI states | Per tab: empty before navigation, loading while the document is in flight and the DOM is partial, error when navigation or script fails, success when the DOM settles, degraded when a cold snapshot rehydrates with a missing subresource |
 | Accessibility target | N/A for rendered UI: the engine has no visual chrome to make accessible; its accessibility surface is the AXTree it exposes to the agent under FR-003 |
 | Responsive breakpoints | Viewport driven rather than breakpoint driven: `Emulation.setDeviceMetricsOverride` sets width and height per tab, and CSS media queries evaluate against that viewport |
@@ -316,7 +317,7 @@ The status indicator is canonical; the evidence behind it is here, measured at `
 | 2 | 🔄 In Progress | `Page.captureScreenshot` answers with a real PNG built by `tiny-skia` (`crates/engine/src/native/paint.rs`) and `Accessibility.getFullAXTree` answers a role/name tree from the loaded DOM (`crates/engine/src/native/axtree.rs`), both reachable over the native CDP surface. What is **not** there yet: text glyphs, borders, images, gradients and radii are not painted, so a text-only page renders as a blank canvas; `captureBeyondViewport`/`optimizeForSpeed`/`fromSurface`/`clip.scale` are refused or ignored; and the synthetic event dispatcher (`Input.dispatchMouseEvent`) still does not exist. `engine::native::CELAH` names all three limits |
 | 3 | 🔄 In Progress | `rquickjs` evaluates expressions with preserved state inside an isolate. Selectors exist in Rust and over CDP, but `document.querySelector` **inside the isolate** still does not exist (the isolate's `document` is a plain object, named in `CELAH`). No event dispatching, no timer loops |
 | 4 | 🔄 In Progress | `crates/engine/src/native/tab_pool.rs` holds 99 tabs and refuses the 100th with a capacity error (`crates/browserd/tests/native_tab_capacity_cap.rs`, 2 passed). LRU eviction and rehydration exist and are wired: `singkirkan_lru` evicts the least recently used tab into a `ColdStore` and `hidupkan` brings it back, and the CDP state builds `TabPool::new(MemoryColdStore::default(), 99)` whose hot cap defaults to `tab_panas_maksimum(20.0)` = 25, asserted in `tab_pool.rs`. `StoreColdStore` (`crates/browserd/src/tabstore.rs`) does persist snapshots to the SQLite store, but only that module's own tests reach it. What is missing: the production path's cold store is in memory rather than SQLite, rehydration latency is unmeasured, and no PSS budget test exists |
-| 5 | 🔄 In Progress | `/json/version` answers `RustNativeEngine/0.2.0` from the GitHub-built binary, `kind = "rust-native"` boots, and the CDP surface serves 30 commands across 7 domains end to end. The end-to-end agent suite cannot pass until the engine can fetch a page over HTTP. `cargo xtask check` exits 0 at `c947a92` (`fmt ok`, `clippy ok`, `test ok`, log `/tmp/xtask-check-head.log`) |
+| 5 | 🔄 In Progress | `/json/version` answers `RustNativeEngine/0.2.0` from the GitHub-built binary, `kind = "rust-native"` boots, and the CDP surface serves 30 commands across 7 domains end to end. Document fetching over `http`/`https` landed on 2026-11-12 (`crates/cdp/src/native_wire/jaringan.rs`, AC-021), so `Page.navigate` now opens a live page and reports the final URL after redirects; what keeps this milestone open is the engine half behind it, named in `CELAH`. `cargo xtask check` exits 0 at `c947a92` (`fmt ok`, `clippy ok`, `test ok`, log `/tmp/xtask-check-head.log`) |
 
 A milestone is not marked done by editing this table: the eleven missing capabilities are
 listed in code at `crates/engine/src/native/mod.rs:45` (`CELAH`), and each one is removed
@@ -442,6 +443,7 @@ Pause only for a blocking decision, material scope change, or a genuine new auth
 | **Virtual Tab Pool** | FR-005, NFR-001 | AC-009, AC-010 | Up to 99 tab open requests, 25 resident cap | 99 tab open requests accepted and the 100th refused, resident_count <= 25 (the hot cap is 25 today via `tab_panas_maksimum`) | `crates/engine` | 4 | `cargo test -p browserd --test native_tab_capacity_cap` (capacity proven today). The PSS budget test `native_99_tabs_budget` is not built yet |
 | **Cold Tab Rehydration** | FR-006 | AC-011, AC-012 | Suspended tab activation | Restored hot DOM in under 100ms | `crates/store` | 4 | `cargo test -p store --lib test_tab_rehydration_latency` |
 | **CDP Wire Server** | FR-007, NFR-002 | AC-013 | Incoming WebSocket frames | Valid JSON-RPC response bodies | `crates/cdp` | 5 | `curl -s http://127.0.0.1:9224/json/version` |
+| **Document Fetch** | FR-001, FR-007, NFR-002 | AC-021 | `Page.navigate` with an `http`/`https` URL | Parsed DOM, HTTP status, and the final URL after redirects | `crates/cdp` (`native_wire/jaringan.rs`) | 1 | `cargo test -p cdp --test jaringan` |
 | **Clean Process Teardown** | NFR-003 | AC-014 | SIGTERM daemon shutdown signal | Zero leaked child processes and sockets | `crates/browserd` | 5 | `bash ~/.opencrabs/projects/oc-browser-leak-check.sh` |
 | **Shadow DOM & Iframes** | FR-008 | AC-015, AC-016 | Nested document boundaries | Traversed elements and event targets | `crates/engine` | 1 | `cargo test -p engine --lib test_iframe_element_traversal` |
 | **Stealth & Clean Identity** | FR-009 | AC-017, AC-018 | Anti-bot probe inspection | Clean navigator properties and zero webdriver | `crates/policy` | 3 | `cargo test -p policy --lib test_navigator_webdriver_false` |

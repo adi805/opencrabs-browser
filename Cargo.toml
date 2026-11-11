@@ -26,6 +26,8 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 chacha20poly1305 = "0.11"
 clap = { version = "4", features = ["derive", "env"] }
+# Dekode badan HTTP menurut charset yang diklaim server. Dipakai `jaringan`.
+encoding_rs = "0.8"
 futures-util = "0.3"
 html5ever = "0.40"
 markup5ever_rcdom = "0.40"
@@ -53,6 +55,10 @@ tokio = { version = "1", features = [
     "fs",
 ] }
 tokio-tungstenite = "0.29"
+# Klien HTTP untuk mengambil dokumen dari jaringan. Blocking, dipanggil di
+# `spawn_blocking`, dan TLS-nya rustls: `deny.toml` melarang openssl.
+# Fitur `charset` dipakai supaya halaman non-UTF8 tidak jadi teks rusak.
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip", "brotli", "charset"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

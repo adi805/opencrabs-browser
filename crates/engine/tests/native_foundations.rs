@@ -114,11 +114,15 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // "rasterisasi bitmap" dicabut setelah `native::paint` melukis kotak
     // layout ke PNG sungguhan lewat `tiny-skia`; yang tersisa bukan lagi
     // "belum ada raster", tapi batas raster yang sebenarnya.
+    // "pengambilan dokumen dari jaringan" dicabut setelah
+    // `cdp::native_wire::jaringan` mengambil dokumen `http`/`https` sungguhan
+    // (diuji di `crates/cdp/tests/jaringan.rs`); yang tersisa adalah batas
+    // yang lebih sempit, yaitu skrip halaman belum punya `fetch`.
     // Yang menggantikannya adalah celah yang masih benar-benar terbuka.
     for wajib in [
         "pengukuran teks",
         "raster hanya melukis",
-        "jaringan",
+        "`fetch()` di dalam isolat",
         "peristiwa CDP",
     ] {
         assert!(
@@ -136,5 +140,9 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("rasterisasi bitmap"),
         "rasterisasi sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
+    );
+    assert!(
+        !semua.contains("pengambilan dokumen dari jaringan"),
+        "pengambilan dokumen dari jaringan sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
     );
 }
