@@ -57,11 +57,11 @@ sequenceDiagram
 
     Agent->>TabMgr: Target.createTarget(url)
     alt Hot Pool < 25 tabs
-        TabMgr->>HotPool: Allocate DOM + rquickjs context (3.10 MB measured)
+        TabMgr->>HotPool: Allocate DOM + rquickjs context (3.10 MB PSS in separate 3006-node harness)
     else Hot Pool == 25 tabs (Capacity full)
         TabMgr->>HotPool: Select Least-Recently-Used (LRU) Tab
         HotPool->>ColdStore: Evict: Snapshot URL, Cookies, History & State
-        HotPool-->>TabMgr: Reclaimed 3.10 MB slot
+        HotPool-->>TabMgr: Reclaim slot (memory savings not yet measured)
         TabMgr->>HotPool: Mount new active tab
     end
     TabMgr-->>Agent: Target ID returned (Total RAM < 100MB)
@@ -90,7 +90,7 @@ sequenceDiagram
 |---|---|
 | **Package / Workspace** | `crates/engine` (native engine implementation), `crates/browserd` (daemon), `crates/cdp` (protocol surface) |
 | **Binary Dependencies** | Zero external binaries. No Google Chrome, no Chromium headless shell, no Xvfb. Pure Rust compilation. |
-| **Memory Architecture** | Tiered Virtual Tab LRU pool over a **measured** per-tab cost. Measured on this laptop (harness: `html5ever` 0.40 + `taffy` 0.15 + `rquickjs` 0.14, 3006-node tab): baseline 1.5 MB PSS, **3.10 MB PSS marginal per live tab, flat from tab 2 to tab 99**, 99 live tabs = **308.9 MB** = 3.1x the ceiling. So the 100 MB ceiling is reached by tiering, never by leaving tabs live: **25 Hot tabs (3.10 x 25 = 77.5 MB) + Engine core budget 20 MB = 97.5 MB <= 100 MB**, with up to 74 Cold tabs suspended in local SQLite (`crates/store`, metadata ~1 KB each). Hot tab count is `floor((100 - engine_baseline) / 3.10)`, re-derived once milestone 1 measures the engine baseline. Raw data: `BUKTI-BUDGET 071126-1413.md`. |
+| **Memory Architecture** | Proposed tiered Virtual Tab LRU pool. A separate harness using `html5ever` 0.40 + `taffy` 0.15 + `rquickjs` 0.14 measured **3.10 MB PSS marginal per tab** for 3006-node documents and 308.9 MB at 99 tabs (`BUKTI-BUDGET 071126-1413.md`). This is not a measurement of the native daemon. A different native-daemon probe measured 20 MB RSS baseline and 37.6 MB RSS at 99 tabs containing 403-node documents (`BUKTI-NATIVE-CDP 081126-1124.md`); the workloads and PSS/RSS are not directly comparable. The 25-hot-tab limit is a provisional design budget, not proof: LRU, cold storage, and the 99-tab PSS acceptance test remain unimplemented. |
 | **Supported Protocols** | Chrome DevTools Protocol (CDP) subsets: `Page`, `DOM`, `Runtime`, `Input`, `Network`, `Target`. |
 | **Perception Surface** | Triple-layer perception: Accessibility Tree (`Accessibility.getFullAXTree`), DOM snapshot (`DOM.getDocument`), and on-demand software rasterization (`Page.captureScreenshot` via `tiny-skia`). |
 
@@ -104,7 +104,7 @@ Every remaining choice is a default with a written reversal cost. Nothing here i
 
 | Decision | Default applied | Why | Reversal cost |
 |---|---|---|---|
-| Tab Memory Scaling Model | Tiered Virtual Tab Pool (Hot RAM vs Cold SQLite) | Measured on this laptop with `html5ever` + `taffy` + `rquickjs`: a 3006-node live tab costs 3.10 MB PSS marginal, flat from tab 2 to tab 99, so 99 live tabs = 308.9 MB and no eviction-free design reaches 100 MB. Lightpanda's published 100-way benchmark peaks at 410 MB, but that is 100 separate processes, not 99 tabs in one engine, so it bounds per-process cost rather than contradicting the arithmetic. Virtual tab suspension keeps at most 25 tabs hot and preserves 99-tab addressability | Modifying `crates/engine/src/native/tab_pool.rs` to keep more hot tabs, about half a day of work |
+| Tab Memory Scaling Model | Tiered Virtual Tab Pool (Hot RAM vs Cold SQLite) | A separate 3006-node harness measured 3.10 MB PSS marginal per live tab and 308.9 MB at 99 tabs. This supports testing tiering for that workload, but does not prove the native daemon must exceed 100 MB without eviction. The native 403-node probe used RSS rather than PSS; a comparable native workload and the proposed suspension remain to be tested | Modifying `crates/engine/src/native/tab_pool.rs` to keep more hot tabs, about half a day of work |
 | Embedded JavaScript Engine | `rquickjs` (QuickJS C bindings for Rust) | V8 consumes >30 MB baseline per isolate; `boa` is pure Rust but currently lacks complete ES2023 feature parity and JIT speed; `rquickjs` is tiny (<1.5 MB per context) and memory-frugal | Replacing the script isolate abstraction in `crates/engine/src/native/js.rs`, about two days |
 | Visual Software Rasterizer | `tiny-skia` (pure software 2D rendering) | `tiny-skia` runs reliably on headless Linux VPS and laptops without GPU hardware or Vulkan drivers; rendering is on-demand only when an agent requests a screenshot | Swapping to a GPU-compute renderer like `vello`, about one day |
 | Layout Calculation Library | `taffy` (Flexbox/Grid) + custom box model | Servo layout crates have massive dependency graphs and complex C++ binding requirements; `taffy` is pure Rust, modular, and fast | Extending layout rules in `crates/engine/src/native/layout.rs`, about two days |
@@ -123,7 +123,7 @@ Every remaining choice is a default with a written reversal cost. Nothing here i
 | FR-008 | Traversal of Shadow DOM & Iframes: Inspect and interact with elements nested inside open/closed shadow roots and embedded iframe documents. | Should | AC-015, AC-016 |
 | FR-009 | Anti-Bot & Stealth Identity: Present a clean browser identity without `navigator.webdriver` leaks, automated flags, or unnatural JS globals. | Must | AC-017, AC-018 |
 | FR-010 | Action Verification & State Diffing: Verify every agent action by measuring DOM changes, URL updates, or visual state diffs before declaring completion. | Must | AC-019, AC-020 |
-| NFR-001 | 100 MB Hard RAM Ceiling: Total process PSS must not exceed 100 MB while 99 targets are open, of which at most 25 are resident (hot) at any moment. Measured justification: 99 simultaneously live tabs cost 308.9 MB PSS, so the ceiling applies to the tiered pool, not to 99 resident tabs. | Must | AC-009, AC-010 |
+| NFR-001 | 100 MB Hard RAM Ceiling: Total process PSS must not exceed 100 MB while 99 targets are open, of which at most 25 are resident (hot) at any moment. The 308.9 MB result came from a separate 3006-node harness; native-daemon PSS under the acceptance workload has not been measured. | Must | AC-009, AC-010 |
 | NFR-002 | Zero External Process Dependencies: The engine must run in-process or as a pure Rust child daemon without spawning Chrome, Chromium, or Xvfb. | Must | AC-013 |
 | NFR-003 | Clean Teardown & Leak Immunity: Closing sessions or terminating the daemon must leave exactly zero orphaned processes and zero temporary directory leaks. | Must | AC-014 |
 | NFR-004 | Panic Safety & Isolation: An unhandled JavaScript exception or layout crash in one tab must not panic the daemon or affect other tabs. | Must | AC-004 |
@@ -140,7 +140,7 @@ Every remaining choice is a default with a written reversal cost. Nothing here i
 | AC-006 | FR-003 | Positive | `Accessibility.getFullAXTree` returns hierarchical roles (`button`, `heading`, `textbox`) matching the underlying DOM nodes. | `cargo test -p engine --lib test_axtree_hierarchy` passes with 0 errors. |
 | AC-007 | FR-004 | Positive | `Input.dispatchMouseEvent` targeting element coordinates triggers attached `onclick` event listener and updates DOM. | `cargo test -p engine --lib test_mouse_click_dispatch` passes with 0 errors. |
 | AC-008 | FR-004 | Boundary | Clicking an element obscured by an overlay returns an obstruction notice rather than silently failing. | `cargo test -p engine --lib test_overlay_obstruction_detection` passes with 0 errors. |
-| AC-009 | FR-005, NFR-001 | Positive | Opening 99 targets sequentially, with LRU eviction holding the resident count at 25, keeps total process PSS <= 100 MB as measured via `/proc/self/smaps_rollup`. The test must also assert that resident tabs never exceeded 25, because 99 resident tabs were measured at 308.9 MB and would break the ceiling. | `cargo test -p browserd --test native_99_tabs_budget` confirms smaps PSS <= 100 MB and resident_count <= 25. **Status 2026-11-08: the test does not exist and neither does the LRU, so AC-009 is unmet.** Only the capacity half is proven, by `native_tab_capacity_cap` (2 passed). |
+| AC-009 | FR-005, NFR-001 | Positive | Opening 99 targets sequentially, with LRU eviction holding the resident count at 25, keeps total process PSS <= 100 MB as measured via `/proc/self/smaps_rollup`. The test must also assert that resident tabs never exceeded 25; 308.9 MB PSS was measured for 99 resident tabs in a separate 3006-node harness, not in the native daemon. | `cargo test -p browserd --test native_99_tabs_budget` confirms smaps PSS <= 100 MB and resident_count <= 25. **Status 2026-11-08: the test does not exist and neither does the LRU, so AC-009 is unmet.** Only the capacity half is proven, by `native_tab_capacity_cap` (2 passed). |
 | AC-010 | FR-005, NFR-001 | Negative | Attempting to create tab #100 without closing or evicting returns a clear capacity error without exceeding 100 MB. | `cargo test -p browserd --test native_tab_capacity_cap` enforces 99 tab limit. |
 | AC-011 | FR-006 | Positive | Accessing a tab in cold suspended state reloads its DOM and context from SQLite in under 100 milliseconds. | `cargo test -p store --lib test_tab_rehydration_latency` measures latency < 100ms. |
 | AC-012 | FR-006 | Negative | Suspending a tab flushes its active JS isolate and drops DOM nodes from RAM completely. | `cargo test -p engine --lib test_suspended_tab_memory_release` verifies heap <= 50KB. |
