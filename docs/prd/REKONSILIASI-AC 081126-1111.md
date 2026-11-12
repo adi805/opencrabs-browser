@@ -30,11 +30,13 @@ done
 
 Tiga dari dua puluh. Itu angka yang jujur, bukan yang enak dibaca.
 
-### Nama tesnya tidak ada (15 AC)
+### Nama tesnya tidak ada (14 AC)
 
 Dicari di seluruh log 557 tes, nol kecocokan:
 
-`test_dom_parsing_dan_styling`, `test_malformed_html_recovery`, `test_js_runtime_dom_mutations`, `test_js_timeout_termination`, `test_screenshot_png_magic_bytes`, `test_axtree_hierarchy`, `test_mouse_click_dispatch`, `test_overlay_obstruction_detection`, `native_99_tabs_budget`, `test_tab_rehydration_latency`, `test_suspended_tab_memory_release`, `test_iframe_element_traversal`, `test_shadow_root_piercing`, `test_navigator_webdriver_false`, `test_no_automation_globals`.
+`test_dom_parsing_dan_styling`, `test_malformed_html_recovery`, `test_js_runtime_dom_mutations`, `test_js_timeout_termination`, `test_screenshot_png_magic_bytes`, `test_axtree_hierarchy`, `test_mouse_click_dispatch`, `test_overlay_obstruction_detection`, `test_tab_rehydration_latency`, `test_suspended_tab_memory_release`, `test_iframe_element_traversal`, `test_shadow_root_piercing`, `test_navigator_webdriver_false`, `test_no_automation_globals`.
+
+`native_99_tabs_budget` left this list on 2026-11-12: `crates/browserd/tests/native_99_tabs_budget.rs` now exists and passes with 49.4 MB PSS over 99 tabs of 3006-node documents (25 hot + 74 cold) against the 100 MB ceiling, so AC-009 moves from absent to met at the acceptance workload.
 
 ### Yang punya cakupan lain, bukan yang diminta
 

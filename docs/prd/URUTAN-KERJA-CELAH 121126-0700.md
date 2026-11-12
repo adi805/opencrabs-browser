@@ -7,11 +7,11 @@ run in this session; nothing is taken from a document alone.
 
 - The list is read from code, not docs: `crates/engine/src/native/mod.rs:44-66`,
   **eleven** entries, counted.
-- The PRD-named tests are grepped in the tree, and **all thirteen are absent**:
+- The PRD-named tests are grepped in the tree, and **twelve are still absent**; `native_99_tabs_budget` left this list on 2026-11-12, when it was written and passed:
   `test_dom_parsing_dan_styling`, `test_malformed_html_recovery`,
   `test_js_runtime_dom_mutations`, `test_js_timeout_termination`,
   `test_mouse_click_dispatch`, `test_overlay_obstruction_detection`,
-  `native_99_tabs_budget`, `test_tab_rehydration_latency`,
+  `test_tab_rehydration_latency`,
   `test_suspended_tab_memory_release`, `test_iframe_element_traversal`,
   `test_shadow_root_piercing`, `test_navigator_webdriver_false`,
   `test_no_automation_globals`.
@@ -60,7 +60,7 @@ cannot prove a boolean `changed` flag.
 
 ## 3. The order, and why each step sits where it does
 
-### W0. Measure native PSS at the acceptance workload, before any new capability
+### W0. Measure native PSS at the acceptance workload (done 2026-11-12)
 
 Not one of the eleven, and it goes first anyway, because it is the only step
 that can invalidate the others. The budget is built on a number that does not
@@ -74,15 +74,16 @@ describe this engine:
   **403-node** documents (`BUKTI-NATIVE-CDP`). RSS is not PSS.
 - Every hot tab gets its own `rquickjs` isolate (`tab_pool.rs:250`) with an
   8 MB heap cap (`js.rs`, `PaguIsolat::default`). The cap is a ceiling, not an
-  allocation, so 25 tabs is not automatically 200 MB, but the headroom above
-  100 MB has never been measured.
+  allocation, so 25 tabs is not automatically 200 MB, and the headroom above
+  100 MB is now measured: 49.4 MB PSS total at 99 tabs leaves 50.6 MB unused.
 
 Deliverable: `crates/browserd/tests/native_99_tabs_budget.rs`, reading
 `/proc/self/smaps_rollup`, opening 99 targets, asserting resident <= 25 and
-PSS <= 100 MB. This is also the AC-009 test the PRD names and the repo lacks.
-If it fails, the fix is `maks_panas` or the isolate cap, decided with a number
-instead of an assumption, and that decision must land before G10 and G4 raise
-per-tab cost.
+PSS <= 100 MB. This is also the AC-009 test the PRD names.
+Delivered 2026-11-12: the file exists and passes with 49.4 MB PSS over 99 tabs
+(25 hot + 74 cold, 3006-node documents). It did not fail, so `maks_panas` and
+the isolate cap stay as they are, and the decision that lands before G10 and G4
+raise per-tab cost is now backed by that number instead of an assumption.
 
 ### W1. G9 typed `Runtime.evaluate` returns (smallest change with a real AC)
 
