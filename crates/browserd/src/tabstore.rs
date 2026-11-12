@@ -21,6 +21,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use engine::native::tab_pool::{ColdStore, Snapshot, TabId};
 use store::{Store, StoreKey, TabSnapshot};
@@ -38,6 +39,10 @@ pub struct StoreColdStore {
     /// sebagai panic di jalur penyingkiran tab.
     store: Result<Store, String>,
     session_id: String,
+    /// Sesi dibuka sekali, bukan tiap penyingkiran: `simpan` dipanggil setiap
+    /// kali tab panas penuh, dan mencoba INSERT yang pasti ditolak di setiap
+    /// penyingkiran hanya menambah kerja tanpa mengubah apa pun.
+    sesi_siap: AtomicBool,
 }
 
 impl StoreColdStore {
@@ -46,6 +51,7 @@ impl StoreColdStore {
         Self {
             store: Ok(store),
             session_id: session_id.into(),
+            sesi_siap: AtomicBool::new(false),
         }
     }
 
@@ -58,11 +64,47 @@ impl StoreColdStore {
         Self {
             store: Store::open(db, key).map_err(|err| format!("buka {}: {err}", db.display())),
             session_id: session_id.into(),
+            sesi_siap: AtomicBool::new(false),
         }
     }
 
     fn koneksi(&self) -> Result<&Store, String> {
         self.store.as_ref().map_err(Clone::clone)
+    }
+
+    /// Memastikan baris `session` ada sebelum snapshot pertama ditulis.
+    ///
+    /// `tab_snapshot` mereferensikan `session`, dan foreign key menolak snapshot
+    /// yatim. Adapter inilah satu-satunya pihak yang butuh baris itu, jadi
+    /// adapter yang membukanya: kalau kewajiban ini ditaruh di pemanggil, daemon
+    /// baru bisa lupa, dan memang lupa. Tab ke-26 di daemon 9236 ditolak
+    /// `FOREIGN KEY constraint failed` pada 2026-11-13, dan klien menerimanya
+    /// sebagai `-32000` di `Target.createTarget`, bukan sebagai galat store.
+    ///
+    /// Sesi yang sudah ada bukan kegagalan: daemon bisa memakai sesi yang sama
+    /// setelah restart, dan tes yang sudah mendaftarkan sesinya sendiri tetap
+    /// sah.
+    fn pastikan_sesi(&self) -> Result<(), String> {
+        if self.sesi_siap.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let sekarang = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        )
+        .unwrap_or(i64::MAX);
+        match self
+            .koneksi()?
+            .open_session(&self.session_id, "native", None, sekarang)
+        {
+            Ok(()) | Err(store::SessionError::SudahAda(_)) => {
+                self.sesi_siap.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(err) => Err(format!("membuka sesi {}: {err}", self.session_id)),
+        }
     }
 }
 
@@ -111,6 +153,7 @@ impl SumberDingin {
                 Err(pesan) => StoreColdStore {
                     store: Err(pesan.clone()),
                     session_id: sesi.clone(),
+                    sesi_siap: AtomicBool::new(false),
                 },
             };
             Box::new(adapter) as Box<dyn cdp::native_wire::ColdStoreObj>
@@ -129,6 +172,7 @@ impl ColdStore for StoreColdStore {
     type Error = String;
 
     fn simpan(&mut self, snapshot: &Snapshot) -> Result<(), Self::Error> {
+        self.pastikan_sesi()?;
         let tab_id = ke_i64(snapshot.id)?;
         let baris = TabSnapshot {
             tab_id,
@@ -269,6 +313,28 @@ mod tests {
     }
 
     #[test]
+    fn tab_dingin_tersimpan_walau_tidak_ada_yang_membuka_sesi_dulu() {
+        // Jalur daemon: `launch_all` menyalakan mesin native dan menyerahkan
+        // adapter ini tanpa pernah membuka baris `session`. Sebelum perbaikan,
+        // penyingkiran pertama mengembalikan `menyimpan tab 1: database:
+        // FOREIGN KEY constraint failed`, dan daemon melaporkannya ke klien
+        // sebagai `-32000` di `Target.createTarget` saat tab ke-26 dibuka.
+        let dir = Sementara::new("tanpa-sesi");
+        let dingin = StoreColdStore::new(buka(&dir), "mesin-uji");
+        let mut pool = TabPool::new(dingin, 99).dengan_maks_panas(1);
+
+        let a = pool.buka("https://a.test", &halaman("isi-a")).unwrap();
+        let _b = pool.buka("https://b.test", &halaman("isi-b")).unwrap();
+
+        assert!(pool.tab(a).is_none(), "tab a harus sudah dingin");
+        assert_eq!(
+            pool.jumlah_dingin().expect("hitung dingin"),
+            1,
+            "snapshot tidak mendarat di SQLite"
+        );
+    }
+
+    #[test]
     fn sesi_lain_tidak_bisa_memuat_tab_ini() {
         let dir = Sementara::new("sesi-lain");
         // Namanya bukan `store`: mengikat hasilnya ke `store` akan menutupi
@@ -301,11 +367,17 @@ mod tests {
 
     #[test]
     fn galat_simpan_dilaporkan_bukan_ditelan() {
-        let dir = Sementara::new("tanpa-sesi");
-        // Tanpa baris `session`, foreign key menolak. Adapter harus
-        // mengembalikan galat, bukan diam-diam menganggap tab tersimpan.
-        let store = Store::open(dir.path.join("store.db"), dir.kunci.clone()).expect("buka");
-        let mut dingin = StoreColdStore::new(store, "tidak-ada");
+        // Galat tetap harus terang, tapi sebabnya sekarang harus galat store
+        // yang sungguhan, bukan sesi yang belum dibuka: sesi dibuka adapter
+        // sendiri (lihat `tab_dingin_tersimpan_walau_tidak_ada_yang_membuka_sesi_dulu`).
+        // Kunci yang tidak ada adalah kegagalan produksi yang nyata: pabrik
+        // daemon menyimpannya sebagai galat dan baru melaporkannya saat tab
+        // pertama disingkirkan.
+        let dir = Sementara::new("kunci-hilang");
+        let sumber = SumberDingin::new(dir.path.join("store.db"), dir.path.join("tidak-ada.key"));
+        let pabrik = sumber.pabrik("mesin-uji");
+        let mut dingin = pabrik();
+
         let err = dingin
             .simpan(&Snapshot {
                 id: TabId(1),
@@ -315,8 +387,11 @@ mod tests {
                 jumlah_node: 5,
                 disingkirkan_pada: 1,
             })
-            .expect_err("harus galat");
-        assert!(err.contains("menyimpan tab 1"), "pesan galat: {err}");
+            .expect_err("kunci hilang harus jadi galat, bukan tab yang dikira aman");
+        assert!(
+            err.contains("kunci store tidak terbaca"),
+            "pesan galat harus menyebut sebabnya: {err}"
+        );
     }
 
     #[test]
