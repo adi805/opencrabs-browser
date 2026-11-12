@@ -3,9 +3,9 @@ document_type: project-progress
 project: "OpenCrabs Browser: web-opening engine"
 prd: "PRD-MESIN-RUST 071126-1413.md"
 status: in-progress
-current_milestone: 1
+current_milestone: 3
 total_milestones: 5
-last_updated: "2026-11-12 07:20"
+last_updated: "2026-11-12 08:05"
 ---
 
 # OpenCrabs Browser Progress
@@ -20,8 +20,8 @@ One read must be enough to continue without asking the owner anything.
 
 | Field | Value |
 |---|---|
-| Active milestone | PRD v0.2 milestone 1, parts 1, 2 and the eyes/read halves of 3 landed: native parse/layout/JS foundations, the tab pool plus the CDP surface the daemon serves (`crates/cdp/src/native_wire/`, `crates/engine/src/native/tab_pool.rs`), and as of 2026-11-11 an accessibility tree (`crates/engine/src/native/axtree.rs`, served as `Accessibility.getFullAXTree`) plus a real PNG rasteriser (`crates/engine/src/native/paint.rs`, served as `Page.captureScreenshot`), and as of 2026-11-12 real document fetching over `http`/`https` (`crates/cdp/src/native_wire/jaringan.rs`, so `Page.navigate` opens a live page and reports the final URL after redirects). What is still missing is named in code, `engine::native::CELAH` (`crates/engine/src/native/mod.rs:45`), eleven entries, not a document. CSS selectors, "rasterisation does not exist", "no AX tree" and "no document fetch" are no longer among them: the entries that replaced them name the *limits* (raster paints box backgrounds from inline `style` and no text; screenshot is PNG only at scale 1; the AX tree does not compute chained `aria-labelledby`, focus/selected state, or iframe content). PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` |
-| Next exact command | `cd ~/src/opencrabs-browser && cargo xtask check` for the gate (`xtask` is an alias in this repo's `.cargo/config.toml`, so from any other directory cargo answers `no such command: xtask` and exits 101; that is a wrong-cwd error, not a red gate), `cargo test -p cdp --test native_state` for the surface, `cargo test -p engine --lib native` for the engine. The next work is one `CELAH` entry per capability, each behind a test that fails before the capability exists; the two that unblock the most are text measurement (the raster stays blank for text-only pages without it) and a real DOM inside the isolate (page script cannot query or mutate the document without it) |
+| Active milestone | PRD v0.2 milestone 1, parts 1, 2 and the eyes/read halves of 3 landed: native parse/layout/JS foundations, the tab pool plus the CDP surface the daemon serves (`crates/cdp/src/native_wire/`, `crates/engine/src/native/tab_pool.rs`), and as of 2026-11-11 an accessibility tree (`crates/engine/src/native/axtree.rs`, served as `Accessibility.getFullAXTree`) plus a real PNG rasteriser (`crates/engine/src/native/paint.rs`, served as `Page.captureScreenshot`), and as of 2026-11-12 real document fetching over `http`/`https` (`crates/cdp/src/native_wire/jaringan.rs`, so `Page.navigate` opens a live page and reports the final URL after redirects). What is still missing is named in code, `engine::native::CELAH` (`crates/engine/src/native/mod.rs:44`), eleven entries, not a document. CSS selectors, "rasterisation does not exist", "no AX tree", "no document fetch" and "typed evaluate returns" are no longer among them: the entries that replaced them name the *limits* (raster paints box backgrounds from inline `style` and no text; screenshot is PNG only at scale 1; the AX tree does not compute chained `aria-labelledby`, focus/selected state, or iframe content). PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` |
+| Next exact command | `cd ~/src/opencrabs-browser && cargo xtask check` for the gate (`xtask` is an alias in this repo's `.cargo/config.toml`, so from any other directory cargo answers `no such command: xtask` and exits 101; that is a wrong-cwd error, not a red gate), `cargo test -p cdp --test native_state` for the surface, `cargo test -p engine --lib native` for the engine. The next work is one `CELAH` entry per capability, each behind a test that fails before the capability exists, and the order is already ranked in `docs/prd/URUTAN-KERJA-CELAH 121126-0700.md`: W2 is the stylesheet cascade (`<style>`/`<link>`, ordered by origin and specificity) then inheritance and units, which is what text measurement needs before it can resolve a `font-size`. G9 (typed `Runtime.evaluate`) left that queue on 2026-11-12 |
 | Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
 | Last passing check | `cargo xtask check` at `c947a92` (the record-consistency series): `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check-head.log`, run 2026-11-12 05:40 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). The previous full-gate receipt was `6bce7d6`: `fmt ok`, `clippy ok`, `test ok`, exit 0 (log `/tmp/xtask-check.log`). The same tree counted by hand with `cargo test --workspace` = 44 suites, **597 passed, 0 failed** (log `/tmp/ws-test.log`), which is 40 more than the 557 recorded at `4292878`, a tree 10 commits behind this one that predates the selector engine, the accessibility tree and the rasteriser. The earlier `4292878` gate still stands as the last one that followed a GitHub-built binary; the `6bce7d6` gate was run locally, so its receipts are the local logs above. After that gate, measured on the same host: only 2 chrome processes carried a `remote-debugging-port` (the live daemon on 9224/9225 and the production instance on 9222), so the live suites inside the gate left no new debugging browser behind. The raw total drifts while the daemon runs (`pgrep -c -x chrome` read 12 on one sample and 13 on the next, with `chrome_crashpad_handler` helpers alongside), so the two debugging-port processes are the signal, not the total. An earlier note in this row cited 53 chrome processes and an `oc-browser-leak-check.sh` run; that script is not present at `~/.opencrabs/scripts/` any more, so the counts above are the evidence for this gate. The packaged binary from GitHub run `42445976171` (head `2633095`, `sha256sum -c` OK, and predating the AX tree and rasteriser, hence 24 of today's 30 commands) served a full CDP round trip on `127.0.0.1:9234` and exited 0: `RustNativeEngine/0.2.0` in `/json/version`, 24 commands in `/json/protocol`, `Page.setDocumentContent` receipt `node: 8`, `DOM.getDocument depth=-1` 12 nodes, `Runtime.evaluate 6*7` = `"42"`, then a clean SIGTERM. Receipts in `docs/prd/BUKTI-NATIVE-CDP 081126-1124.md`. HEAD then moved through `7d1626b` and `c947a92`, both record-consistency commits whose only source change is a doc comment in `crates/engine/src/native/tab_pool.rs`, and the gate was re-run at `c947a92`, which is the receipt at the top of this row |
@@ -54,8 +54,9 @@ One read must be enough to continue without asking the owner anything.
   (`docs/prd/BUKTI-NATIVE-CDP 081126-1124.md`). PSS at the acceptance workload,
   cold-tab metadata and rehydration latency remain unmeasured.
   Milestone counters: v0.2 stands at 1 of 5 verified (milestone 1), milestones 2
-  to 5 are In Progress, so this file's `current_milestone` reads 1 rather than the
-  5 that v0.1 finished at. v0.1 is shipped and its own record stays in
+  to 5 are In Progress. This file's `current_milestone` reads 3, the lowest
+  milestone that is still open, not a claim that 1 and 2 are complete. v0.1 is
+  shipped and its own record stays in
   `docs/prd/PRD-MESIN-BUKA-WEB 041126-0631.md`.
 - Build authority: the owner granted full execution permission on 3 November 2026.
 - Required unresolved input: none. The three owner decisions that used to be
@@ -666,13 +667,47 @@ Not claimed: `fetch()` from page script, and any page that needs JavaScript to
 produce its content. The fetch is HTTP only, so a site that answers 200 with a
 JS shell gives the engine that shell.
 
+### PRD v0.2, typed `Runtime.evaluate` and clean identity (G9), 2026-11-12
+
+The engine used to stringify every script result, so `navigator.webdriver` came
+back as `"false"` and no client could tell a boolean from text. AC-017 and
+AC-018 both need the real type, so this was the smallest gap with two ACs
+behind it.
+
+| Module | What it does | Evidence |
+|---|---|---|
+| `crates/engine/src/native/js.rs` | `NilaiJs` keeps the JS type (`TanpaNilai`, `Null`, `Boolean`, `Bulat`, `Pecahan`, `Teks`, `Objek`, `Fungsi`, `Simbol`, `BigInt`) and `Isolat::eval_bertipe` reads it. Objects serialise through `Ctx::json_stringify` from Rust, not through a helper global, because a `__oc_*` global would itself be an AC-018 violation. `navigator` is installed in the isolate preamble with `webdriver: false` as a real boolean | `cargo test -p engine --lib native::js`: 12 passed, 0 failed |
+| `crates/cdp/src/native_wire/state.rs` | `remote_object` maps `NilaiJs` to `Runtime.RemoteObject`, including `unserializableValue` for `NaN`/`Infinity` (JSON cannot carry them) and objects sent by value | `cargo test -p cdp --test native_wire`: 12 passed, 0 failed |
+
+The type claim is proven over a real socket, not by calling a function:
+`runtime_evaluate_mempertahankan_tipe_dan_mengirim_boolean` opens a websocket to
+the running `NativeEngine` and requires `{"type":"boolean","value":false}` for
+`navigator.webdriver`, `type: "string"` for a string, `value: [1,2,3]` for an
+array, and no `value` key at all for `undefined`.
+
+`test_no_automation_globals` closes AC-018 by enumerating
+`Object.keys(globalThis)` and asserting zero matches for `cdc_`,
+`__playwright`, `__puppeteer`, `__pw_`, `__selenium`, `__webdriver`, `_phantom`,
+`__nightmare`, `callSelenium`, `__driver`, and `__oc_`. The `console.log` buffer
+moved to a non-enumerable `__log` for that reason; its name is still guessable,
+which is why `CELAH` says so instead of the document claiming cleanliness.
+
+In `engine::native::CELAH` the entry "nilai balik `Runtime.evaluate` dijadikan
+string" is gone, replaced by the narrower limit that actually remains:
+`objectId`, `Runtime.callFunctionOn`, and `awaitPromise` are still absent, so a
+client cannot hold an object handle or await a promise.
+
+Not claimed: a real DOM inside the isolate. `navigator` and `document` are
+plain objects, so a checker that reads `Navigator.prototype` can still tell this
+engine from a real browser.
+
 ## Not built, not claimed
 
 Open items, each with the reason it is still open and what would close it.
 
 | Item | Why it is open | What would close it |
 |---|---|---|
-| Native engine half that is still missing (PRD v0.2 milestone 1 and beyond) | Foundations landed: parse, box layout, sandboxed script, tab pool, CDP surface, accessibility tree, PNG rasteriser. Still not landed, eleven entries in `engine::native::CELAH`: stylesheet cascade, property inheritance, text measurement, DOM events, raster that paints anything beyond box backgrounds, screenshot parameters beyond PNG at scale 1, the AX details (`aria-labelledby` chains, focus/selected state, iframe content), `fetch()` inside the isolate, typed `Runtime.evaluate` returns, a real DOM inside the isolate, and CDP events. CSS selectors were closed on 2026-11-11, and so were "no raster" and "no AX tree": `crates/engine/src/native/axtree.rs` + `paint.rs`, served as `Accessibility.getFullAXTree` and `Page.captureScreenshot`. Document fetching over `http`/`https` was closed on 2026-11-12: `crates/cdp/src/native_wire/jaringan.rs` fetches before the state lock is taken, and the narrower entry that replaced it is `fetch()` inside the isolate, which is script-level network rather than navigation. In each case the gap was removed from `CELAH` and the guard test asserts it cannot come back, while a *narrower* entry naming the real limit replaced it. The list is a `const` in code (`crates/engine/src/native/mod.rs:45`) so it cannot quietly shrink from a document edit. Budget enforcement exists as `browserd::anggaran`, but a config without `[budget]` logs `supervisor anggaran mati` (measured on the AC-013 instance) | One entry removed from `CELAH` per capability, each with a test that fails before the capability exists, then the v0.2 acceptance criteria that depend on it. The two that unblock the most are text measurement (without it the raster stays blank for text-only pages) and a real DOM inside the isolate (without it page script cannot query or mutate the document) |
+| Native engine half that is still missing (PRD v0.2 milestone 1 and beyond) | Foundations landed: parse, box layout, sandboxed script, tab pool, CDP surface, accessibility tree, PNG rasteriser. Still not landed, eleven entries in `engine::native::CELAH`: stylesheet cascade, property inheritance, text measurement, DOM events, raster that paints anything beyond box backgrounds, screenshot parameters beyond PNG at scale 1, the AX details (`aria-labelledby` chains, focus/selected state, iframe content), `fetch()` inside the isolate, a real DOM inside the isolate, and CDP events. Typed `Runtime.evaluate` returns were closed on 2026-11-12 (`NilaiJs` in `crates/engine/src/native/js.rs`, mapped to `Runtime.RemoteObject` in `crates/cdp/src/native_wire/state.rs`), and AC-017 plus AC-018 came with it; what remains of that gap is `objectId`/`callFunctionOn`/`awaitPromise`. CSS selectors were closed on 2026-11-11, and so were "no raster" and "no AX tree": `crates/engine/src/native/axtree.rs` + `paint.rs`, served as `Accessibility.getFullAXTree` and `Page.captureScreenshot`. Document fetching over `http`/`https` was closed on 2026-11-12: `crates/cdp/src/native_wire/jaringan.rs` fetches before the state lock is taken, and the narrower entry that replaced it is `fetch()` inside the isolate, which is script-level network rather than navigation. In each case the gap was removed from `CELAH` and the guard test asserts it cannot come back, while a *narrower* entry naming the real limit replaced it. The list is a `const` in code (`crates/engine/src/native/mod.rs:44`) so it cannot quietly shrink from a document edit. Budget enforcement exists as `browserd::anggaran`, but a config without `[budget]` logs `supervisor anggaran mati` (measured on the AC-013 instance) | One entry removed from `CELAH` per capability, each with a test that fails before the capability exists, then the v0.2 acceptance criteria that depend on it. The two that unblock the most are text measurement (without it the raster stays blank for text-only pages) and a real DOM inside the isolate (without it page script cannot query or mutate the document) |
 | `cloakbrowser` artifact path (the cookie handoff named in `crates/policy/src/challenge.rs:304`) | It was never part of the `chrome-full` adapter, and no test drives it. A path that reads another browser's cookie store has to be measured against a real challenge, not written against a guess. | A probe that takes a cookie jar produced by a real challenge and proves the cookie is usable through the daemon, with the file format locked by a test |
 | Leaked browsers from the live test suites | 36 orphaned `chrome-headless-shell` processes were found alive during this milestone, 4.9 GB RSS between them, from `sesi_live`, `m4_proof`, `diagnostik`, and `idle_proof`. The serialisation lock in `tests/common` limits how many start at once, it does not stop them surviving a killed run. **Partly closed:** `impl Drop for Proc` reaps the group on panic and on normal exit, and the five live suites now close their daemon with SIGTERM so `matikan_semua` runs, both measured as zero leftovers after a full `cargo xtask check`. Measured again 2026-11-08 after a full gate at `4292878`: host `chrome` count 53 before and 53 after, and the leak script's only hit was an orphan from the previous evening. Still open: a test binary that is itself SIGKILLed from outside runs no destructor, and nothing counts processes in `xtask check` yet. | A teardown that is verified after a test is killed mid-run, not only after it returns, plus a check in `xtask check` that the process count returns to its starting value |
 | `xtask e2e` | The command is referenced in the task list but does not exist yet | An `e2e` subcommand that runs the live suites in the same serialised way `cargo test` does |

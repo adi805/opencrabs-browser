@@ -31,7 +31,7 @@ run in this session; nothing is taken from a document alone.
 | G6 | `Page.captureScreenshot`: PNG only, scale 1, fixed 800x600; JPEG refused | `paint.rs` + `cdp/src/native_wire` | AC-005 (partly) | G5 | S |
 | G7 | AX tree: no chained `aria-labelledby`, no focusable/selected/expanded, no iframe content | `axtree.rs` | AC-006 | G4 for real state values | M |
 | G8 | No `fetch()` inside the isolate | `js.rs` + a daemon policy gate | FR-002, AC-003 (partly) | G10 for binding plumbing | M |
-| G9 | `Runtime.evaluate` returns a string; JS types lost | `cdp/src/native_wire` + `js.rs` | AC-017 (needs boolean `false`), AC-003 | nothing | S |
+| G9 | ~~`Runtime.evaluate` returns a string; JS types lost~~ **CLOSED 2026-11-12**: `NilaiJs` keeps the type, objects travel by value, `navigator.webdriver` is boolean `false` | `cdp/src/native_wire` + `js.rs` | AC-017 met, AC-018 met, AC-003 partly | what remains is `objectId`/`callFunctionOn`/`awaitPromise`, named in `CELAH` | S |
 | G10 | `document` inside the isolate is a plain object, not a DOM | `js.rs` + `dom.rs` | AC-003, AC-007, AC-019, AC-020 | G2/G3 (bind an API that is stable) | L |
 | G11 | Engine emits no CDP events (`Runtime.consoleAPICalled`, `Page.loadEventFired`, `Network.*`) | `cdp/src/native_wire` event bus | FR-007 clients that wait | producers from G10/G8 | M |
 
@@ -92,6 +92,35 @@ currently gives: AC-017 requires `navigator.webdriver` to evaluate to boolean
 `false`, and a stringifying evaluator cannot deliver that. Write
 `test_navigator_webdriver_false` first; it fails today.
 
+**Delivered 2026-11-12.** `NilaiJs` (`crates/engine/src/native/js.rs`) carries
+`TanpaNilai`, `Null`, `Boolean`, `Bulat`, `Pecahan`, `Teks`, `Objek` (JSON text
+plus description), `Fungsi`, `Simbol`, `BigInt`, and `Isolat::eval_bertipe`
+reads the value with its real type. Objects are serialised from Rust with
+`Ctx::json_stringify`, not by installing a helper global, because a `__oc_*`
+global would break AC-018. `remote_object` in `cdp/src/native_wire/state.rs`
+maps that to `Runtime.RemoteObject`, with `unserializableValue` for `NaN` and
+`Infinity` since JSON cannot carry them.
+
+Two ACs closed here, both by test that would fail before this change:
+
+| Test | Where | What it proves |
+|---|---|---|
+| `test_navigator_webdriver_false` | `crates/engine/src/native/js.rs` | `navigator.webdriver` is `NilaiJs::Boolean(false)`, `=== false` is `true`, `typeof` is `boolean` |
+| `test_no_automation_globals` | `crates/engine/src/native/js.rs` | `Object.keys(globalThis)` contains zero of `cdc_`, `__playwright`, `__puppeteer`, `__pw_`, `__selenium`, `__webdriver`, `_phantom`, `__nightmare`, `callSelenium`, `__driver`, `__oc_` |
+| `runtime_evaluate_mempertahankan_tipe_dan_mengirim_boolean` | `crates/cdp/tests/native_wire.rs` | over a real socket: `{type:boolean,value:false}`, string stays string, array arrives by value, `undefined` carries no `value` |
+
+`cargo test -p engine --lib native::js` = 12 passed, 0 failed.
+`cargo test -p cdp --test native_wire` = 12 passed, 0 failed.
+
+The `__log` buffer that backs `console.log` is installed with
+`Object.defineProperty(..., enumerable: false)` so it does not appear in
+`Object.keys(globalThis)`; its name is still guessable, and that is recorded in
+`CELAH` rather than hidden.
+
+What this does **not** close: `objectId`, `Runtime.callFunctionOn`, and
+`awaitPromise`. A client that wants to hold an object handle or await a promise
+still cannot, and `CELAH` names that limit.
+
 ### W2. G1 cascade, then G2 inheritance and units
 
 Two commits, strict order. The selector engine already matches (`selectors.rs`,
@@ -145,17 +174,18 @@ last is one plumbing pass instead of five.
 ## 4. The eleven are not the whole gap set
 
 `crates/engine/src/native/mod.rs:11-14` states the contract: anything missing is
-named in `CELAH`, not hidden. Four Must-AC halves have no native implementation
-and no `CELAH` entry, so the contract is currently false:
+named in `CELAH`, not hidden. Three Must-AC halves still have no native
+implementation and no `CELAH` entry, so the contract is still false for those
+three (AC-009 left this table on 2026-11-12, when `native_99_tabs_budget`
+landed and passed):
 
 | AC | Missing half | Evidence |
 |---|---|---|
-| AC-009 | PSS at the acceptance workload; the PRD-named test does not exist | section 3, W0 |
 | AC-011 | Rehydration latency from **SQLite**; the cold store on the production path is in memory | `PROGRESS.md` memory row; `StoreColdStore` is only reached by `browserd/src/tabstore.rs` tests |
 | AC-015 | iframe element traversal in the **native** engine | `grep -rn iframe crates/engine/` returns zero; the support that exists is `chrome-full` (`browserd/src/penanam.rs`, `browserd/tests/mata_tangan.rs`) |
 | AC-016 | closed shadow root piercing in the **native** engine | `grep -rn shadow crates/engine/` returns zero; same `chrome-full`-only story |
 
-Either four entries join `CELAH`, or the module comment stops claiming the list
+Either three entries join `CELAH`, or the module comment stops claiming the list
 is complete. The second option is cheaper and honest; the first is the one that
 matches the contract.
 
