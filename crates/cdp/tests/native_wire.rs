@@ -267,8 +267,89 @@ async fn alur_agen_lengkap_dari_create_target_sampai_evaluasi() {
     let hasil = tunggu_id(&mut soket, 5).await;
     assert!(hasil.get("error").is_none(), "Runtime.evaluate: {hasil}");
     assert_eq!(
-        hasil["result"]["result"]["value"], "2",
-        "evaluasi harus mengembalikan nilai skrip: {hasil}"
+        hasil["result"]["result"]["value"],
+        json!(2),
+        "evaluasi harus mengembalikan angka, bukan string: {hasil}"
+    );
+    assert_eq!(
+        hasil["result"]["result"]["type"], "number",
+        "tipe balik harus number: {hasil}"
+    );
+
+    mesin.stop().expect("berhenti");
+}
+
+/// AC-017 lewat protokol sungguhan: `navigator.webdriver` harus keluar sebagai
+/// boolean `false` di `RemoteObject`, bukan string `"false"` dan bukan
+/// `undefined`. Skrip anti-bot membandingkan `=== false`, jadi bentuknya
+/// menentukan, bukan isinya saja.
+#[tokio::test]
+async fn runtime_evaluate_mempertahankan_tipe_dan_mengirim_boolean() {
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+    let mut soket = sambung(port, "/devtools/browser").await;
+    let sesi = tab_dengan(&mut soket, "<html><body><p>x</p></body></html>").await;
+
+    let webdriver = minta_cdp_sesi(
+        &mut soket,
+        10,
+        "Runtime.evaluate",
+        json!({"expression": "navigator.webdriver", "returnByValue": true}),
+        &sesi,
+    )
+    .await;
+    assert!(webdriver.get("error").is_none(), "evaluate: {webdriver}");
+    let objek = &webdriver["result"]["result"];
+    assert_eq!(
+        objek["type"], "boolean",
+        "navigator.webdriver harus boolean: {webdriver}"
+    );
+    assert_eq!(
+        objek["value"],
+        json!(false),
+        "navigator.webdriver harus false: {webdriver}"
+    );
+
+    // String tetap string, bukan angka, dan objek dikirim by value.
+    let teks = minta_cdp_sesi(
+        &mut soket,
+        11,
+        "Runtime.evaluate",
+        json!({"expression": "'halo'"}),
+        &sesi,
+    )
+    .await;
+    assert_eq!(teks["result"]["result"]["type"], "string");
+    assert_eq!(teks["result"]["result"]["value"], "halo");
+
+    let larik = minta_cdp_sesi(
+        &mut soket,
+        12,
+        "Runtime.evaluate",
+        json!({"expression": "[1, 2, 3]"}),
+        &sesi,
+    )
+    .await;
+    assert_eq!(larik["result"]["result"]["type"], "object");
+    assert_eq!(
+        larik["result"]["result"]["value"],
+        json!([1, 2, 3]),
+        "larik harus dikirim by value: {larik}"
+    );
+
+    // `undefined` tidak punya `value` sama sekali; itu bentuk yang benar.
+    let kosong = minta_cdp_sesi(
+        &mut soket,
+        13,
+        "Runtime.evaluate",
+        json!({"expression": "undefined"}),
+        &sesi,
+    )
+    .await;
+    assert_eq!(kosong["result"]["result"]["type"], "undefined");
+    assert!(
+        kosong["result"]["result"].get("value").is_none(),
+        "undefined tidak boleh punya value: {kosong}"
     );
 
     mesin.stop().expect("berhenti");

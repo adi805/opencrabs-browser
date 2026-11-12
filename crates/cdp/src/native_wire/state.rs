@@ -19,7 +19,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use engine::native::layout::Viewport;
-use engine::native::{Document, MemoryColdStore, NodeId, NodeKind, TabId, TabPool, axtree, paint};
+use engine::native::{
+    Document, MemoryColdStore, NilaiJs, NodeId, NodeKind, TabId, TabPool, axtree, paint,
+};
 use serde_json::{Map, Value, json};
 
 use super::jaringan::{Ambilan, Sumber};
@@ -808,16 +810,90 @@ impl Dalam {
         let keluaran = {
             let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
             t.isolat
-                .eval(&ekspresi)
+                .eval_bertipe(&ekspresi)
                 .map_err(|err| Galat::baru(-32000, format!("skrip gagal: {err}")))?
         };
         let sesudah = self.sidik(tab)?;
         Ok(json!({
-            // Nilai dijadikan string: tipe JS tidak dipertahankan. Itu disebut
-            // di `engine::native::CELAH`, bukan disembunyikan.
-            "result": { "type": "string", "value": keluaran, "description": keluaran },
+            "result": remote_object(keluaran),
             "receipt": banding(&sebelum, &sesudah),
         }))
+    }
+}
+
+/// Menerjemahkan [`NilaiJs`] jadi `RemoteObject` CDP.
+///
+/// Bentuknya mengikuti `Runtime.RemoteObject`: `type` wajib, `value` hanya ada
+/// untuk nilai yang bisa dikirim, `description` untuk yang perlu dibaca
+/// manusia. Objek selalu *by value* karena mesin ini belum punya penyimpanan
+/// objek; batas itu tercatat di `engine::native::CELAH`.
+fn remote_object(nilai: NilaiJs) -> Value {
+    match nilai {
+        NilaiJs::TanpaNilai => json!({ "type": "undefined" }),
+        NilaiJs::Null => json!({ "type": "object", "subtype": "null", "value": null }),
+        NilaiJs::Boolean(benar) => json!({
+            "type": "boolean",
+            "value": benar,
+            "description": benar.to_string(),
+        }),
+        NilaiJs::Bulat(angka) => json!({
+            "type": "number",
+            "value": angka,
+            "description": angka.to_string(),
+        }),
+        NilaiJs::Pecahan(angka) => {
+            if angka.is_finite() {
+                json!({
+                    "type": "number",
+                    "value": angka,
+                    "description": angka.to_string(),
+                })
+            } else {
+                // JSON tidak punya NaN/Infinity. CDP menaruhnya di
+                // `unserializableValue`, dan tanpa itu `serde_json` akan
+                // diam-diam mengubahnya jadi null.
+                let teks = if angka.is_nan() {
+                    "NaN".to_owned()
+                } else if angka.is_sign_negative() {
+                    "-Infinity".to_owned()
+                } else {
+                    "Infinity".to_owned()
+                };
+                json!({
+                    "type": "number",
+                    "unserializableValue": teks,
+                    "description": teks,
+                })
+            }
+        }
+        NilaiJs::Teks(teks) => json!({
+            "type": "string",
+            "value": teks,
+            "description": teks,
+        }),
+        NilaiJs::Objek {
+            json: Some(teks),
+            deskripsi,
+        } => {
+            // Teksnya sudah JSON sah dari `JSON.stringify`, jadi bisa langsung
+            // jadi `value`. Kalau ternyata tidak sah, teksnya dikirim apa
+            // adanya alih-alih menghilangkan nilai.
+            let isi = serde_json::from_str(&teks).unwrap_or(Value::String(teks));
+            json!({ "type": "object", "value": isi, "description": deskripsi })
+        }
+        NilaiJs::Objek {
+            json: None,
+            deskripsi,
+        } => {
+            json!({ "type": "object", "description": deskripsi })
+        }
+        NilaiJs::Fungsi(deskripsi) => json!({ "type": "function", "description": deskripsi }),
+        NilaiJs::Simbol(deskripsi) => json!({ "type": "symbol", "description": deskripsi }),
+        NilaiJs::BigInt(deskripsi) => json!({
+            "type": "bigint",
+            "unserializableValue": deskripsi,
+            "description": deskripsi,
+        }),
     }
 }
 

@@ -126,7 +126,9 @@ async fn skrip_baca_saja_tidak_diklaim_mengubah_dokumen() {
     );
 
     let hasil = tab.kirim(4, "Runtime.evaluate", json!({"expression": "1 + 1"}));
-    assert_eq!(hasil["result"]["value"], "2");
+    // Nilai bertipe sejak W1: angka JS jadi angka JSON, bukan string "2".
+    assert_eq!(hasil["result"]["type"], json!("number"));
+    assert_eq!(hasil["result"]["value"], json!(2));
     assert_eq!(
         status(&hasil["receipt"]),
         "NoObservableChange",
