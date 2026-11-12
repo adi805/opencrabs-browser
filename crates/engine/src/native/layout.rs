@@ -1,18 +1,23 @@
 //! Penempatan kotak dari pohon [`Document`] lewat `taffy`.
 //!
-//! Yang dibaca hari ini hanya atribut `style` inline: `display`, `width`,
-//! `height`, `padding`, `margin`, `flex-direction`. Setiap properti lain
-//! dicatat sebagai diabaikan, bukan diam-diam dipakai dengan arti lain.
-//! Stylesheet belum ada di daftar [`super::CELAH`].
+//! Gaya tiap elemen datang dari [`super::css::Kaskade`]: blok `<style>` di
+//! dokumen, diurutkan menurut `!important`, sebaris, spesifisitas, lalu urutan
+//! sumber. Atribut `style` tetap dibaca sebagai deklarasi sebaris oleh
+//! kaskade, bukan oleh modul ini.
+//!
+//! Properti yang dikenali `taffy` di sini: `display`, `width`, `height`,
+//! `padding-*`, `margin-*`, `flex-direction`. Setiap properti lain dicatat
+//! sebagai diabaikan, bukan diam-diam dipakai dengan arti lain.
 
 use std::collections::HashMap;
 
 use taffy::prelude::{
     AvailableSpace, Dimension, Display, FlexDirection, LengthPercentage, LengthPercentageAuto,
-    Rect, Size, Style, TaffyTree,
+    Size, Style, TaffyTree,
 };
 
 use super::NativeError;
+use super::css::Kaskade;
 use super::dom::{Document, NodeId, NodeKind};
 
 /// Ukuran jendela tempat layout dihitung, dalam piksel CSS.
@@ -42,15 +47,32 @@ pub struct Kotak {
 #[derive(Debug, Clone, Default)]
 pub struct LaporanLayout {
     pub kotak: Vec<Kotak>,
+    /// Gaya yang menang per elemen, sudah termasuk `style` sebaris. Disimpan
+    /// supaya lapisan lukis membaca angka yang **sama** dengan yang dipakai
+    /// layout, bukan mengurai ulang atribut dan bisa berbeda pendapat.
+    pub gaya: HashMap<NodeId, Vec<(String, String)>>,
     /// Deklarasi yang bentuknya dikenali tapi nilainya tidak didukung,
     /// mis. `padding: 1em`. Ini laporan jujur, bukan log.
     pub diabaikan: Vec<String>,
+    /// Hal yang sengaja tidak dijalankan oleh kaskade: at-rule dan
+    /// `<link rel=stylesheet>`.
+    pub catatan_kaskade: Vec<String>,
 }
 
 impl LaporanLayout {
     #[must_use]
     pub fn kotak_untuk(&self, node: NodeId) -> Option<Kotak> {
         self.kotak.iter().copied().find(|k| k.node == node)
+    }
+
+    /// Deklarasi pemenang untuk satu properti pada satu elemen.
+    #[must_use]
+    pub fn properti(&self, node: NodeId, nama: &str) -> Option<&str> {
+        self.gaya
+            .get(&node)?
+            .iter()
+            .find(|(k, _)| k == nama)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Kotak terbesar menurut luas, berguna untuk memilih elemen utama
@@ -71,13 +93,18 @@ pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, Nativ
     let mut laporan = LaporanLayout::default();
 
     let akar_dokumen = doc.root();
+    // Kaskade dibangun SEKALI per dokumen. Mengurai stylesheet per elemen
+    // akan mengulang pekerjaan yang sama sebanyak jumlah node.
+    let kaskade = Kaskade::kumpulkan(doc);
+    laporan.catatan_kaskade = kaskade.diabaikan().to_vec();
+
     let mut anak_teratas = Vec::new();
     for &anak in &doc
         .node(akar_dokumen)
         .map(|n| n.children.clone())
         .unwrap_or_default()
     {
-        if let Some(id) = tempatkan(&mut taffy, doc, anak, &mut peta, &mut laporan)? {
+        if let Some(id) = tempatkan(&mut taffy, doc, &kaskade, anak, &mut peta, &mut laporan)? {
             anak_teratas.push(id);
         }
     }
@@ -124,6 +151,7 @@ pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, Nativ
 fn tempatkan(
     taffy: &mut TaffyTree<()>,
     doc: &Document,
+    kaskade: &Kaskade,
     id: NodeId,
     peta: &mut HashMap<NodeId, taffy::NodeId>,
     laporan: &mut LaporanLayout,
@@ -136,7 +164,9 @@ fn tempatkan(
         return Ok(None);
     }
 
-    let gaya = baca_gaya(node.attr("style"), id, laporan);
+    let deklarasi = kaskade.menang(doc, id);
+    let gaya = baca_gaya(&deklarasi, id, laporan);
+    laporan.gaya.insert(id, deklarasi);
     if !gaya.tampil {
         return Ok(None);
     }
@@ -145,7 +175,7 @@ fn tempatkan(
     peta.insert(id, daun);
 
     for anak in node.children.clone() {
-        if let Some(c) = tempatkan(taffy, doc, anak, peta, laporan)? {
+        if let Some(c) = tempatkan(taffy, doc, kaskade, anak, peta, laporan)? {
             taffy.add_child(daun, c).map_err(NativeError::layout)?;
         }
     }
@@ -190,7 +220,7 @@ struct Gaya {
     tampil: bool,
 }
 
-fn baca_gaya(style: Option<&str>, id: NodeId, laporan: &mut LaporanLayout) -> Gaya {
+fn baca_gaya(deklarasi: &[(String, String)], id: NodeId, laporan: &mut LaporanLayout) -> Gaya {
     let mut gaya = Style {
         display: Display::Flex,
         flex_direction: FlexDirection::Column,
@@ -198,31 +228,13 @@ fn baca_gaya(style: Option<&str>, id: NodeId, laporan: &mut LaporanLayout) -> Ga
     };
     let mut tampil = true;
 
-    let Some(style) = style else {
-        return Gaya {
-            taffy: gaya,
-            tampil,
-        };
-    };
-
-    for deklarasi in style.split(';') {
-        let deklarasi = deklarasi.trim();
-        if deklarasi.is_empty() {
-            continue;
-        }
-        let Some((nama, nilai)) = deklarasi.split_once(':') else {
-            laporan.diabaikan.push(format!(
-                "node {id}: deklarasi tanpa titik dua `{deklarasi}`"
-            ));
-            continue;
-        };
-        let nama = nama.trim().to_ascii_lowercase();
-        let nilai = nilai.trim();
-
-        match nama.as_str() {
+    for (nama, nilai) in deklarasi {
+        let nama = nama.as_str();
+        let nilai = nilai.as_str();
+        match nama {
             "display" => match nilai {
                 "none" => tampil = false,
-                "flex" | "block" | "inline-block" => {}
+                "flex" | "block" | "inline-block" | "inline" | "contents" => {}
                 lain => laporan.diabaikan.push(format!("node {id}: display:{lain}")),
             },
             "flex-direction" => match nilai {
@@ -240,30 +252,31 @@ fn baca_gaya(style: Option<&str>, id: NodeId, laporan: &mut LaporanLayout) -> Ga
                 Some(v) => gaya.size.height = Dimension::length(v),
                 None => laporan.diabaikan.push(format!("node {id}: height:{nilai}")),
             },
-            "padding" => match px(nilai) {
-                Some(v) => {
-                    gaya.padding = Rect {
-                        left: LengthPercentage::length(v),
-                        right: LengthPercentage::length(v),
-                        top: LengthPercentage::length(v),
-                        bottom: LengthPercentage::length(v),
-                    };
+            "padding-top" | "padding-right" | "padding-bottom" | "padding-left" => {
+                let Some(v) = px(nilai) else {
+                    laporan.diabaikan.push(format!("node {id}: {nama}:{nilai}"));
+                    continue;
+                };
+                let lp = LengthPercentage::length(v);
+                match nama {
+                    "padding-top" => gaya.padding.top = lp,
+                    "padding-right" => gaya.padding.right = lp,
+                    "padding-bottom" => gaya.padding.bottom = lp,
+                    _ => gaya.padding.left = lp,
                 }
-                None => laporan
-                    .diabaikan
-                    .push(format!("node {id}: padding:{nilai}")),
-            },
-            "margin" => match px(nilai) {
-                Some(v) => {
-                    gaya.margin = Rect {
-                        left: LengthPercentageAuto::length(v),
-                        right: LengthPercentageAuto::length(v),
-                        top: LengthPercentageAuto::length(v),
-                        bottom: LengthPercentageAuto::length(v),
-                    };
+            }
+            "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
+                let Some(v) = panjang_auto(nilai) else {
+                    laporan.diabaikan.push(format!("node {id}: {nama}:{nilai}"));
+                    continue;
+                };
+                match nama {
+                    "margin-top" => gaya.margin.top = v,
+                    "margin-right" => gaya.margin.right = v,
+                    "margin-bottom" => gaya.margin.bottom = v,
+                    _ => gaya.margin.left = v,
                 }
-                None => laporan.diabaikan.push(format!("node {id}: margin:{nilai}")),
-            },
+            }
             lain => laporan
                 .diabaikan
                 .push(format!("node {id}: properti `{lain}` tidak didukung")),
@@ -277,8 +290,20 @@ fn baca_gaya(style: Option<&str>, id: NodeId, laporan: &mut LaporanLayout) -> Ga
 }
 
 fn px(nilai: &str) -> Option<f32> {
-    let tanpa = nilai.strip_suffix("px")?;
+    let tanpa = nilai.trim().strip_suffix("px")?;
     tanpa.trim().parse::<f32>().ok()
+}
+
+/// `auto` dan `0` diterima untuk margin; selain px ditolak dan dilaporkan.
+fn panjang_auto(nilai: &str) -> Option<LengthPercentageAuto> {
+    let nilai = nilai.trim();
+    if nilai.eq_ignore_ascii_case("auto") {
+        return Some(LengthPercentageAuto::auto());
+    }
+    if nilai == "0" {
+        return Some(LengthPercentageAuto::length(0.0));
+    }
+    px(nilai).map(LengthPercentageAuto::length)
 }
 
 #[cfg(test)]
@@ -337,6 +362,41 @@ mod tests {
             laporan.diabaikan.iter().any(|s| s.contains("height:2em")),
             "deklarasi yang diabaikan harus muncul di laporan: {:?}",
             laporan.diabaikan
+        );
+    }
+
+    #[test]
+    fn stylesheet_menentukan_kotak_bukan_hanya_style_sebaris() {
+        let d = doc(
+            "<html><head><style>.kartu{width:70px;height:25px}</style></head>\
+             <body><div id=\"a\" class=\"kartu\"></div>\
+             <div id=\"b\" class=\"kartu\" style=\"height:40px\"></div></body></html>",
+        );
+        let laporan = hitung(&d, Viewport::new(800.0, 600.0)).unwrap();
+        let a = laporan.kotak_untuk(d.cari_id("a").unwrap()).unwrap();
+        assert_eq!(a.width, 70.0, "lebar dari <style> harus terpakai");
+        assert_eq!(a.height, 25.0, "tinggi dari <style> harus terpakai");
+        let b = laporan.kotak_untuk(d.cari_id("b").unwrap()).unwrap();
+        assert_eq!(b.width, 70.0, "lebar tetap dari stylesheet");
+        assert_eq!(b.height, 40.0, "style sebaris mengalahkan stylesheet");
+        assert_eq!(
+            laporan.properti(d.cari_id("a").unwrap(), "width"),
+            Some("70px"),
+            "gaya pemenang disimpan untuk lapisan lukis"
+        );
+    }
+
+    #[test]
+    fn catatan_kaskade_diteruskan_ke_laporan() {
+        let d = doc("<html><head><link rel=\"stylesheet\" href=\"a.css\">\
+             <style>@media print {div{width:1px}}</style></head>\
+             <body><div></div></body></html>");
+        let laporan = hitung(&d, Viewport::new(800.0, 600.0)).unwrap();
+        let catatan = laporan.catatan_kaskade.join(" | ");
+        assert!(catatan.contains("a.css"), "link harus tercatat: {catatan}");
+        assert!(
+            catatan.contains("@media"),
+            "at-rule harus tercatat: {catatan}"
         );
     }
 

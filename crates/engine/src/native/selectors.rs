@@ -97,6 +97,38 @@ pub struct Kompleks {
     bagian: Vec<(Kombinator, Vec<Sederhana>)>,
 }
 
+impl Kompleks {
+    /// Bobot selektor `(id, kelas/atribut/pseudo-kelas, tag)`.
+    ///
+    /// Dipakai kaskade untuk memilih deklarasi pemenang. `:not()` menambah
+    /// bobot isinya, sesuai spesifikasi CSS.
+    #[must_use]
+    pub fn spesifisitas(&self) -> (u32, u32, u32) {
+        let mut a = 0u32;
+        let mut b = 0u32;
+        let mut c = 0u32;
+        for (_, syarat) in &self.bagian {
+            for s in syarat {
+                let (x, y, z) = bobot(s);
+                a += x;
+                b += y;
+                c += z;
+            }
+        }
+        (a, b, c)
+    }
+}
+
+fn bobot(s: &Sederhana) -> (u32, u32, u32) {
+    match s {
+        Sederhana::Id(_) => (1, 0, 0),
+        Sederhana::Kelas(_) | Sederhana::Atribut { .. } => (0, 1, 0),
+        Sederhana::PertamaAnak | Sederhana::AnakKe(_) => (0, 1, 0),
+        Sederhana::Tag(_) => (0, 0, 1),
+        Sederhana::Bukan(dalam) => bobot(dalam),
+    }
+}
+
 /// Mengurai daftar selektor (dipisah koma).
 pub fn urai(teks: &str) -> Result<Vec<Kompleks>, GalatSelektor> {
     let mut hasil = Vec::new();
@@ -507,6 +539,16 @@ impl Document {
     pub fn cocok(&self, id: NodeId, selektor: &str) -> Result<bool, GalatSelektor> {
         let daftar = urai(selektor)?;
         Ok(daftar.iter().any(|k| cocok_kompleks(self, id, &k.bagian)))
+    }
+
+    /// Apakah satu node memenuhi selektor yang **sudah** diurai.
+    ///
+    /// Kaskade memanggil ini untuk setiap elemen kali setiap aturan; mengurai
+    /// ulang teks selektor di situ akan mengulang pekerjaan yang sama ribuan
+    /// kali.
+    #[must_use]
+    pub fn cocok_terurai(&self, id: NodeId, k: &Kompleks) -> bool {
+        cocok_kompleks(self, id, &k.bagian)
     }
 }
 

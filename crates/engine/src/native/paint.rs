@@ -2,8 +2,8 @@
 //!
 //! Ini lapisan **eyes** versi minimum yang bisa dipertanggungjawabkan: yang
 //! dilukis hanya yang benar-benar diketahui mesin, yaitu kotak layout dan
-//! warna latar dari atribut `style` inline. Teks tidak dilukis karena
-//! pengukuran teks belum ada, jadi halaman yang isinya hanya teks akan
+//! warna latar hasil kaskade ([`super::css::Kaskade`]). Teks tidak dilukis
+//! karena pengukuran teks belum ada, jadi halaman yang isinya hanya teks akan
 //! menghasilkan kanvas kosong. Itu disebut di [`super::CELAH`], bukan
 //! ditutupi dengan warna karangan.
 //!
@@ -82,17 +82,20 @@ pub fn lukis(
     let mut kotak_dilukis = 0usize;
     let mut diabaikan = Vec::new();
     for kotak in &laporan.kotak {
-        let Some(node) = doc.node(kotak.node) else {
+        // Warna dibaca dari gaya hasil kaskade, bukan dari atribut `style`:
+        // aturan `<style>` harus ikut terpakai, dan layout serta lukis wajib
+        // memakai angka yang sama.
+        let Some(deklarasi) = laporan.gaya.get(&kotak.node) else {
             continue;
         };
-        let Some(style) = node.attr("style") else {
-            continue;
-        };
-        let Some((deklarasi, warna)) = warna_latar(style) else {
+        let Some((nama_deklarasi, warna)) = warna_latar(deklarasi) else {
             continue;
         };
         let Some(warna) = warna else {
-            diabaikan.push(format!("node {}: `{deklarasi}` tidak didukung", kotak.node));
+            diabaikan.push(format!(
+                "node {}: `{nama_deklarasi}` tidak didukung",
+                kotak.node
+            ));
             continue;
         };
         if warna.alpha() == 0.0 || kotak.width <= 0.0 || kotak.height <= 0.0 {
@@ -120,19 +123,22 @@ pub fn lukis(
     })
 }
 
-/// Mencari deklarasi latar di atribut `style`.
+/// Mencari deklarasi latar di antara deklarasi pemenang kaskade.
 ///
-/// `None` pada warna berarti nilainya dikenali bentuknya tapi tidak didukung,
-/// dan itu dilaporkan pemanggil, bukan diganti warna default.
-fn warna_latar(style: &str) -> Option<(String, Option<Color>)> {
-    for bagian in style.split(';') {
-        let Some((kunci, nilai)) = bagian.split_once(':') else {
+/// `background-color` didahulukan atas shorthand `background`, sesuai urutan
+/// prioritas CSS. `None` pada warna berarti nilainya dikenali bentuknya tapi
+/// tidak didukung, dan itu dilaporkan pemanggil, bukan diganti warna default.
+fn warna_latar(deklarasi: &[(String, String)]) -> Option<(String, Option<Color>)> {
+    let ambil = |nama: &str| {
+        deklarasi
+            .iter()
+            .find(|(k, _)| k == nama)
+            .map(|(_, v)| v.as_str())
+    };
+    for kunci in ["background-color", "background"] {
+        let Some(nilai) = ambil(kunci) else {
             continue;
         };
-        let kunci = kunci.trim().to_ascii_lowercase();
-        if kunci != "background-color" && kunci != "background" {
-            continue;
-        }
         let nilai = nilai.trim();
         if nilai.is_empty() {
             continue;
@@ -300,6 +306,21 @@ mod tests {
             .filter_map(|(x, y)| raster.piksel(x, y))
             .any(|p| p == [0, 0, 255, 255]);
         assert!(ada_biru, "harus ada piksel biru dari rgb()");
+    }
+
+    #[test]
+    fn warna_dari_stylesheet_terlukis() {
+        let doc = Document::parse_html(
+            "<html><head><style>#kotak{width:30px;height:30px;background-color:#0000ff}</style>\
+             </head><body><div id=\"kotak\"></div></body></html>",
+        )
+        .unwrap();
+        let raster = lukis(&doc, Viewport::new(60.0, 60.0), None).unwrap();
+        assert_eq!(
+            raster.kotak_dilukis, 1,
+            "warna dari <style> harus ikut dilukis"
+        );
+        assert_eq!(raster.piksel(5, 5), Some([0, 0, 255, 255]));
     }
 
     #[test]

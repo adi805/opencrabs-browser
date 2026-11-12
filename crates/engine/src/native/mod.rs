@@ -3,13 +3,14 @@
 //! Ini **fondasi**, bukan mesin penuh. Yang ada di sini sudah jalan dan diuji:
 //! [`dom::Document::parse_html`] membangun pohon arena dari HTML sungguhan
 //! lewat `html5ever`, [`selectors`] mencocokkan selektor CSS terhadap pohon
-//! itu, [`layout::hitung`] menempatkan kotak lewat `taffy`, [`axtree::pohon`]
+//! itu, [`css::Kaskade`] menyelesaikan stylesheet jadi deklarasi pemenang per
+//! elemen, [`layout::hitung`] menempatkan kotak lewat `taffy`, [`axtree::pohon`]
 //! membaca isi halaman sebagai pohon aksesibilitas, [`paint::lukis`]
 //! merasterkan kotak menjadi PNG lewat `tiny-skia`, dan [`js::Isolat`]
 //! menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
-//! kaskade stylesheet, pewarisan properti, pengukuran teks, peristiwa DOM,
+//! pewarisan properti, pengukuran teks, peristiwa DOM,
 //! `fetch` di dalam isolat, dan peristiwa CDP.
 //! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
 //!
@@ -19,6 +20,7 @@
 //! sebagai mesin adalah `cdp::native_wire::NativeEngine`.
 
 pub mod axtree;
+pub mod css;
 pub mod dom;
 pub mod js;
 pub mod layout;
@@ -26,6 +28,7 @@ pub mod paint;
 pub mod selectors;
 pub mod tab_pool;
 
+pub use css::Kaskade;
 pub use dom::{Document, Node, NodeId, NodeKind};
 pub use js::{Isolat, NilaiJs, PaguIsolat};
 pub use layout::{Kotak, LaporanLayout, Viewport};
@@ -42,7 +45,9 @@ use std::fmt;
 /// Daftar ini adalah kontrak: menambah kemampuan berarti menghapus barisnya
 /// di sini dan menambah tesnya, bukan sekadar menambah kode.
 pub const CELAH: &[&str] = &[
-    "kaskade stylesheet `<style>`/`<link>` belum ada; hanya atribut `style` inline",
+    "kaskade hanya membaca `<style>` di dalam dokumen dan atribut `style`; \
+     `<link rel=stylesheet>` tidak diambil dari jaringan, dan at-rule (`@media`, \
+     `@import`, `@font-face`) dicatat lalu tidak dijalankan",
     "pewarisan properti dan nilai non-px (em, rem, %) belum ada",
     "pengukuran teks belum ada; node teks tidak menghasilkan kotak layout",
     "peristiwa DOM (klik, input, fokus) belum ada; itu tugas lapisan hands",
