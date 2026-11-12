@@ -12,13 +12,13 @@
 use std::collections::HashMap;
 
 use taffy::prelude::{
-    AvailableSpace, Dimension, Display, FlexDirection, LengthPercentage, LengthPercentageAuto,
-    Size, Style, TaffyTree,
+    AvailableSpace, Dimension, Display, FlexDirection, LengthPercentageAuto, Size, Style, TaffyTree,
 };
 
 use super::NativeError;
 use super::css::Kaskade;
 use super::dom::{Document, NodeId, NodeKind};
+use super::gaya::{GayaTerhitung, Konteks, PohonGaya, dimensi, panjang};
 
 /// Ukuran jendela tempat layout dihitung, dalam piksel CSS.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,6 +54,10 @@ pub struct LaporanLayout {
     /// Deklarasi yang bentuknya dikenali tapi nilainya tidak didukung,
     /// mis. `padding: 1em`. Ini laporan jujur, bukan log.
     pub diabaikan: Vec<String>,
+    /// Gaya terhitung per elemen: hasil pewarisan dan konversi satuan.
+    /// Lapisan lukis dan pengukur teks membaca angka dari sini supaya tidak
+    /// menghitung ulang dan berbeda pendapat dengan layout.
+    pub terhitung: HashMap<NodeId, GayaTerhitung>,
     /// Hal yang sengaja tidak dijalankan oleh kaskade: at-rule dan
     /// `<link rel=stylesheet>`.
     pub catatan_kaskade: Vec<String>,
@@ -73,6 +77,12 @@ impl LaporanLayout {
             .iter()
             .find(|(k, _)| k == nama)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Gaya terhitung satu elemen, sudah termasuk pewarisan dan satuan.
+    #[must_use]
+    pub fn gaya_terhitung(&self, node: NodeId) -> Option<&GayaTerhitung> {
+        self.terhitung.get(&node)
     }
 
     /// Kotak terbesar menurut luas, berguna untuk memilih elemen utama
@@ -97,6 +107,11 @@ pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, Nativ
     // akan mengulang pekerjaan yang sama sebanyak jumlah node.
     let kaskade = Kaskade::kumpulkan(doc);
     laporan.catatan_kaskade = kaskade.diabaikan().to_vec();
+    // Gaya terhitung juga dibangun sekali: pewarisan turun dari akar, dan
+    // `em`/`rem` butuh ukuran font induk yang baru diketahui setelah induk
+    // dihitung.
+    let pohon = PohonGaya::hitung(doc, &kaskade);
+    laporan.terhitung = pohon.salin_terhitung();
 
     let mut anak_teratas = Vec::new();
     for &anak in &doc
@@ -104,7 +119,7 @@ pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, Nativ
         .map(|n| n.children.clone())
         .unwrap_or_default()
     {
-        if let Some(id) = tempatkan(&mut taffy, doc, &kaskade, anak, &mut peta, &mut laporan)? {
+        if let Some(id) = tempatkan(&mut taffy, doc, &pohon, anak, &mut peta, &mut laporan)? {
             anak_teratas.push(id);
         }
     }
@@ -151,7 +166,7 @@ pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, Nativ
 fn tempatkan(
     taffy: &mut TaffyTree<()>,
     doc: &Document,
-    kaskade: &Kaskade,
+    pohon: &PohonGaya,
     id: NodeId,
     peta: &mut HashMap<NodeId, taffy::NodeId>,
     laporan: &mut LaporanLayout,
@@ -164,8 +179,17 @@ fn tempatkan(
         return Ok(None);
     }
 
-    let deklarasi = kaskade.menang(doc, id);
-    let gaya = baca_gaya(&deklarasi, id, laporan);
+    // Deklarasi dan gaya terhitung sama-sama datang dari pohon yang dibangun
+    // sekali, bukan diurai ulang di sini. `em` pada padding/lebar diukur
+    // terhadap font-size elemen ini sendiri, sesuai CSS.
+    let deklarasi = pohon.deklarasi(id).to_vec();
+    let konteks = Konteks {
+        ukuran_font: pohon
+            .gaya(id)
+            .map_or(super::gaya::UKURAN_FONT_AWAL, |g| g.ukuran_font),
+        ukuran_font_akar: pohon.ukuran_font_akar(),
+    };
+    let gaya = baca_gaya(&deklarasi, konteks, id, laporan);
     laporan.gaya.insert(id, deklarasi);
     if !gaya.tampil {
         return Ok(None);
@@ -175,7 +199,7 @@ fn tempatkan(
     peta.insert(id, daun);
 
     for anak in node.children.clone() {
-        if let Some(c) = tempatkan(taffy, doc, kaskade, anak, peta, laporan)? {
+        if let Some(c) = tempatkan(taffy, doc, pohon, anak, peta, laporan)? {
             taffy.add_child(daun, c).map_err(NativeError::layout)?;
         }
     }
@@ -220,7 +244,12 @@ struct Gaya {
     tampil: bool,
 }
 
-fn baca_gaya(deklarasi: &[(String, String)], id: NodeId, laporan: &mut LaporanLayout) -> Gaya {
+fn baca_gaya(
+    deklarasi: &[(String, String)],
+    konteks: Konteks,
+    id: NodeId,
+    laporan: &mut LaporanLayout,
+) -> Gaya {
     let mut gaya = Style {
         display: Display::Flex,
         flex_direction: FlexDirection::Column,
@@ -244,20 +273,22 @@ fn baca_gaya(deklarasi: &[(String, String)], id: NodeId, laporan: &mut LaporanLa
                     .diabaikan
                     .push(format!("node {id}: flex-direction:{lain}")),
             },
-            "width" => match px(nilai) {
-                Some(v) => gaya.size.width = Dimension::length(v),
+            // px, em, rem, dan `%` semuanya diterima: `%` diteruskan ke taffy
+            // sebagai persen supaya dihitung terhadap kotak induk, bukan
+            // diubah jadi px dengan tebakan.
+            "width" => match dimensi(nilai, konteks) {
+                Some(v) => gaya.size.width = v,
                 None => laporan.diabaikan.push(format!("node {id}: width:{nilai}")),
             },
-            "height" => match px(nilai) {
-                Some(v) => gaya.size.height = Dimension::length(v),
+            "height" => match dimensi(nilai, konteks) {
+                Some(v) => gaya.size.height = v,
                 None => laporan.diabaikan.push(format!("node {id}: height:{nilai}")),
             },
             "padding-top" | "padding-right" | "padding-bottom" | "padding-left" => {
-                let Some(v) = px(nilai) else {
+                let Some(lp) = panjang(nilai, konteks) else {
                     laporan.diabaikan.push(format!("node {id}: {nama}:{nilai}"));
                     continue;
                 };
-                let lp = LengthPercentage::length(v);
                 match nama {
                     "padding-top" => gaya.padding.top = lp,
                     "padding-right" => gaya.padding.right = lp,
@@ -266,7 +297,7 @@ fn baca_gaya(deklarasi: &[(String, String)], id: NodeId, laporan: &mut LaporanLa
                 }
             }
             "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
-                let Some(v) = panjang_auto(nilai) else {
+                let Some(v) = panjang_auto(nilai, konteks) else {
                     laporan.diabaikan.push(format!("node {id}: {nama}:{nilai}"));
                     continue;
                 };
@@ -277,6 +308,10 @@ fn baca_gaya(deklarasi: &[(String, String)], id: NodeId, laporan: &mut LaporanLa
                     _ => gaya.margin.left = v,
                 }
             }
+            // Properti waris sudah dipakai lapisan gaya; mencatatnya sebagai
+            // "tidak didukung" akan jadi laporan palsu.
+            "color" | "font-size" | "font-weight" | "line-height" | "visibility" | "text-align"
+            | "background" | "background-color" => {}
             lain => laporan
                 .diabaikan
                 .push(format!("node {id}: properti `{lain}` tidak didukung")),
@@ -289,13 +324,9 @@ fn baca_gaya(deklarasi: &[(String, String)], id: NodeId, laporan: &mut LaporanLa
     }
 }
 
-fn px(nilai: &str) -> Option<f32> {
-    let tanpa = nilai.trim().strip_suffix("px")?;
-    tanpa.trim().parse::<f32>().ok()
-}
-
-/// `auto` dan `0` diterima untuk margin; selain px ditolak dan dilaporkan.
-fn panjang_auto(nilai: &str) -> Option<LengthPercentageAuto> {
+/// `auto` dan `0` diterima untuk margin; selain px/em/rem/% ditolak dan
+/// dilaporkan.
+fn panjang_auto(nilai: &str, konteks: Konteks) -> Option<LengthPercentageAuto> {
     let nilai = nilai.trim();
     if nilai.eq_ignore_ascii_case("auto") {
         return Some(LengthPercentageAuto::auto());
@@ -303,7 +334,7 @@ fn panjang_auto(nilai: &str) -> Option<LengthPercentageAuto> {
     if nilai == "0" {
         return Some(LengthPercentageAuto::length(0.0));
     }
-    px(nilai).map(LengthPercentageAuto::length)
+    panjang(nilai, konteks).map(LengthPercentageAuto::from)
 }
 
 #[cfg(test)]
@@ -356,12 +387,69 @@ mod tests {
 
     #[test]
     fn nilai_tidak_didukung_dilaporkan() {
-        let d = doc("<html><body><div style=\"height:2em\"></div></body></html>");
+        // `vh` belum didukung: bukan px/em/rem/%, jadi harus dilaporkan,
+        // bukan ditebak jadi px.
+        let d = doc("<html><body><div style=\"height:2vh\"></div></body></html>");
         let laporan = hitung(&d, Viewport::new(800.0, 600.0)).unwrap();
         assert!(
-            laporan.diabaikan.iter().any(|s| s.contains("height:2em")),
+            laporan.diabaikan.iter().any(|s| s.contains("height:2vh")),
             "deklarasi yang diabaikan harus muncul di laporan: {:?}",
             laporan.diabaikan
+        );
+    }
+
+    #[test]
+    fn em_dan_rem_menghasilkan_kotak_sungguhan() {
+        // `em` diukur terhadap font-size elemen itu, `rem` terhadap font-size
+        // `html`. Kalau satuan ini hanya benar di tes gaya.rs tapi tidak
+        // dipakai layout, kotaknya akan nol dan tes ini gagal.
+        let d = doc("<html><head><style>\
+             html { font-size: 10px }\
+             body { font-size: 20px }\
+             #a { width: 2em; height: 3rem }\
+             </style></head><body><div id=\"a\"></div></body></html>");
+        let laporan = hitung(&d, Viewport::new(800.0, 600.0)).unwrap();
+        let a = laporan.kotak_untuk(d.cari_id("a").unwrap()).unwrap();
+        assert_eq!(a.width, 40.0, "2em dari font-size 20px harus 40px");
+        assert_eq!(a.height, 30.0, "3rem dari font-size akar 10px harus 30px");
+        assert!(
+            !laporan.diabaikan.iter().any(|s| s.contains("width:2em")),
+            "em sudah didukung, tidak boleh dilaporkan diabaikan: {:?}",
+            laporan.diabaikan
+        );
+    }
+
+    #[test]
+    fn persen_lebar_dihitung_terhadap_induk() {
+        // `%` diteruskan ke taffy sebagai persen, bukan diubah jadi px.
+        let d = doc(
+            "<html><body><div id=\"induk\" style=\"width:200px;height:100px\">\
+             <div id=\"anak\" style=\"width:50%;height:10px\"></div></div></body></html>",
+        );
+        let laporan = hitung(&d, Viewport::new(800.0, 600.0)).unwrap();
+        let anak = laporan.kotak_untuk(d.cari_id("anak").unwrap()).unwrap();
+        assert_eq!(anak.width, 100.0, "50% dari induk 200px harus 100px");
+    }
+
+    #[test]
+    fn properti_waris_terbaca_dari_laporan() {
+        // Pewarisan harus terlihat di laporan, bukan cuma di tes internal
+        // gaya.rs: anak yang tidak punya deklarasi sendiri mewarisi warna
+        // dan ukuran font induknya.
+        let d = doc("<html><head><style>\
+             body { color: #00ff00; font-size: 18px }\
+             </style></head><body><div id=\"a\"><span id=\"b\"></span></div></body></html>");
+        let laporan = hitung(&d, Viewport::new(800.0, 600.0)).unwrap();
+        let b = d.cari_id("b").unwrap();
+        let g = laporan
+            .gaya_terhitung(b)
+            .expect("anak harus punya gaya terhitung");
+        assert_eq!(g.warna.as_deref(), Some("#00ff00"), "color harus waris");
+        assert_eq!(g.ukuran_font, 18.0, "font-size harus waris");
+        assert_eq!(
+            laporan.properti(b, "color"),
+            None,
+            "deklarasi pemenang anak memang kosong; nilainya datang dari warisan"
         );
     }
 

@@ -4,14 +4,15 @@
 //! [`dom::Document::parse_html`] membangun pohon arena dari HTML sungguhan
 //! lewat `html5ever`, [`selectors`] mencocokkan selektor CSS terhadap pohon
 //! itu, [`css::Kaskade`] menyelesaikan stylesheet jadi deklarasi pemenang per
-//! elemen, [`layout::hitung`] menempatkan kotak lewat `taffy`, [`axtree::pohon`]
+//! elemen, [`gaya::PohonGaya`] menurunkan properti yang waris dan menghitung
+//! `em`/`rem`/`%` terhadap konteks yang benar, [`layout::hitung`] menempatkan
+//! kotak lewat `taffy`, [`axtree::pohon`]
 //! membaca isi halaman sebagai pohon aksesibilitas, [`paint::lukis`]
 //! merasterkan kotak menjadi PNG lewat `tiny-skia`, dan [`js::Isolat`]
 //! menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
-//! pewarisan properti, pengukuran teks, peristiwa DOM,
-//! `fetch` di dalam isolat, dan peristiwa CDP.
+//! pengukuran teks, peristiwa DOM, `fetch` di dalam isolat, dan peristiwa CDP.
 //! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
 //!
 //! Permukaan CDP-nya **tidak** ada di sini. Crate ini sengaja nol pengetahuan
@@ -22,6 +23,7 @@
 pub mod axtree;
 pub mod css;
 pub mod dom;
+pub mod gaya;
 pub mod js;
 pub mod layout;
 pub mod paint;
@@ -48,7 +50,6 @@ pub const CELAH: &[&str] = &[
     "kaskade hanya membaca `<style>` di dalam dokumen dan atribut `style`; \
      `<link rel=stylesheet>` tidak diambil dari jaringan, dan at-rule (`@media`, \
      `@import`, `@font-face`) dicatat lalu tidak dijalankan",
-    "pewarisan properti dan nilai non-px (em, rem, %) belum ada",
     "pengukuran teks belum ada; node teks tidak menghasilkan kotak layout",
     "peristiwa DOM (klik, input, fokus) belum ada; itu tugas lapisan hands",
     "raster hanya melukis latar kotak dari atribut `style` inline; teks, gambar, \
