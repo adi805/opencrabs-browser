@@ -223,6 +223,82 @@ Act on the current request: a PRD alone does not authorize building. At startup,
 | Handoff | JSON on the control port: `id`, `url`, `judul`, `screenshot`, `selector`, `kedaluwarsa` | A TTL is mandatory; a token is mandatory |
 | Metrics | Prometheus text | The `mesin` label is mandatory; an unmeasurable value is never sent as 0 |
 
+### Threat Model Contract
+
+| Field | Required value |
+|---|---|
+| Assets at risk | The SQLite store at `~/.opencrabs/browser-daemon/store.db` (tables `profile`, `session`, `cookie`, `otp_event`, `captcha_event`, `engine_run`) and its 32-byte XChaCha20-Poly1305 key `store.key`; the per-host policy file; evidence artifacts under the run directory; and the daemon control token. |
+| Trust boundaries | Page content is untrusted and crosses into the agent as screenshots, accessibility trees and DOM text; agent tool calls cross the control socket into the daemon; the daemon crosses into the engine over CDP on port 9224 or 9225; and the engine crosses out to the network. |
+| Authentication model | The control socket is a Unix domain socket guarded by filesystem permissions plus the 65-byte `control.token` for the owning user only. The CDP endpoint binds loopback and is never exposed past the host, so there is no remote API surface and no network-accessible credential to steal. |
+| Authorization model | Per-host policy in `crates/policy` decides engine, profile and allowed action tiers. The daemon resolves the policy after receiving a request, so the agent cannot widen a host's allowances by passing parameters. |
+| Secrets handling | No secret is written into a command line, a URL or a log line. Cookie values rest encrypted with XChaCha20-Poly1305 and `store.key` is kept at mode `0600`; `crates/store/src/crypto.rs` refuses a missing, mis-moded or mismatched key instead of returning ciphertext as data. Evidence artifacts redact cookie values and authorization headers before writing, per `NFR-004`. |
+| Data in transit & at rest | CDP traffic stays on loopback. The store, the key and the evidence artifacts stay on host disk; nothing is uploaded anywhere automatically, and the restore drill proves the store plus key round-trips by copy. |
+| Abuse cases | Spoofing: a page impersonating a host so a weaker policy applies, held by `FR-009` (engine and policy chosen from the resolved host, never from page-supplied text) and `AC-019`. Tampering: page script rewriting evidence before capture, held by `FR-005` (evidence captured through the daemon with URL and timestamp) and `AC-011`. Repudiation: an action claimed as succeeded with no proof, held by `FR-004` and `AC-009` (every action returns a before/after diff or an explicit failed classification). Information disclosure: cookies or tokens leaking into artifacts or logs, held by `NFR-004` and `AC-021`, and by the key-mode guard in `crypto.rs`. Denial of service: unbounded tabs exhausting memory, held by `FR-008` (`max_tabs` enforced against the engine's `/json/list`) and `NFR-002` (memory budget plus reap). Elevation of privilege: page-driven prompt injection steering the agent into a higher action tier, held by `FR-010` (page text is data, never instruction) and `AC-025`. |
+| Residual risk owner | Adi. The largest residual risk is anti-bot detection on real hosts, which is explicitly unvalidated in the Research basis rather than assumed solved. |
+
+### SLO & Performance Budget Contract
+
+| Field | Required value |
+|---|---|
+| Service level indicator | Share of tool calls that return a definite answer (succeeded with evidence, failed with one of six categories, or needs-a-human) instead of a timeout or an unclassified error. |
+| SLO target | 98% of `browser_navigate` and `browser_click` calls return a classified outcome, and 100% of successful actions carry a verification artifact. |
+| Measurement window | Rolling 7 days of agent tool calls recorded by the daemon metrics path. |
+| Error budget policy | Budget of 2 unclassified outcomes per 100 calls. When it is exhausted, the tiered escalation order is reviewed before the next batch of page work instead of retrying the same call. |
+| Latency budget (p95) | `browser_navigate` returns a usable snapshot within 15000 ms; a click returns a verified outcome within 3000 ms after the element resolves; engine boot stays under 12000 ms, matching the measured 3.2 to 11.8 s for `chrome_full`. |
+| Load expectation | One engine per profile, at most `max_tabs` tabs, memory ceiling enforced by `NFR-002`. Measured baselines: 26 MB PSS for an empty engine and 187 MB for 6 empty tabs; `chrome-headless-shell` grows 32.7 MB per tab and `chrome-full` in Xvfb 23.2 MB per tab. |
+| Alert threshold | Two consecutive unclassified outcomes, or an engine process gone while the daemon still reports it alive, triggers `cargo xtask doctor` before any further page work. |
+| Escalation owner | Adi; the first step is `cargo xtask doctor` and the daemon log, not a rerun of the same call. |
+
+### Design System & UX Contract
+
+| Field | Required value |
+|---|---|
+| Design tokens source | N/A — this product has no human UI, its visual surface is whatever the target page renders, so no application token set exists. Artifact layout uses one fixed header block (URL, engine, timestamp) defined once in the evidence writer. |
+| Component inventory | Tool-facing surfaces only: `browser_navigate`, `browser_click`, `browser_type`, `browser_eval`, `browser_screenshot`, `browser_content`, `browser_find`, `browser_wait`, and the daemon `/json/version` health endpoint. |
+| UI states | Every tool result renders one of five states: empty (page fetched but the selector matched nothing, reported as an empty result rather than an error), loading (navigation in flight plus the tier being attempted), success (action applied and verified), error (classified into one of six categories with artifacts), and partial-degraded (screenshot captured but the accessibility tree unavailable, so the result names which evidence layers exist). |
+| Accessibility target | N/A — no human UI, so WCAG conformance is not a target. Accessibility is consumed instead: the accessibility tree is one of the three evidence layers required by `FR-002`, and an empty tree is itself a finding that must be reported. |
+| Responsive breakpoints | Viewport is chosen per call and recorded in the artifact; measured default 1280x800 at device scale factor 1. There are no application breakpoints, one call one viewport. |
+| Content & copy rules | Tool output is machine-read English prose: classification word first, then the reason, then the artifact path. No em dashes, no hedging, and never a bare success without its evidence reference. |
+| Design owner | Adi owns the tool surface contract; the builder owns the artifact layout. |
+
+### Maintainability Contract
+
+| Field | Required value |
+|---|---|
+| Existing assets to reuse | The workspace already carries the seams: `engine` (engine adapters), `cdp` (protocol client), `lifecycle` (boot, reap, memory), `browserd` (daemon and tool dispatch), `policy` (per-host rules), `control` (control socket), `store` (SQLite profile, session and cookie persistence), `otp` (needs-a-human handling), `testing` (shared fixtures) and `xtask`. `cargo xtask doctor` and `bench/cdp-smoke.mjs` exist as probes. |
+| Module boundaries | `policy` decides, `lifecycle` owns processes, `cdp` speaks the protocol, `engine` adapts one engine, `store` owns persistence, `control` carries requests, `browserd` dispatches. No crate reaches around another: `browserd` never spawns a process directly and `engine` never decides policy. |
+| Dependency direction | `control` to `browserd` to `policy`, `lifecycle`, `store` and `engine` to `cdp`. Dependencies point one way only, which is what keeps the protocol client testable with no daemon running. |
+| Naming & file layout | One crate per responsibility under `crates/`; integration probes in `bench/`; evidence documents under `docs/prd/` named subject plus `DDMMYY-HHmm` timestamp; no module named `util` or `common`. |
+| Max file / function size | Maximum 500 lines per file and 60 lines per function; past that a module splits by responsibility, never by trimming a check in the reap path or the verification path. |
+| Test strategy | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, plus the live probes `curl -s http://127.0.0.1:9224/json/version` and `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` which must report 6 of 6 checks. CI run 42300230272 is the reference green run. |
+| Comment & doc policy | Comments explain why a tier exists and which measurement justifies a threshold, never what the next line does. Every measured number names the host and the date it was taken. |
+| Ownership | Adi owns the daemon and the policy file; the builder owns crate layout and adapters. |
+| Dead code policy | An engine adapter that stops being selected is removed in the same commit as its policy entry; no adapter is kept as an unused fallback without a measured reason in the Research basis. |
+| Explicit non-goals | No non-Chromium render path, no human-facing browser UI, no fingerprint-level stealth, and no new external dependency where a workspace crate already does the job. |
+
+### Integration Map Contract
+
+| Module | Public interface | Calls into | Called by | Data owned | Failure mode | Contract test |
+|---|---|---|---|---|---|---|
+| control | Unix socket handler, one request per connection | `browserd` dispatch | agent tool calls | `control.token` file and the in-flight request queue | returns a classification instead of hanging when the daemon is down | `cargo test --workspace` covers the down-daemon path |
+| browserd | `fn dispatch(request)` plus `GET /json/version` health | `policy`, `lifecycle`, `store`, `engine` | `control` | tab registry mirrored from the engine's `/json/list` | reports the tab count read from the engine, never from a local counter | `curl -s http://127.0.0.1:9224/json/version` returns a version document |
+| policy | `fn resolve(host)` returning engine, profile and allowed tiers | policy file on disk | `browserd` | per-host engine, profile and tier rules | falls back to the strict default tier when a host has no rule | `cargo test --workspace` policy resolution cases |
+| lifecycle | `fn ensure(engine, profile)` and `fn reap()` | process spawn, memory probe | `browserd` | process handles and memory samples per engine run | kills and restarts a leaking engine instead of serving a dead one | `cargo xtask doctor` reports memory and process state |
+| cdp | `fn call(method, params)` over the websocket | engine endpoint on 9224 or 9225 | `engine`, `browserd` | websocket session per target, no durable state | surfaces protocol errors verbatim, no silent retry | `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` reports 6 of 6 |
+| engine | `trait Engine` with navigate, click, type, eval, screenshot, content | `cdp` | `browserd` | capability descriptor per engine (layout, screenshot, accessibility tree) | returns a capability gap rather than a wrong answer, so a layout-less engine reports no screenshot | adapter probes recorded in `docs/prd/BUKTI-OXI 071126-0519.md` and `BUKTI-FULL 071126-0734.md` |
+| store | `fn migrate(conn, path)` and cookie read/write through `crypto.rs` | SQLite file plus `store.key` | `browserd`, `otp` | `~/.opencrabs/browser-daemon/store.db` and `store.key`, tables `profile`, `session`, `cookie`, `otp_event`, `captcha_event`, `engine_run` | refuses a key mismatch or a newer `PRAGMA user_version` instead of serving garbage | `cargo test -p store --lib` reports 43 passed |
+| verification | `fn verify(before, after)` producing the evidence artifact | evidence writer on disk | `browserd` after every action | artifact files under the run directory | records the failed delta honestly instead of upgrading it to success | `cargo test --workspace` before/after diff cases |
+
+
+
+
+
+
+
+
+
+
+
 ## 4. Implementation & Milestones
 
 | # | Milestone | Implementation Tasks | Done When | Status |
@@ -251,6 +327,82 @@ Pause only for a blocking decision, material scope change, or a genuine new auth
 | Failure path | A local server returning 403 plus a challenge | Category `blok_anti_bot` plus 4 artifact files | 60 s | `ls` of the artifact directory |
 | Production isolation | `curl /json/list` on 9222 before and after | An identical tab count | read-only | the two JSON outputs compared |
 | Config reload | Change `max_tabs`, send SIGHUP | The new limit applies without a restart | 10 s | the log line confirming the config reload plus the create result |
+
+### Rollback & Release Safety Contract
+
+| Field | Required value |
+|---|---|
+| Deploy strategy | One binary built from the workspace and installed on the development laptop, run as a user process holding the control socket. No fleet and no rolling deploy, so a release is one swap and one restart. |
+| Release mechanism | Build, install, restart, then run the smoke pair (`curl -s http://127.0.0.1:9224/json/version` and `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` reporting 6 of 6) plus `cargo xtask doctor` before the agent is pointed at any real host. |
+| Rollback command | `git -C ~/src/opencrabs-browser checkout HEAD~1 && cargo build --release && node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` rebuilds the previous commit and re-proves it before the daemon is restarted on it. |
+| Rollback time target | Under 300 seconds from decision to a rebuilt binary answering the smoke checks, dominated by the release compile. |
+| Database migration strategy | `crates/store/src/schema.rs` migrates with `PRAGMA user_version` (currently 1) using `CREATE TABLE IF NOT EXISTS` and additive steps, so an older binary refuses a newer store instead of mangling it. A rollback across a schema bump restores the copied `store.db` and `store.key` pair rather than reversing the migration. |
+| Backup / restore point | The store pair `store.db` plus `store.key` (53,248 bytes plus 65 bytes measured on 2026-11-07) is the only durable state; the policy file and `control.token` are copied beside it before any change. Engine profiles and the tab registry are disposable. |
+| Kill switch | Stop the daemon process; `lifecycle` reaps the engines it spawned on shutdown, and any survivor is killed by the PID printed by `pgrep -af browserd` rather than by pattern-matching a command line. |
+| Post-rollback verification | `curl -s http://127.0.0.1:9224/json/version` returns a version document, `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` reports 6 of 6, and `browserd cookies ls --profile scratch` exits 0. A daemon that answers but fails smoke counts as a failed rollback. |
+| Release owner | Adi runs the install and the restart; the builder owns the smoke scripts. |
+
+### Backup & Restore Drill Contract
+
+| Field | Required value |
+|---|---|
+| Backup scope | `store.db` (SQLite: `profile`, `session`, `cookie`, `otp_event`, `captcha_event`, `engine_run`) plus `store.key`, the 32-byte XChaCha20-Poly1305 key that decrypts every cookie value. Both files are the unit: a restored `store.db` without its matching key still opens and then reports zero cookies, because `crates/store/src/crypto.rs` refuses a missing, mis-moded or mismatched key instead of handing back ciphertext as data. |
+| Backup destination | A second host reached with `rsync` over SSH, kept off the laptop that runs the daemon; an external drive stored away from the laptop counts as the same thing. No off-host target is provisioned yet, and this contract exposes that gap instead of hiding it. |
+| Backup frequency | Daily, one snapshot per day, plus one manual snapshot before every tag. The scheduled job `~/.opencrabs/scripts/db-backup-daily.sh` today covers `opencrabs.db` only, so the store pair needs its own line in the same job. |
+| Backup retention | 7 daily snapshots: the newest 7 are kept and the oldest is dropped when the 8th arrives. |
+| Restore command | `cp <snapshot>/store.db ~/.opencrabs/browser-daemon/store.db && cp <snapshot>/store.key ~/.opencrabs/browser-daemon/store.key && chmod 600 ~/.opencrabs/browser-daemon/store.key && browserd cookies ls --profile scratch` |
+| Restore time target | Under 5 minutes from the decision to restore until `browserd cookies ls` answers again; the 2026-11-07 drill restored the 53,248-byte store in seconds, so the budget is dominated by fetching the snapshot. |
+| Restore test cadence | Monthly, rehearsed on a copy in a temporary directory, never against the store a running daemon holds open. |
+| Last verified restore | 2026-11-07, drill log `docs/prd/BUKTI-RESTORE 071126-2025.md`: sha256 `5e4f31eb840c087ee9a71577f8684ae1ff966ba58eb918dd152a8d435355b69a` matched between backup and restored copy and the restored store opened with `browserd cookies ls` at exit 0. Recorded limitation: the live store held zero cookie rows, so this drill proves byte parity, key pairing and openability, while recovery of a real profile's cookies is proven only at crate level by `cargo test -p store --lib` (43 passed). |
+| Restore verification | `sha256sum` of the restored `store.db` equal to the backup, `browserd cookies ls --db <restored> --key-file <restored>` exiting 0, and per-table row counts from `sqlite3` on the restored copy equal to the source. A run where only one of the three matches is a failed drill. |
+| Restore owner | Adi, the only operator: he runs the drill, keeps the log, and decides whether a restore counts as passed. |
+
+### Commercial Readiness Contract
+
+| Field | Required value |
+|---|---|
+| Pricing model | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| Unit economics | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| Legal entity & jurisdiction | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| Customer terms & privacy | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| License | N/A — repo fork privat, lisensi mengikuti upstream |
+| Billing mechanism | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| Refund & cancellation policy | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| Support channel | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| Support response target | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+| Commercial owner | N/A — internal engine for one operator's own agent, not sold and with no external customer to invoice |
+
+### Go-to-Market Contract
+
+| Field | Required value |
+|---|---|
+| Acquisition channel | N/A — not a product: adoption is one operator installing one binary on his own laptop, so there is no channel and no funnel |
+| Positioning statement | N/A — not a product: adoption is one operator installing one binary on his own laptop, so there is no channel and no funnel |
+| Target audience | N/A — not a product: adoption is one operator installing one binary on his own laptop, so there is no channel and no funnel |
+| Acquisition cost or budget | N/A — not a product: adoption is one operator installing one binary on his own laptop, so there is no channel and no funnel |
+| Launch success metric | N/A — not a product: adoption is one operator installing one binary on his own laptop, so there is no channel and no funnel |
+| Launch owner | N/A — not a product: adoption is one operator installing one binary on his own laptop, so there is no channel and no funnel |
+
+### Handover & Ownership Transfer Contract
+
+| Field | Required value |
+|---|---|
+| Handover artifacts | N/A — single owner and single builder; this PRD plus the evidence documents under docs/prd are the whole transfer material |
+| Access transfer | N/A — single owner and single builder; this PRD plus the evidence documents under docs/prd are the whole transfer material |
+| Operations runbook | N/A — single owner and single builder; this PRD plus the evidence documents under docs/prd are the whole transfer material |
+| Receiving owner | N/A — single owner and single builder; this PRD plus the evidence documents under docs/prd are the whole transfer material |
+| Handover acceptance criteria | N/A — single owner and single builder; this PRD plus the evidence documents under docs/prd are the whole transfer material |
+| Post-handover support window | N/A — single owner and single builder; this PRD plus the evidence documents under docs/prd are the whole transfer material |
+
+
+
+
+
+
+
+
+
+
 
 ## 5. Risks
 
