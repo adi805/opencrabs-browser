@@ -53,7 +53,16 @@ impl PaguIsolat {
 /// halaman untuk membuka koneksi sendiri; `fetch` tetap tercatat di
 /// [`super::CELAH`] sampai ada jalur yang melewati kebijakan daemon.
 const PEMBUKA: &str = r#"
-globalThis.__log = [];
+// Buffer log dipasang non-enumerable: `Object.keys(globalThis)` di browser
+// sungguhan tidak memuatnya, dan AC-018 menuntut mesin ini tidak menambah
+// global yang bisa dipakai sidik jari. Nama `__log` tetap bisa ditebak kalau
+// skrip mencarinya langsung; itu tercatat di CELAH, bukan disembunyikan.
+Object.defineProperty(globalThis, "__log", {
+  value: [],
+  enumerable: false,
+  writable: true,
+  configurable: false,
+});
 globalThis.console = {
   log: function () {
     var bagian = [];
@@ -67,7 +76,61 @@ globalThis.document = globalThis.document || {};
 // nilainya string kosong. Dibiarkan `undefined`, `document.title === ""` jadi
 // salah dan skrip halaman mengambil cabang yang keliru.
 globalThis.document.title = "";
+// FR-009: identitas tanpa kebocoran `webdriver`. Nilainya boolean, bukan
+// string kosong, karena skrip anti-bot membandingkan `=== false`. UA menyebut
+// mesin ini apa adanya, bukan menyamar sebagai Chrome: menyamar akan jadi
+// klaim palsu yang tidak bisa dipertahankan. Objek ini objek biasa, bukan
+// instance `Navigator`; itu tercatat di CELAH bersama `document`.
+globalThis.navigator = {
+  webdriver: false,
+  userAgent: "Mozilla/5.0 (X11; Linux x86_64) OpenCrabsBrowser/0.2.0",
+  language: "en-US",
+  languages: ["en-US", "en"],
+  platform: "Linux x86_64",
+  vendor: "",
+  hardwareConcurrency: 4,
+};
 "#;
+
+/// Nilai balik skrip dengan tipe JavaScript yang **dipertahankan**.
+///
+/// Sebelum ini setiap hasil dijadikan string, jadi `navigator.webdriver`
+/// keluar sebagai `"false"` dan tidak ada klien yang bisa membedakan boolean
+/// dari teks. Bilangan dipisah bulat dan pecahan karena V8 juga begitu: `2`
+/// dan `2.0` sama nilainya di JavaScript, tapi `2.0` tercetak `2.0` di JSON,
+/// dan pembaca yang menuntut bilangan bulat akan menolaknya.
+///
+/// Objek dibawa sebagai teks JSON hasil `JSON.stringify`, bukan sebagai
+/// `objectId`. Mesin ini belum punya penyimpanan objek, jadi satu-satunya
+/// bentuk yang jujur adalah *by value*; batas itu tercatat di [`super::CELAH`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum NilaiJs {
+    /// `undefined`
+    TanpaNilai,
+    /// `null`
+    Null,
+    /// `true` / `false`
+    Boolean(bool),
+    /// Bilangan bulat (tag `int` di V8).
+    Bulat(i32),
+    /// Bilangan pecahan (tag `float64` di V8), termasuk `NaN` dan `Infinity`.
+    Pecahan(f64),
+    /// Teks.
+    Teks(String),
+    /// Objek, larik, promise, galat, atau proxy. `json` kosong kalau nilai
+    /// tidak bisa diserialkan (mis. struktur melingkar); `deskripsi` selalu
+    /// terisi supaya klien tetap punya sesuatu untuk dibaca.
+    Objek {
+        json: Option<String>,
+        deskripsi: String,
+    },
+    /// Fungsi atau konstruktor, berisi sumbernya.
+    Fungsi(String),
+    /// Simbol, berisi deskripsinya.
+    Simbol(String),
+    /// BigInt, berisi nilainya sebagai teks.
+    BigInt(String),
+}
 
 pub struct Isolat {
     // Urutan deklarasi penting: konteks harus dijatuhkan sebelum runtime.
@@ -108,6 +171,68 @@ impl Isolat {
             .map_err(NativeError::script)
     }
 
+    /// Menjalankan sumber sebagai program dan mengembalikan nilai akhirnya
+    /// **dengan tipe aslinya**, bukan string.
+    ///
+    /// Sumber dijalankan apa adanya, sama seperti [`Self::eval`], jadi `var`
+    /// dan `function` tetap menempel ke objek global untuk panggilan
+    /// berikutnya. Yang berbeda hanya cara nilai balik dibaca.
+    ///
+    /// Objek diambil *by value* lewat `JSON.stringify` di sisi Rust
+    /// (`Ctx::json_stringify`), bukan lewat global baru: menambah
+    /// `globalThis.__oc_*` akan melanggar AC-018 (`test_no_automation_globals`)
+    /// karena global semacam itu terlihat oleh skrip halaman.
+    pub fn eval_bertipe(&self, sumber: &str) -> Result<NilaiJs, NativeError> {
+        self.context.with(|ctx| {
+            let nilai: rquickjs::Value = ctx
+                .eval(sumber.as_bytes().to_vec())
+                .map_err(NativeError::script)?;
+
+            let hasil = match nilai.type_of() {
+                rquickjs::Type::Uninitialized | rquickjs::Type::Undefined => NilaiJs::TanpaNilai,
+                rquickjs::Type::Null => NilaiJs::Null,
+                rquickjs::Type::Bool => NilaiJs::Boolean(nilai.as_bool().unwrap_or(false)),
+                rquickjs::Type::Int => NilaiJs::Bulat(nilai.as_int().unwrap_or_default()),
+                rquickjs::Type::Float => NilaiJs::Pecahan(nilai.as_float().unwrap_or_default()),
+                rquickjs::Type::String => NilaiJs::Teks(
+                    nilai
+                        .as_string()
+                        .and_then(|teks| teks.to_string().ok())
+                        .unwrap_or_default(),
+                ),
+                rquickjs::Type::Symbol => NilaiJs::Simbol(teks_dari(&ctx, &nilai)),
+                rquickjs::Type::Unknown => NilaiJs::Objek {
+                    // Tag internal yang tidak dikenali rquickjs. Tidak
+                    // ditebak tipenya; dilaporkan apa adanya supaya klien
+                    // tidak menerima nilai palsu.
+                    json: None,
+                    deskripsi: "[nilai dengan tag tak dikenal]".to_owned(),
+                },
+                rquickjs::Type::BigInt => NilaiJs::BigInt(teks_dari(&ctx, &nilai)),
+                rquickjs::Type::Function | rquickjs::Type::Constructor | rquickjs::Type::Module => {
+                    NilaiJs::Fungsi(teks_dari(&ctx, &nilai))
+                }
+                rquickjs::Type::Array
+                | rquickjs::Type::Object
+                | rquickjs::Type::Promise
+                | rquickjs::Type::Exception
+                | rquickjs::Type::Proxy => {
+                    // Struktur melingkar membuat `JSON.stringify` melempar
+                    // galat; itu bukan alasan menggagalkan seluruh evaluasi,
+                    // jadi hasilnya jatuh ke deskripsi teks.
+                    let json = ctx
+                        .json_stringify(nilai.clone())
+                        .ok()
+                        .flatten()
+                        .and_then(|teks| teks.to_string().ok());
+                    let deskripsi = json.clone().unwrap_or_else(|| teks_dari(&ctx, &nilai));
+                    NilaiJs::Objek { json, deskripsi }
+                }
+            };
+            Ok(hasil)
+        })
+    }
+
     /// Baris yang dicatat `console.log` sejak isolat dibuat.
     #[must_use]
     pub fn log(&self) -> Vec<String> {
@@ -127,6 +252,19 @@ impl Isolat {
         self.eval(&format!("globalThis.document.title = {literal}"))?;
         Ok(())
     }
+}
+
+/// Mengubah nilai apa pun jadi teks lewat global `String` milik JavaScript.
+///
+/// Dipanggil dari Rust, bukan lewat global tambahan: nama seperti `__oc_*`
+/// akan terlihat oleh skrip halaman dan melanggar AC-018
+/// (`test_no_automation_globals`).
+fn teks_dari<'js>(ctx: &rquickjs::Ctx<'js>, nilai: &rquickjs::Value<'js>) -> String {
+    ctx.globals()
+        .get::<_, rquickjs::Function<'js>>("String")
+        .and_then(|fungsi| fungsi.call::<_, rquickjs::Coerced<String>>((nilai.clone(),)))
+        .map(|teks| teks.0)
+        .unwrap_or_else(|_| "[nilai tidak bisa diubah ke teks]".to_owned())
 }
 
 #[cfg(test)]
@@ -176,6 +314,125 @@ mod tests {
     fn galat_skrip_dilaporkan_bukan_ditelan() {
         let isolat = Isolat::new(PaguIsolat::default()).unwrap();
         assert!(isolat.eval("tidak_didefinisikan()").is_err());
+    }
+
+    #[test]
+    fn test_navigator_webdriver_false() {
+        // AC-017. Skrip anti-bot membandingkan `navigator.webdriver === false`,
+        // jadi yang harus keluar boolean, bukan string "false" dan bukan
+        // `undefined` dari objek yang tidak pernah dipasang.
+        let isolat = Isolat::new(PaguIsolat::default()).unwrap();
+        assert_eq!(
+            isolat.eval_bertipe("navigator.webdriver").unwrap(),
+            NilaiJs::Boolean(false)
+        );
+        assert_eq!(
+            isolat.eval("navigator.webdriver === false").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            isolat.eval("typeof navigator.webdriver").unwrap(),
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn tipe_nilai_dipertahankan() {
+        let isolat = Isolat::new(PaguIsolat::default()).unwrap();
+        assert_eq!(isolat.eval_bertipe("1 + 1").unwrap(), NilaiJs::Bulat(2));
+        assert_eq!(isolat.eval_bertipe("1.5").unwrap(), NilaiJs::Pecahan(1.5));
+        assert_eq!(
+            isolat.eval_bertipe("'halo'").unwrap(),
+            NilaiJs::Teks("halo".to_owned())
+        );
+        assert_eq!(isolat.eval_bertipe("true").unwrap(), NilaiJs::Boolean(true));
+        assert_eq!(isolat.eval_bertipe("null").unwrap(), NilaiJs::Null);
+        assert_eq!(
+            isolat.eval_bertipe("undefined").unwrap(),
+            NilaiJs::TanpaNilai
+        );
+        assert_eq!(
+            isolat.eval_bertipe("({a: 1, b: 'dua'})").unwrap(),
+            NilaiJs::Objek {
+                json: Some(r#"{"a":1,"b":"dua"}"#.to_owned()),
+                deskripsi: r#"{"a":1,"b":"dua"}"#.to_owned(),
+            }
+        );
+        assert_eq!(
+            isolat.eval_bertipe("[1, 2, 3]").unwrap(),
+            NilaiJs::Objek {
+                json: Some("[1,2,3]".to_owned()),
+                deskripsi: "[1,2,3]".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_no_automation_globals() {
+        // AC-018. Penanda otomasi yang dikenal: `cdc_*` (ChromeDriver),
+        // `__playwright`/`__puppeteer`/`__pw_*`, `__selenium`/`__webdriver*`,
+        // `_phantom`, `__nightmare`, `callSelenium`.
+        const PENANDA: &[&str] = &[
+            "cdc_",
+            "__playwright",
+            "__puppeteer",
+            "__pw_",
+            "__selenium",
+            "__webdriver",
+            "_phantom",
+            "__nightmare",
+            "callSelenium",
+            "__driver",
+            "__oc_",
+        ];
+        let isolat = Isolat::new(PaguIsolat::default()).unwrap();
+        let kunci = isolat
+            .eval("JSON.stringify(Object.keys(globalThis))")
+            .unwrap();
+        let daftar: Vec<String> = serde_json::from_str(&kunci).unwrap();
+        assert!(!daftar.is_empty(), "globalThis harus punya kunci");
+        for nama in &daftar {
+            for penanda in PENANDA {
+                assert!(
+                    !nama.contains(penanda),
+                    "global '{nama}' mengandung penanda otomasi '{penanda}': {daftar:?}"
+                );
+            }
+        }
+        // `__log` ada, tapi non-enumerable, jadi tidak muncul di daftar di atas
+        // dan tidak terlihat oleh pemeriksa yang menyisir `Object.keys`.
+        assert!(
+            !daftar.iter().any(|nama| nama == "__log"),
+            "__log tidak boleh enumerable: {daftar:?}"
+        );
+        assert_eq!(isolat.eval("typeof globalThis.__log").unwrap(), "object");
+    }
+
+    #[test]
+    fn objek_melingkar_tidak_menggagalkan_evaluasi() {
+        let isolat = Isolat::new(PaguIsolat::default()).unwrap();
+        match isolat.eval_bertipe("var a = {}; a.self = a; a").unwrap() {
+            NilaiJs::Objek { json, deskripsi } => {
+                assert!(
+                    json.is_none(),
+                    "struktur melingkar tidak punya JSON: {json:?}"
+                );
+                assert!(!deskripsi.is_empty(), "deskripsi tetap harus ada");
+            }
+            lain => panic!("harus Objek, dapat {lain:?}"),
+        }
+    }
+
+    #[test]
+    fn fungsi_dilaporkan_sebagai_fungsi() {
+        let isolat = Isolat::new(PaguIsolat::default()).unwrap();
+        match isolat
+            .eval_bertipe("(function tambah(a, b) { return a + b; })")
+            .unwrap()
+        {
+            NilaiJs::Fungsi(teks) => assert!(teks.contains("tambah"), "sumber fungsi: {teks}"),
+            lain => panic!("harus Fungsi, dapat {lain:?}"),
+        }
     }
 
     #[test]

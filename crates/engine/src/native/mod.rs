@@ -10,7 +10,7 @@
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
 //! kaskade stylesheet, pewarisan properti, pengukuran teks, peristiwa DOM,
-//! `fetch` di dalam isolat, tipe nilai balik JavaScript, dan peristiwa CDP.
+//! `fetch` di dalam isolat, dan peristiwa CDP.
 //! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
 //!
 //! Permukaan CDP-nya **tidak** ada di sini. Crate ini sengaja nol pengetahuan
@@ -27,7 +27,7 @@ pub mod selectors;
 pub mod tab_pool;
 
 pub use dom::{Document, Node, NodeId, NodeKind};
-pub use js::{Isolat, PaguIsolat};
+pub use js::{Isolat, NilaiJs, PaguIsolat};
 pub use layout::{Kotak, LaporanLayout, Viewport};
 pub use selectors::{GalatSelektor, Kombinator, Kompleks, OpAtribut, Pola, Sederhana};
 pub use tab_pool::{
@@ -57,10 +57,16 @@ pub const CELAH: &[&str] = &[
     "`fetch()` di dalam isolat JavaScript belum ada: dokumen `http`/`https` \
      sudah bisa dimuat lewat `Page.navigate` (`cdp::native_wire::jaringan`), \
      tapi skrip halaman belum punya jalur keluar ke jaringan",
-    "nilai balik `Runtime.evaluate` dijadikan string; tipe JS (number, boolean, \
-     object) tidak dipertahankan",
+    "nilai balik `Runtime.evaluate` membawa tipe JS (boolean, number, string, \
+     object) dan objek dikirim *by value*, tapi belum ada `objectId`, \
+     `Runtime.callFunctionOn`, maupun `awaitPromise`: klien yang menyimpan \
+     pegangan objek atau menunggu promise tidak bisa memakainya",
     "`document` di dalam isolat adalah objek biasa, bukan DOM sungguhan: skrip \
-     yang menulis `document.title` tidak mengubah pohon DOM",
+     yang menulis `document.title` tidak mengubah pohon DOM. `navigator` juga \
+     objek biasa, bukan instance `Navigator`, jadi pemeriksa yang membaca \
+     prototipe bisa membedakannya dari browser sungguhan. Buffer `console` \
+     hidup di global `__log` (non-enumerable, jadi tidak muncul di \
+     `Object.keys(globalThis)`, tapi namanya bisa ditebak)",
     "mesin tidak mengirim peristiwa CDP (`Runtime.consoleAPICalled`, `Page.loadEventFired`, \
      `Network.*`); klien yang menunggu event akan menunggu selamanya",
 ];
