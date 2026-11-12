@@ -117,3 +117,72 @@ impl NativeError {
         Self::Raster(pesan.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC-001: an HTML5 page with custom tags and nested stylesheet styling
+    /// produces a valid node tree **plus** computed styles and boxes.
+    ///
+    /// The three assertions are deliberately separate, because the earlier
+    /// `dom.rs` test proved parsing only: a tree with no computed style and no
+    /// box would have passed it. Here a custom element gets its colour from a
+    /// stylesheet rule, inherits it into a nested child, and both end up with
+    /// real boxes, so neither half can regress unnoticed.
+    #[test]
+    fn test_dom_parsing_dan_styling() {
+        let html = "<!DOCTYPE html><html><head><style>\
+             page-kartu { display: flex; flex-direction: column; width: 300px; \
+             color: #123456; font-size: 20px }\
+             page-kartu > isi-baris { width: 100%; height: 2em }\
+             </style></head><body>\
+             <page-kartu id=\"kartu\"><isi-baris id=\"baris\">halo</isi-baris>\
+             </page-kartu></body></html>";
+
+        let doc = Document::parse_html(html).expect("html harus terurai");
+
+        // 1. Node tree: custom tags survive parsing as elements, nested.
+        let kartu = doc.cari_id("kartu").expect("custom tag harus ada");
+        let baris = doc
+            .cari_id("baris")
+            .expect("custom tag bersarang harus ada");
+        assert_eq!(doc.node(kartu).and_then(Node::tag), Some("page-kartu"));
+        assert_eq!(doc.node(baris).and_then(Node::tag), Some("isi-baris"));
+        assert_eq!(
+            doc.node(baris).and_then(|n| n.parent),
+            Some(kartu),
+            "isi-baris harus anak dari page-kartu"
+        );
+
+        // 2. Computed styles: stylesheet rule applied, inheritance carried.
+        let laporan =
+            layout::hitung(&doc, Viewport::new(800.0, 600.0)).expect("layout harus jalan");
+        let gaya_baris = laporan
+            .gaya_terhitung(baris)
+            .expect("anak harus punya gaya terhitung");
+        assert_eq!(
+            gaya_baris.warna.as_deref(),
+            Some("#123456"),
+            "color dari aturan stylesheet harus waris ke anak"
+        );
+        assert_eq!(
+            gaya_baris.ukuran_font, 20.0,
+            "font-size 20px dari induk harus waris"
+        );
+
+        // 3. Boxes: both elements are laid out, and `2em` resolved against
+        // the inherited 20px, so the child is 40px tall and 100% wide.
+        let kotak_kartu = laporan.kotak_untuk(kartu).expect("kartu harus punya kotak");
+        let kotak_baris = laporan.kotak_untuk(baris).expect("baris harus punya kotak");
+        assert_eq!(kotak_kartu.width, 300.0, "width 300px dari stylesheet");
+        assert_eq!(
+            kotak_baris.height, 40.0,
+            "2em terhadap font-size warisan 20px harus 40px"
+        );
+        assert_eq!(
+            kotak_baris.width, 300.0,
+            "100% harus mengikuti lebar induk 300px"
+        );
+    }
+}

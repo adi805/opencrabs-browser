@@ -24,17 +24,20 @@ done
 
 | AC | Perintah PRD | Bukti |
 |---|---|---|
+| AC-001 | `cargo test -p engine --lib test_dom_parsing_dan_styling` | target ada, `1 passed; 0 failed` (2026-11-12). Gaya terhitung datang dari `<style>` lewat `native::css::Kaskade` dan warisan lewat `native::gaya::PohonGaya`, bukan dari atribut `style` |
 | AC-010 | `cargo test -p browserd --test native_tab_capacity_cap` | target ada, lulus di 557 tes |
 | AC-019 | `cargo test -p browserd --test native_action_receipt_diff` | target ada, lulus |
 | AC-020 | `cargo test -p browserd --test native_no_observable_change` | target ada, lulus |
 
-Tiga dari dua puluh. Itu angka yang jujur, bukan yang enak dibaca.
+Empat dari dua puluh pada 2026-11-12, saat AC-001 mendapat tes bernama persis. Itu angka yang jujur, bukan yang enak dibaca.
 
-### Nama tesnya tidak ada (14 AC)
+### Nama tesnya tidak ada (13 AC)
 
 Dicari di seluruh log 557 tes, nol kecocokan:
 
-`test_dom_parsing_dan_styling`, `test_malformed_html_recovery`, `test_js_runtime_dom_mutations`, `test_js_timeout_termination`, `test_screenshot_png_magic_bytes`, `test_axtree_hierarchy`, `test_mouse_click_dispatch`, `test_overlay_obstruction_detection`, `test_tab_rehydration_latency`, `test_suspended_tab_memory_release`, `test_iframe_element_traversal`, `test_shadow_root_piercing`, `test_navigator_webdriver_false`, `test_no_automation_globals`.
+`test_malformed_html_recovery`, `test_js_runtime_dom_mutations`, `test_js_timeout_termination`, `test_screenshot_png_magic_bytes`, `test_axtree_hierarchy`, `test_mouse_click_dispatch`, `test_overlay_obstruction_detection`, `test_tab_rehydration_latency`, `test_suspended_tab_memory_release`, `test_iframe_element_traversal`, `test_shadow_root_piercing`, `test_navigator_webdriver_false`, `test_no_automation_globals`.
+
+`test_dom_parsing_dan_styling` left this list on 2026-11-12 with the receipt in the table above; the test exists at `crates/engine/src/native/mod.rs`.
 
 `native_99_tabs_budget` left this list on 2026-11-12: `crates/browserd/tests/native_99_tabs_budget.rs` now exists and passes with 49.4 MB PSS over 99 tabs of 3006-node documents (25 hot + 74 cold) against the 100 MB ceiling, so AC-009 moves from absent to met at the acceptance workload.
 
@@ -42,7 +45,6 @@ Dicari di seluruh log 557 tes, nol kecocokan:
 
 | AC | Yang PRD minta | Yang benar-benar ada | Selisih |
 |---|---|---|---|
-| AC-001 | parse + **computed style** | `native::dom::tests::mengurai_html_dan_menghitung_node` | kaskade CSS belum ada; yang diuji struktur node, bukan gaya terhitung |
 | AC-002 | HTML rusak tidak panik | `native::dom::tests::html_rusak_tetap_diurai` | **setara**, hanya beda nama |
 | AC-003 | aritmetika **dan** mutasi DOM dari skrip | `native::js::tests::{mengevaluasi_ekspresi,state_yang_sama_terlihat_antar_panggilan,console_log_tertangkap}` | mutasi DOM dari dalam skrip belum diuji |
 | AC-004 | `while(true){}` dihentikan | `native::js::tests::pagu_memori_menghentikan_alokasi_besar` | pagu memori ada, batas waktu/gas tidak ada |
