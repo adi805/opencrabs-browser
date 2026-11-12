@@ -20,7 +20,8 @@ pub mod jaringan;
 pub mod state;
 
 pub use state::{
-    DokumenAwal, Galat, MAKS_TAB, NativeState, Sidik, banding, dokumen_awal, percent_decode,
+    ColdStoreObj, DokumenAwal, Galat, MAKS_TAB, NativeState, PabrikDingin, Sidik, banding,
+    dokumen_awal, pabrik_memori, percent_decode,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,6 +80,13 @@ impl NativeEngine {
     /// aktif karena servernya hidup di dalam proses daemon. Dipanggil dari
     /// `spawn_blocking`, `Handle::current()` tetap tersedia.
     pub fn start(spec: LaunchSpec) -> Result<Self, EngineError> {
+        Self::start_dengan(spec, pabrik_memori())
+    }
+
+    /// Sama dengan [`Self::start`], tapi penyimpanan dinginnya dipilih
+    /// pemanggil. Daemon memakai ini supaya tab yang disingkirkan mendarat di
+    /// SQLite, bukan hilang saat proses berhenti.
+    pub fn start_dengan(spec: LaunchSpec, pabrik: PabrikDingin) -> Result<Self, EngineError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             EngineError::Io(std::io::Error::other(
                 "mesin native butuh runtime tokio: server CDP-nya hidup di dalam proses daemon",
@@ -92,7 +100,7 @@ impl NativeEngine {
         let http = format!("http://{authority}");
         let ws = format!("ws://{authority}/devtools/browser");
 
-        let state = NativeState::baru();
+        let state = NativeState::dengan_dingin(pabrik);
         let app = router(App {
             state: state.clone(),
             ws_browser: ws.clone(),
@@ -202,8 +210,33 @@ impl NativeEngine {
 }
 
 /// Penggerak `kind = "rust-native"`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PenggerakNative;
+///
+/// Membawa pabrik penyimpanan dingin: daemon menyerahkan adapter SQLite di
+/// sini, sehingga tab yang disingkirkan selamat dari restart. Tanpa itu pool
+/// memakai penyimpanan di memori, yang hanya benar untuk tes.
+#[derive(Clone)]
+pub struct PenggerakNative {
+    dingin: PabrikDingin,
+}
+
+impl Default for PenggerakNative {
+    fn default() -> Self {
+        Self::baru(pabrik_memori())
+    }
+}
+
+impl PenggerakNative {
+    #[must_use]
+    pub fn baru(dingin: PabrikDingin) -> Self {
+        Self { dingin }
+    }
+}
+
+impl std::fmt::Debug for PenggerakNative {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PenggerakNative")
+    }
+}
 
 impl Penggerak for PenggerakNative {
     fn nyalakan(
@@ -214,7 +247,8 @@ impl Penggerak for PenggerakNative {
         // `spec.binary` diabaikan dengan sengaja: tidak ada biner yang
         // dieksekusi. Kolom itu tetap ada karena kontrak `LaunchSpec` dipakai
         // bersama semua mesin.
-        NativeEngine::start(spec.clone()).map(|engine| Arc::new(engine) as Arc<dyn Engine>)
+        NativeEngine::start_dengan(spec.clone(), Arc::clone(&self.dingin))
+            .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
     }
 }
 

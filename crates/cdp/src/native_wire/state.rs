@@ -20,11 +20,80 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use engine::native::layout::Viewport;
 use engine::native::{
-    Document, MemoryColdStore, NilaiJs, NodeId, NodeKind, TabId, TabPool, axtree, paint,
+    ColdStore, Document, MemoryColdStore, NilaiJs, NodeId, NodeKind, Snapshot, TabId, TabPool,
+    axtree, paint,
 };
 use serde_json::{Map, Value, json};
 
 use super::jaringan::{Ambilan, Sumber};
+
+/// Penyimpanan dingin yang bisa dipakai lewat `dyn`.
+///
+/// [`ColdStore`] di `engine` punya `type Error`, jadi trait itu tidak dyn-safe
+/// dan pool tidak bisa memegang implementasi berbeda di satu tipe. Wrapper ini
+/// menormalkan galatnya jadi `String`, sehingga `cdp` bisa menerima
+/// `browserd::tabstore::StoreColdStore` (adapter SQLite di jalur produksi)
+/// tanpa mengenal crate `store` sama sekali. Yang dipegang state di sini adalah
+/// `Box<dyn ColdStoreObj>`: daemon mengisinya lewat [`PabrikDingin`], tes dan
+/// mode tanpa database mengisinya lewat [`pabrik_memori`].
+pub trait ColdStoreObj: Send {
+    fn simpan_obj(&mut self, snapshot: &Snapshot) -> Result<(), String>;
+    fn muat_obj(&self, id: TabId) -> Result<Option<Snapshot>, String>;
+    fn hapus_obj(&mut self, id: TabId) -> Result<(), String>;
+    fn jumlah_obj(&self) -> Result<usize, String>;
+}
+
+impl<C> ColdStoreObj for C
+where
+    C: ColdStore + Send,
+    C::Error: std::fmt::Display,
+{
+    fn simpan_obj(&mut self, snapshot: &Snapshot) -> Result<(), String> {
+        self.simpan(snapshot).map_err(|err| err.to_string())
+    }
+
+    fn muat_obj(&self, id: TabId) -> Result<Option<Snapshot>, String> {
+        self.muat(id).map_err(|err| err.to_string())
+    }
+
+    fn hapus_obj(&mut self, id: TabId) -> Result<(), String> {
+        self.hapus(id).map_err(|err| err.to_string())
+    }
+
+    fn jumlah_obj(&self) -> Result<usize, String> {
+        self.jumlah().map_err(|err| err.to_string())
+    }
+}
+
+impl ColdStore for Box<dyn ColdStoreObj> {
+    type Error = String;
+
+    fn simpan(&mut self, snapshot: &Snapshot) -> Result<(), Self::Error> {
+        self.as_mut().simpan_obj(snapshot)
+    }
+
+    fn muat(&self, id: TabId) -> Result<Option<Snapshot>, Self::Error> {
+        self.as_ref().muat_obj(id)
+    }
+
+    fn hapus(&mut self, id: TabId) -> Result<(), Self::Error> {
+        self.as_mut().hapus_obj(id)
+    }
+
+    fn jumlah(&self) -> Result<usize, Self::Error> {
+        self.as_ref().jumlah_obj()
+    }
+}
+
+/// Pabrik penyimpanan dingin. Dipanggil sekali per pool, jadi tiap mesin native
+/// mendapat penyimpanannya sendiri dan dua mesin tidak berbagi ruang tab.
+pub type PabrikDingin = Arc<dyn Fn() -> Box<dyn ColdStoreObj> + Send + Sync>;
+
+/// Penyimpanan dingin bawaan: di memori. Dipakai tes dan mode tanpa database.
+#[must_use]
+pub fn pabrik_memori() -> PabrikDingin {
+    Arc::new(|| Box::new(MemoryColdStore::default()) as Box<dyn ColdStoreObj>)
+}
 
 /// Batas jumlah tab yang bisa dialamatkan, dari PRD v0.2 (FR-005).
 pub const MAKS_TAB: usize = 99;
@@ -147,7 +216,7 @@ struct MetaTab {
 }
 
 struct Dalam {
-    pool: TabPool<MemoryColdStore>,
+    pool: TabPool<Box<dyn ColdStoreObj>>,
     tabs: BTreeMap<TabId, MetaTab>,
     sesi: BTreeMap<String, TabId>,
     berikut_sesi: u64,
@@ -168,9 +237,18 @@ impl Default for NativeState {
 impl NativeState {
     #[must_use]
     pub fn baru() -> Self {
+        Self::dengan_dingin(pabrik_memori())
+    }
+
+    /// State dengan penyimpanan dingin pilihan pemanggil.
+    ///
+    /// Daemon memakai ini untuk menyerahkan adapter SQLite, sehingga tab yang
+    /// disingkirkan selamat dari restart. Tes memakai [`Self::baru`].
+    #[must_use]
+    pub fn dengan_dingin(pabrik: PabrikDingin) -> Self {
         Self {
             dalam: Arc::new(Mutex::new(Dalam {
-                pool: TabPool::new(MemoryColdStore::default(), MAKS_TAB),
+                pool: TabPool::new(pabrik(), MAKS_TAB),
                 tabs: BTreeMap::new(),
                 sesi: BTreeMap::new(),
                 berikut_sesi: 1,

@@ -31,6 +31,7 @@ use crate::cli::ServeArgs;
 use crate::config::{self, FileConfig};
 use crate::metrics;
 use crate::reload::{self, Batas, Hasil, Hidup};
+use crate::tabstore;
 use crate::{wiring, wiring::Wired};
 
 const DETACHED_ENV: &str = "OCB_BROWSERD_DETACHED";
@@ -55,7 +56,16 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     // dan sesi berikutnya memakai koneksi yang sama.
     let _store = buka_store(&file)?;
 
-    let engines = launch_all(&resolved.machines, args.ready_timeout_ms).await?;
+    // Penyimpanan dingin untuk mesin native: tab yang disingkirkan pool
+    // mendarat di SQLite, jadi restart daemon tidak membuang tab. Adapter ini
+    // membuka koneksinya sendiri per pool karena `Store` tidak `Sync`.
+    //
+    // Pabriknya dibuat per mesin di `nyalakan`, bukan sekali di sini: nomor tab
+    // mulai dari 1 di tiap pool, jadi sesi bersama akan membuat dua mesin
+    // native saling menimpa baris `tab_snapshot`.
+    let dingin = tabstore::SumberDingin::new(file.store_db(), file.store_key());
+
+    let engines = launch_all(&resolved.machines, args.ready_timeout_ms, Some(&dingin)).await?;
     let pool = EnginePool::new(resolved.default_id.clone(), engines)
         .map_err(|err| anyhow::anyhow!("konfigurasi mesin tidak sah: {err}"))?
         .dengan_batas_tab(batas_tab(&resolved.machines));
@@ -390,7 +400,11 @@ fn buka_store(file: &FileConfig) -> Result<store::Store> {
 }
 
 /// Menyalakan satu mesin sesuai resepnya.
-async fn nyalakan(mesin: &Mesin, timeout_ms: u64) -> Result<Arc<dyn Engine>> {
+async fn nyalakan(
+    mesin: &Mesin,
+    timeout_ms: u64,
+    dingin: Option<&tabstore::SumberDingin>,
+) -> Result<Arc<dyn Engine>> {
     let spec = engine::LaunchSpec::new(mesin.binary.clone(), mesin.user_data_dir.clone())
         .with_port(mesin.port)
         .with_args(mesin.args.iter().cloned());
@@ -407,7 +421,10 @@ async fn nyalakan(mesin: &Mesin, timeout_ms: u64) -> Result<Arc<dyn Engine>> {
     // Penggerak dipilih dari jenis mesin, bukan dari satu biner tetap: itulah
     // yang membuat `[engines.oxi]` bisa hidup berdampingan dengan shell dalam
     // satu proses daemon.
-    let penggerak = penggerak_kind(&mesin.kind).with_context(|| {
+    // Sesi penyimpanan dingin memakai id mesin: dua mesin native tidak boleh
+    // berbagi ruang tab.
+    let pabrik = dingin.map(|sumber| sumber.pabrik(mesin.id.clone()));
+    let penggerak = penggerak_kind_dengan(&mesin.kind, pabrik).with_context(|| {
         format!(
             "mesin '{}': jenis '{}' belum punya adapter",
             mesin.id, mesin.kind
@@ -430,10 +447,11 @@ async fn nyalakan(mesin: &Mesin, timeout_ms: u64) -> Result<Arc<dyn Engine>> {
 async fn launch_all(
     machines: &[Mesin],
     timeout_ms: u64,
+    dingin: Option<&tabstore::SumberDingin>,
 ) -> Result<BTreeMap<String, Arc<dyn Engine>>> {
     let mut engines: BTreeMap<String, Arc<dyn Engine>> = BTreeMap::new();
     for mesin in machines {
-        match nyalakan(mesin, timeout_ms).await {
+        match nyalakan(mesin, timeout_ms, dingin).await {
             Ok(engine) => {
                 engines.insert(mesin.id.clone(), engine);
             }
@@ -1027,8 +1045,25 @@ fn wajib_absolut(path: &Path, apa: &str) -> Result<()> {
 /// sebaliknya, `cdp` yang memakai `engine`). Karena itu penggabungan dua daftar
 /// ini hidup di daemon, satu-satunya tempat yang melihat keduanya.
 fn penggerak_kind(kind: &str) -> Option<Arc<dyn Penggerak>> {
+    penggerak_kind_dengan(kind, None)
+}
+
+/// Sama dengan [`penggerak_kind`], tapi mesin native diberi penyimpanan dingin
+/// pilihan pemanggil.
+///
+/// Daftar "jenis apa saja yang punya adapter" memakai bentuk tanpa penyimpanan
+/// karena pertanyaannya cuma ada atau tidak ada. Jalur peluncuran memakai
+/// bentuk ini supaya tab yang disingkirkan mendarat di SQLite.
+fn penggerak_kind_dengan(
+    kind: &str,
+    dingin: Option<cdp::native_wire::PabrikDingin>,
+) -> Option<Arc<dyn Penggerak>> {
     if kind == NATIVE_KIND {
-        return Some(Arc::new(PenggerakNative));
+        let penggerak = match dingin {
+            Some(pabrik) => PenggerakNative::baru(pabrik),
+            None => PenggerakNative::default(),
+        };
+        return Some(Arc::new(penggerak));
     }
     penggerak_untuk(kind)
 }
