@@ -75,6 +75,16 @@ pub const CELAH: &[&str] = &[
      `Object.keys(globalThis)`, tapi namanya bisa ditebak)",
     "mesin tidak mengirim peristiwa CDP (`Runtime.consoleAPICalled`, `Page.loadEventFired`, \
      `Network.*`); klien yang menunggu event akan menunggu selamanya",
+    "elemen di dalam `<iframe>` tidak bisa ditelusuri mesin native (AC-015): \
+     `html5ever` hanya mem-parse dokumen induk, isi `<iframe src>` tidak dimuat \
+     dan tidak di-parse, jadi kueri selektor maupun pohon AX berhenti di batas \
+     iframe. Penelusuran iframe yang berjalan hari ini hanya milik adapter \
+     `chrome-full` (`browserd/src/penanam.rs`)",
+    "shadow root tidak bisa ditembus mesin native (AC-016): `selectors.rs` hanya \
+     berjalan di pohon dokumen terang, `attachShadow`/`shadowRoot` tidak ada di \
+     isolat, jadi elemen di dalam shadow root terbuka maupun tertutup tidak \
+     terlihat oleh kueri selektor dan tidak bisa diklik sintetis. Yang berjalan \
+     hari ini hanya adapter `chrome-full`",
 ];
 
 #[derive(Debug, thiserror::Error)]
