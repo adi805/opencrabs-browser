@@ -25,7 +25,7 @@ is not written down gets quoted from memory three sessions later.
 | 2 | 21.42 MB | **103.17 MB** | +81.75 MB | 105.46 MB | 99 | 54.20 s |
 | In-process test (`native_99_tabs_budget_sqlite`) | 8.0 MB | **59.5 MB** | +51.5 MB | n/a | n/a (pool only) | 39.34 s |
 
-Both daemon runs **exceed the 100 MB ceiling** (NFR-001 / AC-009). The
+Both daemon runs **exceed the 100 MB ceiling** (NFR-001 / AC-009) **on the dev profile these runs used**. The release-profile runs further down meet it. The
 in-process test does not, and that is the point: `TabPool::PAGU_MB` is asserted
 inside the test, so `cargo xtask check` stays green while the shipped daemon
 breaks the budget by 3-5 MB.
@@ -77,3 +77,67 @@ pool works, not that the daemon wires the pool correctly.
 - Whether the daemon's memory returns after the tabs are closed. `idle_reap_secs
   = 0` in this run on purpose, so nothing was reaped; the reap path at 99 tabs is
   a separate measurement.
+
+## Release profile: the ceiling is met, and the gate measures the shipped binary
+
+Measured 2026-11-13 07:20-07:35 WIB. The section above ends with "PSS under
+`--release` has not been measured", so every number there was a dev-profile
+upper bound of unknown tightness. That gap is now closed, and closing it changed
+what the gate has to do.
+
+| Run | Profile | PSS at 99 tabs | Baseline | Targets | Result |
+|---|---|---|---|---|---|
+| 1 | release | **89.93 MB** | 21.5 MB | 99 | pass |
+| 2 | release | **89.3 MB** | 21.4 MB | 99 | pass |
+| 3 | release, via the new test | **88.7 MB** | 8.5 MB | 99 | pass |
+| 4 | dev, via the new test | 112.7 MB | 22.0 MB | 99 | printed, not enforced |
+| 5 | intermediate (`lto = false`, CGU 16) | **109.3 MB** | 9.4 MB | 99 | **fail** |
+
+The release binary meets NFR-001 at the acceptance workload: 88.7-89.9 MB for 99
+tabs of 3005-node documents against the 100 MB ceiling. The ~45 MB of surface
+outside the pool (axum HTTP plane, CDP websocket proxy, control plane, one SQLite
+connection per pool) is real and still there; on release it fits under the
+ceiling instead of over it. On dev it does not, because rquickjs is unoptimised,
+and that is the compiler's cost, not the daemon's.
+
+### The gate rejected its own first design
+
+The first version enforced the ceiling on an intermediate profile
+(`inherits = "release"` with `lto = false`, `codegen-units = 16`) to keep CI
+cheap. The gate failed at **109.3 MB** (run 5). That number is not a regression:
+without LTO, roughly 20 MB of cross-crate code stops being inlined. So the gate
+was measuring a binary that is never shipped, and a gate like that has only two
+endings: permanently red, or a ceiling raised until it means nothing. Both are
+the failure mode the gate exists to prevent, so the profile was deleted and CI
+now runs `--release`.
+
+Run 5 is therefore kept on purpose. It is the proof that the check
+**discriminates**: it fails on a binary that misses the budget and passes on the
+one that meets it. A test that only ever passes proves nothing about the thing
+it claims to guard.
+
+### Where the gate lives
+
+- `crates/browserd/tests/native_daemon_budget.rs` launches `browserd serve` with
+  its own keygen'd store and `idle_reap_secs = 0`, fills 99 tabs over CDP, and
+  reads `Pss:` from `/proc/<daemon pid>/smaps_rollup`. It compares against
+  `tab_pool::PAGU_MB`, not a second constant that could drift from the PRD.
+- `.github/workflows/ci.yml` job `budget` runs it with `--release`. It is a
+  separate job with its own 60-minute timeout, because the release profile shares
+  no artefacts with the dev profile, so its build is cold and roughly as long as
+  the whole `gate` job. Keeping it inside `gate` would have turned a cold build
+  into a gate timeout that reads like a code failure.
+- The dev profile still prints its number and never asserts it. A permanently red
+  gate gets ignored by everyone, which is how the pool-only test stayed green
+  while the daemon was over budget in the first place.
+
+### Still not proven
+
+- PSS with the hot tabs holding real remote pages instead of
+  `setDocumentContent` documents. Remote pages bring stylesheets, images and
+  scripts, and the CSS cascade and raster paths allocate on top of the DOM.
+- Whether the daemon's memory returns after the tabs are closed.
+  `idle_reap_secs = 0` in every run here on purpose, so nothing was reaped.
+- The 25-hot-tab cap is asserted in the pool-only test, not in this one; this
+  test measures the process, so a cap violation would show up as a memory number
+  rather than as a named failure.
