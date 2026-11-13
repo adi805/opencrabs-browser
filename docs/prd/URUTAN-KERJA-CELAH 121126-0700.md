@@ -31,7 +31,7 @@ run in this session; nothing is taken from a document alone.
 | G3 | ~~No text measurement; text nodes produce no box~~ **CLOSED 2026-11-13**: `native/teks.rs` measures advance widths from the embedded `DejaVuSans.ttf` with `ttf-parser`, and text nodes become `taffy` leaves measured by `compute_layout_with_measure` | `native/teks.rs` + `layout.rs` | AC-001, AC-005 partly | what remains is one face only, no webfonts, no shaping, no per-script fallback, named in `CELAH` | L |
 | G4 | No DOM events (click, input, focus) | new layer above `tab_pool`, the PRD calls it hands | AC-007, AC-008, AC-019, AC-020 | G10 + G3 | L |
 | G5 | ~~Raster paints box backgrounds only; no text~~ **CLOSED 2026-11-13**: `native/paint.rs` fills glyph outlines from the same `DejaVuSans.ttf` face the layout measured with, using `text-align` and the computed `color`, `font-size` and `line-height` | `paint.rs` | AC-005 met for text, images/gradients/borders/radius still open | what remains is images, gradients, shadows, `border`, `border-radius`, synthetic bold, `justify` and `overflow` clipping, named in `CELAH` | L |
-| G6 | `Page.captureScreenshot`: PNG only, scale 1, fixed 800x600; JPEG refused | `paint.rs` + `cdp/src/native_wire` | AC-005 (partly) | G5 | S |
+| G6 | ~~`Page.captureScreenshot`: PNG only, scale 1, fixed 800x600; JPEG refused~~ **CLOSED 2026-11-13**: `paint::Format{Png{cepat}\|Jpeg{mutu}}` with two real encoders, `Klip.scale` re-rasterises at that density instead of upscaling, `captureBeyondViewport` decides whether the clip is intersected with the 800x600 default viewport, and the receipt reports `format`, `scale`, `clipDipotong`, `captureBeyondViewport`, `fromSurface` and the ignored parameters | `paint.rs` + `cdp/src/native_wire` | AC-005 met | what remains is `webp` and other encoders, named in `CELAH` | S |
 | G7 | AX tree: no chained `aria-labelledby`, no focusable/selected/expanded, no iframe content | `axtree.rs` | AC-006 | G4 for real state values | M |
 | G8 | No `fetch()` inside the isolate | `js.rs` + a daemon policy gate | FR-002, AC-003 (partly) | G10 for binding plumbing | M |
 | G9 | ~~`Runtime.evaluate` returns a string; JS types lost~~ **CLOSED 2026-11-12**: `NilaiJs` keeps the type, objects travel by value, `navigator.webdriver` is boolean `false` | `cdp/src/native_wire` + `js.rs` | AC-017 met, AC-018 met, AC-003 partly | what remains is `objectId`/`callFunctionOn`/`awaitPromise`, named in `CELAH` | S |
@@ -54,7 +54,7 @@ flowchart TD
     G1["G1 cascade"] --> G2["G2 inheritance + units"]
     G2 --> G3["G3 text measurement"]
     G3 --> G5["G5 paint text (CLOSED)"]
-    G5 --> G6["G6 screenshot params"]
+    G5 --> G6["G6 screenshot params (CLOSED)"]
     G2 --> G10["G10 real DOM in isolate"]
     G3 --> G10
     G10 --> G4["G4 DOM events"]
@@ -167,7 +167,26 @@ document had exactly one, and a `width: auto` root is not stretched to the
 available space, so every block shrank to its content and left, centre and right
 produced identical rasters. The root is now always a `width: 100%` wrapper.
 Receipts: `cargo test -p engine` 142 + 2 + 5 passed, 0 failed, including 12 in
-`native::paint`. What is left of W3 is G6.
+`native::paint`.
+
+**G6 landed 2026-11-13.** `native/paint.rs` gained `Format::{Png{cepat}, Jpeg{mutu}}`
+with `mime()`/`magic()`, straight-alpha PNG through `png::Encoder`
+(`Compression::Fast` when `optimizeForSpeed`) and JPEG through `jpeg-encoder 0.6`,
+and `Klip.scale` re-rasterises the document at that density (the taffy root and
+the glyph outlines are transformed together, so 10 px CSS at scale 2 is a 20x20
+image with about four times the dark glyph pixels, not an upscaled bitmap).
+`crates/cdp/src/native_wire/state.rs` parses the full parameter set in
+`format_dari` + `klip_dari`: `format`, `quality` (JPEG only; on PNG it is recorded
+in `receipt.diabaikan`), `optimizeForSpeed`, `clip.scale`, `captureBeyondViewport`
+(without it the clip is intersected with the 800x600 default viewport and
+`clipDipotong` says so), and `fromSurface` (recorded as ignored, one software
+surface). `webp` is refused with `-32602` naming the supported formats. The
+receipt carries `format`, `scale`, `clipDipotong`, `captureBeyondViewport`,
+`fromSurface` and `diabaikan`. Receipts: `cargo test -p engine --lib native::paint`
+16 passed; `cargo test -p cdp --test native_state capture_screenshot` 6 passed;
+`cargo test -p cdp --test native_wire page_capture_screenshot` 1 passed;
+`cargo test -p engine --test native_foundations` 5 passed with the `CELAH` guard
+now also failing if the `webp` limit is dropped. AC-005 is met. W3 is closed.
 
 ### W4. G10 a real DOM inside the isolate
 
