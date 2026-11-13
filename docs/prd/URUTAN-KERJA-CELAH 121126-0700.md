@@ -1,12 +1,15 @@
-# Gap Work Order: the eleven `CELAH` entries, ranked
+# Gap Work Order: the twelve `CELAH` entries, ranked
 
 Written 2026-11-12 WIB. Every statement below points at a file:line or a command
 run in this session; nothing is taken from a document alone.
 
 ## 0. Method and receipts
 
-- The list is read from code, not docs: `crates/engine/src/native/mod.rs:44-66`,
-  **eleven** entries, counted.
+- The list is read from code, not docs: `crates/engine/src/native/mod.rs:48-93`,
+  **twelve** entries, counted on 2026-11-13 with
+  `awk '/pub const CELAH/{f=1} f&&/^\]/{exit} f&&/^    "/{c++} END{print c}'`.
+  This document's first draft said eleven; the count from code is twelve, and the
+  table below is reconciled against it, not against the earlier number.
 - The PRD-named tests are grepped in the tree, and **twelve are still absent**; `native_99_tabs_budget` left this list on 2026-11-12, when it was written and passed:
   `test_dom_parsing_dan_styling`, `test_malformed_html_recovery`,
   `test_js_runtime_dom_mutations`, `test_js_timeout_termination`,
@@ -15,25 +18,33 @@ run in this session; nothing is taken from a document alone.
   `test_suspended_tab_memory_release`, `test_iframe_element_traversal`,
   `test_shadow_root_piercing`, `test_navigator_webdriver_false`,
   `test_no_automation_globals`.
-- Module sizes that bound the effort column: `selectors.rs` 798 lines,
-  `tab_pool.rs` 550, `axtree.rs` 376, `dom.rs` 356, `layout.rs` 355,
-  `paint.rs` 341, `js.rs` 190, `mod.rs` 107.
+- Module sizes that bound the effort column, re-measured 2026-11-13 (`wc -l`):
+  `layout.rs` 765, `css.rs` 555, `tab_pool.rs` 550, `gaya.rs` 416, `axtree.rs` 376,
+  `paint.rs` 362, `dom.rs` 356, `teks.rs` 315, `js.rs` 190, `mod.rs` 203.
 
-## 1. The eleven, with what each one blocks
+## 1. The twelve, with what each one blocks
 
 | # | Gap (`CELAH` entry, abridged) | Code owner | ACs it blocks | Needs first | Size |
 |---|---|---|---|---|---|
-| G1 | No `<style>`/`<link>` cascade; only inline `style` attributes | `native/selectors.rs` (matching exists) + a new computed-style pass | AC-001, AC-005 | nothing | M |
-| G2 | No property inheritance, no `em`/`rem`/`%` | computed-style pass from G1 + `layout.rs` | AC-001, AC-005 | G1 | M |
-| G3 | No text measurement; text nodes produce no box | `layout.rs:135` is the stub | AC-001, AC-005, AC-007, AC-008 | G2 (needs a resolved `font-size`) | L |
+| G1 | ~~No `<style>`/`<link>` cascade~~ **CLOSED 2026-11-12**: `native/css.rs` resolves `<style>` blocks and inline `style` by origin, `!important`, specificity and source order | `native/css.rs` | AC-001 met, AC-005 partly | what remains is `<link rel=stylesheet>` over the network and at-rules, named in `CELAH` | M |
+| G2 | ~~No property inheritance, no `em`/`rem`/`%`~~ **CLOSED 2026-11-12**: `native/gaya.rs` inherits down the tree and resolves `em`, `rem` and percent | `native/gaya.rs` | AC-001 met, AC-005 partly | — | M |
+| G3 | ~~No text measurement; text nodes produce no box~~ **CLOSED 2026-11-13**: `native/teks.rs` measures advance widths from the embedded `DejaVuSans.ttf` with `ttf-parser`, and text nodes become `taffy` leaves measured by `compute_layout_with_measure` | `native/teks.rs` + `layout.rs` | AC-001, AC-005 partly | what remains is one face only, no webfonts, no shaping, no per-script fallback, named in `CELAH` | L |
 | G4 | No DOM events (click, input, focus) | new layer above `tab_pool`, the PRD calls it hands | AC-007, AC-008, AC-019, AC-020 | G10 + G3 | L |
-| G5 | Raster paints inline box backgrounds only; no text, image, border, radius | `paint.rs` | AC-005 | G3 | L |
+| G5 | ~~Raster paints box backgrounds only; no text~~ **CLOSED 2026-11-13**: `native/paint.rs` fills glyph outlines from the same `DejaVuSans.ttf` face the layout measured with, using `text-align` and the computed `color`, `font-size` and `line-height` | `paint.rs` | AC-005 met for text, images/gradients/borders/radius still open | what remains is images, gradients, shadows, `border`, `border-radius`, synthetic bold, `justify` and `overflow` clipping, named in `CELAH` | L |
 | G6 | `Page.captureScreenshot`: PNG only, scale 1, fixed 800x600; JPEG refused | `paint.rs` + `cdp/src/native_wire` | AC-005 (partly) | G5 | S |
 | G7 | AX tree: no chained `aria-labelledby`, no focusable/selected/expanded, no iframe content | `axtree.rs` | AC-006 | G4 for real state values | M |
 | G8 | No `fetch()` inside the isolate | `js.rs` + a daemon policy gate | FR-002, AC-003 (partly) | G10 for binding plumbing | M |
 | G9 | ~~`Runtime.evaluate` returns a string; JS types lost~~ **CLOSED 2026-11-12**: `NilaiJs` keeps the type, objects travel by value, `navigator.webdriver` is boolean `false` | `cdp/src/native_wire` + `js.rs` | AC-017 met, AC-018 met, AC-003 partly | what remains is `objectId`/`callFunctionOn`/`awaitPromise`, named in `CELAH` | S |
 | G10 | `document` inside the isolate is a plain object, not a DOM | `js.rs` + `dom.rs` | AC-003, AC-007, AC-019, AC-020 | G2/G3 (bind an API that is stable) | L |
 | G11 | Engine emits no CDP events (`Runtime.consoleAPICalled`, `Page.loadEventFired`, `Network.*`) | `cdp/src/native_wire` event bus | FR-007 clients that wait | producers from G10/G8 | M |
+
+How these eleven rows account for twelve `CELAH` entries: G2 (inheritance and
+units) is carried inside the cascade entry rather than beside it, and the two
+remaining entries, iframe traversal (AC-015) and closed shadow root piercing
+(AC-016), are tracked in section 4 because neither is a layer of its own: both
+need a nested document, which is the same work. Counting the table alone gives
+eleven; counting code gives twelve; the difference is those three, not a
+missing row.
 
 ## 2. Dependency graph
 
@@ -42,7 +53,7 @@ flowchart TD
     W0["W0 measure native PSS (AC-009)"] --> W4
     G1["G1 cascade"] --> G2["G2 inheritance + units"]
     G2 --> G3["G3 text measurement"]
-    G3 --> G5["G5 paint text/images"]
+    G3 --> G5["G5 paint text (CLOSED)"]
     G5 --> G6["G6 screenshot params"]
     G2 --> G10["G10 real DOM in isolate"]
     G3 --> G10
@@ -136,8 +147,27 @@ Strict order, and G5 before G3 is a trap: the canvas is already blank for
 text-only pages, so painting first produces a blank canvas with more code
 behind it. G3 gives text nodes boxes through a taffy measure callback backed by
 a font metric source; G5 paints them; G6 is cheap once there is content to
-scale and clip. G5 pulls a font dependency into the tree, which is a decision
-for the owner, not a side effect of a commit.
+scale and clip.
+
+**G3 landed 2026-11-13.** `native/teks.rs` measures advance widths from
+`crates/engine/assets/DejaVuSans.ttf` (shipped with its Bitstream Vera licence
+text, `ttf-parser 0.25` with default features off), `layout.rs` turns text nodes
+into `taffy` leaves measured through `compute_layout_with_measure`, and
+whitespace-only nodes plus the contents of `style`/`script`/`title` produce no
+box. Receipts: `cargo test -p engine` 137 lib passed, 0 failed, including 12 in
+`native::teks` and 15 in `native::layout`.
+
+**G5 landed 2026-11-13.** `native/paint.rs` rebuilds each wrapped line with
+`native::teks::bungkus`, advances the pen by the same `lebar_karakter` the layout
+measured with, and fills each outline through `ttf-parser`'s `OutlineBuilder` into
+a `tiny-skia` path. `Raster` reports `glyph_dilukis` / `baris_dilukis` /
+`kotak_dilukis` instead of a boolean. Making `text-align` meaningful required a
+layout fix: the `taffy` root used to be the single top-level element when a
+document had exactly one, and a `width: auto` root is not stretched to the
+available space, so every block shrank to its content and left, centre and right
+produced identical rasters. The root is now always a `width: 100%` wrapper.
+Receipts: `cargo test -p engine` 142 + 2 + 5 passed, 0 failed, including 12 in
+`native::paint`. What is left of W3 is G6.
 
 ### W4. G10 a real DOM inside the isolate
 
@@ -193,7 +223,7 @@ matches the contract.
 
 - G11 first: the bus ships with nothing to broadcast.
 - G10 before W2/W3: binding a DOM API whose style and layout halves still move.
-- G5 before G3: paint has nothing to paint.
+- G5 before G3: paint has nothing to paint (G3 and G5 both closed, in that order).
 - G6 before G5: scaling and clipping a blank canvas.
 - G4 before G10: listeners with nowhere to live.
 - W0 skipped: every later step adds per-tab cost to a budget whose only number

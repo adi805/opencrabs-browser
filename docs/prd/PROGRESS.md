@@ -20,8 +20,8 @@ One read must be enough to continue without asking the owner anything.
 
 | Field | Value |
 |---|---|
-| Active milestone | PRD v0.2 milestone 1, parts 1, 2 and the eyes/read halves of 3 landed: native parse/layout/JS foundations, the tab pool plus the CDP surface the daemon serves (`crates/cdp/src/native_wire/`, `crates/engine/src/native/tab_pool.rs`), and as of 2026-11-11 an accessibility tree (`crates/engine/src/native/axtree.rs`, served as `Accessibility.getFullAXTree`) plus a real PNG rasteriser (`crates/engine/src/native/paint.rs`, served as `Page.captureScreenshot`), and as of 2026-11-12 real document fetching over `http`/`https` (`crates/cdp/src/native_wire/jaringan.rs`, so `Page.navigate` opens a live page and reports the final URL after redirects). What is still missing is named in code, `engine::native::CELAH` (`crates/engine/src/native/mod.rs:49`), twelve entries, not a document. CSS selectors, the stylesheet cascade, property inheritance and units, "rasterisation does not exist", "no AX tree", "no document fetch" and "typed evaluate returns" are no longer among them: the entries that replaced them name the *limits* (raster paints box backgrounds from inline `style` and no text; screenshot is PNG only at scale 1; the AX tree does not compute chained `aria-labelledby`, focus/selected state, or iframe content). PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` |
-| Next exact command | `cd ~/src/opencrabs-browser && cargo xtask check` for the gate (`xtask` is an alias in this repo's `.cargo/config.toml`, so from any other directory cargo answers `no such command: xtask` and exits 101; that is a wrong-cwd error, not a red gate), `cargo test -p cdp --test native_state` for the surface, `cargo test -p engine --lib native` for the engine. The next work is one `CELAH` entry per capability, each behind a test that fails before the capability exists, and the order is already ranked in `docs/prd/URUTAN-KERJA-CELAH 121126-0700.md`: W3 is text measurement (`native::teks`), then the raster that paints it, then the screenshot parameters. W2 (the stylesheet cascade, then inheritance and units) left that queue on 2026-11-12: `crates/engine/src/native/css.rs` resolves `<style>` blocks and inline `style` by origin, `!important`, inline, specificity and source order, and `crates/engine/src/native/gaya.rs` carries the inherited properties down the tree and resolves `em`, `rem` and percent. G9 (typed `Runtime.evaluate`) left the queue earlier the same day |
+| Active milestone | PRD v0.2 milestone 1, parts 1, 2 and the eyes/read halves of 3 landed: native parse/layout/JS foundations, the tab pool plus the CDP surface the daemon serves (`crates/cdp/src/native_wire/`, `crates/engine/src/native/tab_pool.rs`), and as of 2026-11-11 an accessibility tree (`crates/engine/src/native/axtree.rs`, served as `Accessibility.getFullAXTree`) plus a real PNG rasteriser (`crates/engine/src/native/paint.rs`, served as `Page.captureScreenshot`), and as of 2026-11-12 real document fetching over `http`/`https` (`crates/cdp/src/native_wire/jaringan.rs`, so `Page.navigate` opens a live page and reports the final URL after redirects). What is still missing is named in code, `engine::native::CELAH` (`crates/engine/src/native/mod.rs:49`), twelve entries, not a document. CSS selectors, the stylesheet cascade, property inheritance and units, text measurement, "rasterisation does not exist", "no AX tree", "no document fetch" and "typed evaluate returns" are no longer among them: the entries that replaced them name the *limits* (the raster paints box backgrounds and text glyphs but no images, gradients, borders or radius, and `justify` still falls back to left; screenshot is PNG only at scale 1; the AX tree does not compute chained `aria-labelledby`, focus/selected state, or iframe content; text measurement uses the one embedded face, no webfonts, no shaping). PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` |
+| Next exact command | `cd ~/src/opencrabs-browser && cargo xtask check` for the gate (`xtask` is an alias in this repo's `.cargo/config.toml`, so from any other directory cargo answers `no such command: xtask` and exits 101; that is a wrong-cwd error, not a red gate), `cargo test -p cdp --test native_state` for the surface, `cargo test -p engine --lib native` for the engine. The next work is one `CELAH` entry per capability, each behind a test that fails before the capability exists, and the order is already ranked in `docs/prd/URUTAN-KERJA-CELAH 121126-0700.md`: W3's first half (text measurement, `native::teks`, text nodes producing layout boxes) left the queue on 2026-11-13; what remains of W3 is the raster that paints that text, then the screenshot parameters. W2 (the stylesheet cascade, then inheritance and units) left that queue on 2026-11-12: `crates/engine/src/native/css.rs` resolves `<style>` blocks and inline `style` by origin, `!important`, inline, specificity and source order, and `crates/engine/src/native/gaya.rs` carries the inherited properties down the tree and resolves `em`, `rem` and percent. G9 (typed `Runtime.evaluate`) left the queue earlier the same day |
 | Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
 | Last passing check | `cargo xtask check` at `cd8442f` (the AC-011 record commit, one commit after the cold-store code at `ce6170c`): `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check-ac011b.log`, run 2026-11-12 22:12-22:21 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). That gate is the first one that includes the SQLite cold-store wiring and the new `crates/browserd/tests/native_rehydration_latency.rs`. It also caught two `tabstore` test helpers that registered session `s1` twice and died on `SudahAda("s1")`; both now open the database through a `buka()` helper instead of re-opening the session. The gate before it, `cargo xtask check` at `03822f1` (the AC-001 test commit), was: `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check-ac001b.log`, run 2026-11-12 20:50 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). The previous receipt was `c947a92` (the record-consistency series): `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check-head.log`, run 2026-11-12 05:40 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). The previous full-gate receipt was `6bce7d6`: `fmt ok`, `clippy ok`, `test ok`, exit 0 (log `/tmp/xtask-check.log`). The same tree counted by hand with `cargo test --workspace` = 44 suites, **597 passed, 0 failed** (log `/tmp/ws-test.log`), which is 40 more than the 557 recorded at `4292878`, a tree 10 commits behind this one that predates the selector engine, the accessibility tree and the rasteriser. The earlier `4292878` gate still stands as the last one that followed a GitHub-built binary; the `6bce7d6` gate was run locally, so its receipts are the local logs above. After that gate, measured on the same host: only 2 chrome processes carried a `remote-debugging-port` (the live daemon on 9224/9225 and the production instance on 9222), so the live suites inside the gate left no new debugging browser behind. The raw total drifts while the daemon runs (`pgrep -c -x chrome` read 12 on one sample and 13 on the next, with `chrome_crashpad_handler` helpers alongside), so the two debugging-port processes are the signal, not the total. An earlier note in this row cited 53 chrome processes and an `oc-browser-leak-check.sh` run; that script is not present at `~/.opencrabs/scripts/` any more, so the counts above are the evidence for this gate. The packaged binary from GitHub run `42445976171` (head `2633095`, `sha256sum -c` OK, and predating the AX tree and rasteriser, hence 24 of today's 30 commands) served a full CDP round trip on `127.0.0.1:9234` and exited 0: `RustNativeEngine/0.2.0` in `/json/version`, 24 commands in `/json/protocol`, `Page.setDocumentContent` receipt `node: 8`, `DOM.getDocument depth=-1` 12 nodes, `Runtime.evaluate 6*7` = `"42"`, then a clean SIGTERM. Receipts in `docs/prd/BUKTI-NATIVE-CDP 081126-1124.md`. HEAD then moved through `7d1626b` and `c947a92`, both record-consistency commits whose only source change is a doc comment in `crates/engine/src/native/tab_pool.rs`, and the gate was re-run at `c947a92`, which is the receipt at the top of this row |
@@ -803,6 +803,108 @@ the daemon figure is the one that settles NFR-001.
 Not claimed: PSS when the hot tabs hold real remote pages rather than
 `setDocumentContent` documents, and whether memory returns after the tabs close
 (every run so far uses `idle_reap_secs = 0` on purpose).
+
+### Text measurement and text boxes, 2026-11-13
+
+`CELAH` used to state "pengukuran teks belum ada; node teks tidak menghasilkan
+kotak layout". Both halves are now built, and the entry is replaced by the limits
+that remain rather than deleted: one embedded face, no webfonts, no shaping, no
+per-script fallback.
+
+- `crates/engine/src/native/teks.rs` measures advance widths from a TrueType face
+  embedded at `crates/engine/assets/DejaVuSans.ttf` (759 720 bytes, `unitsPerEm`
+  2048, read with `ttf-parser 0.25` with default features off: only `head`,
+  `hhea`, `hmtx` and `cmap` are parsed). The face ships in the repo with its
+  Bitstream Vera licence text (`crates/engine/assets/README.md`) so layout numbers
+  are identical on the laptop, in CI and in containers; measuring the system font
+  would make boxes host-dependent.
+- `crates/engine/src/native/layout.rs` turns text nodes into `taffy` leaves
+  carrying a `KonteksTeks` context; `compute_layout_with_measure` sizes them with
+  `compute_leaf_layout` over `native::teks`. Wrapping applies the available width
+  and passes intrinsic-width requests (Max/MinContent) through unwrapped;
+  `flex_shrink = 0` so a wrapped run of lines is not squeezed back into one.
+  Text that is only whitespace after collapsing produces no box, so HTML
+  indentation still costs nothing.
+- `line-height` on text boxes comes from the computed style (inherited
+  `font-size` and `line-height`), and `native::teks::tinggi_baris_normal` exposes
+  the font's real `(ascender - descender + line_gap) / unitsPerEm` for callers
+  that want the font's own normal line height.
+
+- Text inside raw-text elements (`style`, `script`, `title`) produces no box: that
+  content is data, not page text. Without the exception the CSS inside `<head>`
+  took one line of layout height and pushed every `body` box down by it, which
+  showed up as a painted box landing at the wrong pixel
+  (`native::paint::tests::warna_dari_stylesheet_terlukis`). Regression test:
+  `teks_css_di_style_bukan_konten_halaman` asserts no text box exists and the
+  body's first element sits at `y == 0`.
+
+Tests that fail before the change existed: `cargo test -p engine --lib
+native::teks` (12 passed, 0 failed) covers empty input, linear scaling with
+font-size, space collapsing and trimming, greedy word wrapping, an over-wide word
+left unbroken, the font's normal line height (18.625 px at 16 px), and CJK
+outside the face measuring `.notdef`. `cargo test -p engine --lib native::layout`
+(15 passed, 0 failed) adds a text node producing a real box, long text in a 40 px
+container wrapping to more than one line without exceeding the parent, text
+inheriting its parent's `font-size` into a visibly wider and taller box, and
+whitespace-only nodes adding nothing. The guard test
+`native_foundations::celah_dinyatakan_bukan_disembunyikan` now demands the
+narrower wording and rejects the old sentence coming back.
+
+Not claimed: webfonts, shaping or kerning, and per-script fallback; those stay in
+`CELAH`.
+
+### The raster paints text, 2026-11-13
+
+`CELAH` said the raster painted "latar kotak dari atribut `style` inline" and that
+"teks ... tidak dilukis", so a page whose content is text produced a blank canvas.
+That entry is replaced by the limits that remain, not deleted.
+
+- `crates/engine/src/native/paint.rs` walks the text nodes the layout already
+  wrapped, rebuilds each line with `native::teks::bungkus` on the box width, and
+  fills each glyph outline through `ttf-parser`'s `OutlineBuilder` into a
+  `tiny-skia` `PathBuilder`. The pen advances by `native::teks::lebar_karakter`,
+  the same number the layout measured with, so painted lines and the box height
+  cannot disagree.
+- Font coordinates run Y-up while the canvas runs Y-down, so the transform is
+  `Transform::from_translate(pena, baseline).pre_scale(skala, -skala)`: the
+  translation is applied last, so the pen stays in pixel coordinates.
+- Colour comes from the computed `color` (inherited, default black), size from
+  the computed `font-size`, baseline from `native::teks::jarak_baseline`, and
+  each line advances by the computed `line-height`.
+- `Raster` grew three honest counters instead of a boolean: `glyph_dilukis`,
+  `baris_dilukis`, and `kotak_dilukis`. A page that reports zero painted glyphs
+  is a page with no visible text, not a page where the painter silently skipped.
+
+One layout bug had to be fixed for `text-align` to mean anything. The root of the
+`taffy` tree used to be the single top-level element when the document had
+exactly one, and a percent-wide wrapper only when it had several. A root with
+`width: auto` is not stretched to the available space by `taffy`, so `<html>` and
+every block under it shrank to the width of its content: a `<p>tengah</p>` box
+measured 56 px wide inside a 300 px viewport. Left, centre and right alignment
+then produced byte-identical rasters, because there was no free space to shift
+into. The root is now always a wrapper with `width: 100%`, which is the
+containing block a block-level `width: auto` fills in a real browser. Measured
+after the fix on a 300 px viewport: left starts at x=0, centre at x=122, right at
+x=244, with 316, 315 and 320 dark pixels respectively, so the same glyphs are
+being moved rather than replaced.
+
+Tests that fail before the change existed: `cargo test -p engine --lib
+native::paint` (12 passed, 0 failed). `perataan_menggeser_awal_baris` paints the
+same word three times and asserts the first dark column strictly increases left
+< centre < right, that right lands past x=240 of 300, and that the dark-pixel
+counts stay within 10 % of each other so alignment cannot pass by swapping the
+text. `teks_tanpa_latar_tetap_terlukis`, `warna_teks_dari_stylesheet_dipakai`,
+`teks_tersembunyi_tidak_dilukis` and `teks_panjang_dibungkus_dan_tetap_di_dalam_kotak`
+cover painting without a background box, a `color` from a `<style>` block,
+`visibility: hidden` producing no pixels, and a wrapped run staying inside its
+80 px box. The whole crate is green: `cargo test -p engine` = 142 + 2 + 5 passed,
+0 failed.
+
+Not claimed: images, gradients, shadows, `border` and `border-radius`;
+`font-weight` does not embolden (one face, no synthetic bold); `text-align:
+justify` falls back to left because space stretching does not exist; and glyphs
+are not clipped to their box because `overflow` does not exist. Those stay in
+`CELAH`.
 
 ### Daemon PSS gate in the shipping profile, 2026-11-13
 
