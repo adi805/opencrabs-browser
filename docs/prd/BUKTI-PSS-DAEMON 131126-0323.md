@@ -131,6 +131,27 @@ it claims to guard.
   gate gets ignored by everyone, which is how the pool-only test stayed green
   while the daemon was over budget in the first place.
 
+### The gate ran in CI, 2026-11-13
+
+CI run `43340680688` on commit `ae02432` finished with both jobs green:
+`gate (fmt + clippy + test)` and `budget (PSS daemon 99 tab, release)`. The
+budget job is the first measurement of the shipping profile on a host that is not
+this laptop, and it printed:
+
+```
+daemon pid 7134: PSS 70.0 MB (awal 8.9 MB) untuk 99 target, dokumen 3005 node, 99 tab dalam 1.1 detik, pagu 100 MB
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+```
+
+70.0 MB against the same 100 MB ceiling, 18.7 MB below the laptop's 88.7 MB for
+the identical workload. The gap is host-side, not a code change: `ae02432` is a
+documentation commit, so CI built the same source, and the test and the ceiling
+are untouched. PSS divides every shared page by the number of processes mapping
+it, so a runner image with a different page cache and linker layout reports a
+different share of the same mapping. The laptop figure stays the one to quote,
+because it is the larger number on the host where the daemon is developed; the CI
+figure is the receipt that the gate passes in the environment that enforces it.
+
 ### Still not proven
 
 - PSS with the hot tabs holding real remote pages instead of

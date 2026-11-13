@@ -5,7 +5,7 @@ prd: "PRD-MESIN-RUST 071126-1413.md"
 status: in-progress
 current_milestone: 3
 total_milestones: 5
-last_updated: "2026-11-12 20:39"
+last_updated: "2026-11-13 08:05"
 ---
 
 # OpenCrabs Browser Progress
@@ -831,6 +831,15 @@ it.
 Numbers and method: `docs/prd/BUKTI-PSS-DAEMON 131126-0323.md`. Measuring also
 produced the `tabstore` session fix (the 26th tab of a real daemon used to fail
 with a FOREIGN KEY error), recorded further up.
+
+CI receipt: run `43340680688` on `ae02432` is green on both jobs, and the
+`budget` job measured **70.0 MB** PSS at 99 tabs of 3005-node documents against
+the 100 MB ceiling (`daemon pid 7134: PSS 70.0 MB (awal 8.9 MB) ... 99 tab dalam
+1.1 detik`). That is 18.7 MB below the laptop's 88.7 MB for the same workload,
+and the difference is host-side: PSS divides shared pages across the processes
+that map them, so a different image and page cache give a different share of the
+same mapping. The gate, the ceiling and the test are unchanged, and the laptop
+number stays the one to quote because it is the larger of the two.
 
 ## Not built, not claimed
 
