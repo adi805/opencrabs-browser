@@ -11,8 +11,12 @@
 //! merasterkan kotak menjadi PNG lewat `tiny-skia`, dan [`js::Isolat`]
 //! menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
+//! [`teks::UkuranTeks`] mengukur lebar teks dari face TrueType yang ditanam
+//! di dalam biner (`crates/engine/assets/DejaVuSans.ttf`), dan node teks
+//! menghasilkan kotak layout yang dibungkus pada lebar induknya.
+//!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
-//! pengukuran teks, peristiwa DOM, `fetch` di dalam isolat, dan peristiwa CDP.
+//! peristiwa DOM, `fetch` di dalam isolat, dan peristiwa CDP.
 //! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
 //!
 //! Permukaan CDP-nya **tidak** ada di sini. Crate ini sengaja nol pengetahuan
@@ -29,6 +33,7 @@ pub mod layout;
 pub mod paint;
 pub mod selectors;
 pub mod tab_pool;
+pub mod teks;
 
 pub use css::Kaskade;
 pub use dom::{Document, Node, NodeId, NodeKind};
@@ -50,7 +55,11 @@ pub const CELAH: &[&str] = &[
     "kaskade hanya membaca `<style>` di dalam dokumen dan atribut `style`; \
      `<link rel=stylesheet>` tidak diambil dari jaringan, dan at-rule (`@media`, \
      `@import`, `@font-face`) dicatat lalu tidak dijalankan",
-    "pengukuran teks belum ada; node teks tidak menghasilkan kotak layout",
+    "pengukuran teks hanya satu face (`DejaVuSans.ttf` yang ditanam di \
+     `crates/engine/assets/`): tidak ada webfont (`@font-face` tidak diambil), \
+     tidak ada font fallback per aksara (aksara di luar face diukur selebar \
+     `.notdef`), dan tidak ada shaping/kerning/ligatur, jadi teks Arab, \
+     Devanagari, atau emoji diukur bukan selebar bentuk aslinya",
     "peristiwa DOM (klik, input, fokus) belum ada; itu tugas lapisan hands",
     "raster hanya melukis latar kotak dari atribut `style` inline; teks, gambar, \
      gradien, bayangan, garis (`border`), dan `border-radius` tidak dilukis, jadi \

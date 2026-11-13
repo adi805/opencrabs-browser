@@ -15,4 +15,5 @@ serde_json.workspace = true
 taffy.workspace = true
 thiserror.workspace = true
 tiny-skia.workspace = true
+ttf-parser.workspace = true
 tracing.workspace = true

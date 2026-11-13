@@ -2,10 +2,10 @@
 //!
 //! Ini lapisan **eyes** versi minimum yang bisa dipertanggungjawabkan: yang
 //! dilukis hanya yang benar-benar diketahui mesin, yaitu kotak layout dan
-//! warna latar hasil kaskade ([`super::css::Kaskade`]). Teks tidak dilukis
-//! karena pengukuran teks belum ada, jadi halaman yang isinya hanya teks akan
-//! menghasilkan kanvas kosong. Itu disebut di [`super::CELAH`], bukan
-//! ditutupi dengan warna karangan.
+//! warna latar hasil kaskade ([`super::css::Kaskade`]). Kotak teks sudah ada
+//! (pengukurannya di [`super::teks`]), tapi glyph belum dilukis, jadi halaman
+//! yang isinya hanya teks masih menghasilkan kanvas kosong. Itu disebut di
+//! [`super::CELAH`], bukan ditutupi dengan warna karangan.
 //!
 //! Warna yang tidak dikenali **tidak** ditebak: deklarasinya masuk ke
 //! [`Raster::diabaikan`] dan pikselnya dibiarkan seperti latar.

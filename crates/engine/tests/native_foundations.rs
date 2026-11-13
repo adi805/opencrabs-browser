@@ -118,9 +118,13 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // `cdp::native_wire::jaringan` mengambil dokumen `http`/`https` sungguhan
     // (diuji di `crates/cdp/tests/jaringan.rs`); yang tersisa adalah batas
     // yang lebih sempit, yaitu skrip halaman belum punya `fetch`.
-    // Yang menggantikannya adalah celah yang masih benar-benar terbuka.
+    // "pengukuran teks" dicabut setelah `native::teks` mengukur lebar teks
+    // dari face yang ditanam dan node teks menghasilkan kotak layout
+    // (diuji di `native::layout`); yang menggantikannya adalah batas yang
+    // lebih sempit: satu face, tanpa webfont, tanpa shaping.
+    // Yang tersisa di daftar adalah celah yang masih benar-benar terbuka.
     for wajib in [
-        "pengukuran teks",
+        "pengukuran teks hanya satu face",
         "raster hanya melukis",
         "`fetch()` di dalam isolat",
         "peristiwa CDP",
@@ -144,5 +148,12 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("pengambilan dokumen dari jaringan"),
         "pengambilan dokumen dari jaringan sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
+    );
+    // Versi lama dari celah teks: lebar teks sudah diukur dan kotaknya sudah
+    // ada. Kalau kalimat ini kembali, pembaca mengira node teks masih tanpa
+    // kotak padahal tes `native::layout` membuktikan sebaliknya.
+    assert!(
+        !semua.contains("pengukuran teks belum ada"),
+        "pengukuran teks sudah ada, jangan kembalikan kalimat lamanya: {semua}"
     );
 }
