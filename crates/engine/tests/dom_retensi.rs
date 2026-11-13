@@ -35,7 +35,7 @@ fn string_heap(s: &String) -> usize {
 /// Byte yang ditahan arena DOM: vektor node, atribut, anak, dan isi `String`.
 fn retensi_dom(doc: &Document) -> usize {
     let node = doc.nodes();
-    let mut total = node.len() * size_of::<engine::native::Node>();
+    let mut total = std::mem::size_of_val(node);
 
     for n in node {
         total += n.attrs.capacity() * size_of::<(String, String)>();
