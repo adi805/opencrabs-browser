@@ -599,36 +599,76 @@ fn capture_screenshot_mengembalikan_png_base64() {
     assert_eq!(hasil["receipt"]["kotakDilukis"].as_u64(), Some(1));
 }
 
-/// JPEG ditolak dengan pesan yang menyebut yang didukung, bukan diam-diam
-/// mengirim PNG berlabel JPEG.
+/// JPEG dilayani oleh encoder sendiri, dan `quality` benar-benar dipakai:
+/// dua mutu berbeda menghasilkan ukuran byte berbeda. Yang tidak punya encoder
+/// (`webp`) ditolak dengan nama, bukan diam-diam dikirim PNG berlabel JPEG.
 #[test]
-fn capture_screenshot_menolak_format_selain_png() {
+fn capture_screenshot_melayani_jpeg_dan_menolak_webp() {
     let state = NativeState::baru();
     let id = tab(&state);
     let sesi = lekat(&state, &id);
-    let jawab = balas_sesi(
+    ok_sesi(
         &state,
         3,
+        "Page.setDocumentContent",
+        json!({
+            "frameId": "utama",
+            "html": "<body><div style=\"width:60px;height:40px;background:linear-gradient(#f00,#00f)\"></div></body>"
+        }),
+        &sesi,
+    );
+    let tinggi = |mutu: u8| {
+        let hasil = ok_sesi(
+            &state,
+            4,
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": mutu,
+                "clip": {"x": 0, "y": 0, "width": 60, "height": 40}
+            }),
+            &sesi,
+        );
+        let data = hasil["data"].as_str().expect("data base64");
+        assert_eq!(
+            hasil["receipt"]["format"].as_str(),
+            Some("image/jpeg"),
+            "tanda terima harus menyebut JPEG"
+        );
+        let jpeg = cdp::base64::dekode(data).expect("base64 sah");
+        assert_eq!(&jpeg[..3], b"\xff\xd8\xff", "harus JPEG sungguhan");
+        jpeg.len()
+    };
+    let mutu_rendah = tinggi(10);
+    let mutu_tinggi = tinggi(95);
+    assert!(
+        mutu_rendah < mutu_tinggi,
+        "quality 10 harus lebih kecil dari 95: {mutu_rendah} vs {mutu_tinggi}"
+    );
+
+    let jawab = balas_sesi(
+        &state,
+        5,
         "Page.captureScreenshot",
-        json!({"format": "jpeg", "quality": 80}),
+        json!({"format": "webp"}),
         &sesi,
     );
     assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
     let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        pesan.contains("PNG"),
-        "galat harus menyebut format yang didukung: {pesan}"
+        pesan.contains("webp") && pesan.contains("png") && pesan.contains("jpeg"),
+        "galat harus menyebut yang diminta dan yang didukung: {pesan}"
     );
 }
 
-/// Klip dengan skala selain 1 ditolak: merasterisasi pada skala lain butuh
-/// penskalaan kanvas, dan mengabaikannya berarti mengirim ukuran yang salah.
+/// `clip.scale` merender ulang pada kerapatan lain: 10 px CSS pada skala 2
+/// menghasilkan gambar 20x20, bukan 10x10 yang diperbesar setelahnya.
 #[test]
-fn capture_screenshot_menolak_klip_berskala() {
+fn capture_screenshot_klip_berskala_memperbesar_keluaran() {
     let state = NativeState::baru();
     let id = tab(&state);
     let sesi = lekat(&state, &id);
-    let jawab = balas_sesi(
+    let jawab = ok_sesi(
         &state,
         3,
         "Page.captureScreenshot",
@@ -638,10 +678,112 @@ fn capture_screenshot_menolak_klip_berskala() {
         }),
         &sesi,
     );
-    assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
-    let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
+    assert_eq!(
+        jawab["receipt"]["scale"].as_f64(),
+        Some(2.0),
+        "tanda terima harus menyebut skala yang dipakai: {jawab}"
+    );
+    let data = jawab["data"].as_str().expect("data base64");
+    let png = cdp::base64::dekode(data).expect("base64 sah");
+    let lebar = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let tinggi = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    assert_eq!((lebar, tinggi), (20, 20), "10 px CSS pada skala 2");
+}
+
+/// `quality` pada PNG tidak mengubah apa pun sejak awal, jadi nilainya dicatat
+/// sebagai diabaikan alih-alih diterima diam-diam sebagai parameter bermakna.
+#[test]
+fn capture_screenshot_mencatat_quality_png_sebagai_diabaikan() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    let jawab = ok_sesi(
+        &state,
+        3,
+        "Page.captureScreenshot",
+        json!({"format": "png", "quality": 50}),
+        &sesi,
+    );
+    let diabaikan = jawab["receipt"]["diabaikan"]
+        .as_array()
+        .expect("daftar diabaikan");
     assert!(
-        pesan.contains("scale"),
-        "galat harus menyebut scale: {pesan}"
+        diabaikan
+            .iter()
+            .any(|n| n.as_str().unwrap_or_default().contains("quality 50")),
+        "quality pada PNG harus tercatat: {diabaikan:#?}"
+    );
+}
+
+/// `captureBeyondViewport` benar-benar mengubah hasil: klip 900 px pada
+/// viewport bawaan 800 px dipotong tanpa parameter itu, dan dilayani penuh
+/// dengan parameter itu. Tanda terima menyebut mana yang terjadi.
+#[test]
+fn capture_screenshot_capture_beyond_viewport_mengubah_pemotongan() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    let klip = json!({"x": 0, "y": 0, "width": 900, "height": 100});
+
+    let dalam = ok_sesi(
+        &state,
+        3,
+        "Page.captureScreenshot",
+        json!({"format": "png", "clip": klip}),
+        &sesi,
+    );
+    assert_eq!(
+        dalam["receipt"]["clipDipotong"], true,
+        "klip lebih lebar dari viewport harus dipotong: {dalam}"
+    );
+    let png = cdp::base64::dekode(dalam["data"].as_str().expect("data base64")).expect("base64");
+    let lebar = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    assert_eq!(
+        lebar, 800,
+        "tanpa captureBeyondViewport lebar dibatasi viewport"
+    );
+
+    let luar = ok_sesi(
+        &state,
+        4,
+        "Page.captureScreenshot",
+        json!({"format": "png", "clip": klip, "captureBeyondViewport": true}),
+        &sesi,
+    );
+    assert_eq!(
+        luar["receipt"]["clipDipotong"], false,
+        "captureBeyondViewport melayani klip utuh: {luar}"
+    );
+    assert_eq!(luar["receipt"]["captureBeyondViewport"], true);
+    let png = cdp::base64::dekode(luar["data"].as_str().expect("data base64")).expect("base64");
+    let lebar = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    assert_eq!(
+        lebar, 900,
+        "dengan captureBeyondViewport lebar mengikuti klip"
+    );
+}
+
+/// `fromSurface` dicatat di tanda terima: mesin software hanya punya satu
+/// permukaan, jadi `false` tidak mengubah raster dan itu dinyatakan, bukan
+/// diterima sebagai parameter yang seolah-olah berpengaruh.
+#[test]
+fn capture_screenshot_mencatat_from_surface_sebagai_diabaikan() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    let jawab = ok_sesi(
+        &state,
+        3,
+        "Page.captureScreenshot",
+        json!({"format": "png", "fromSurface": false}),
+        &sesi,
+    );
+    assert_eq!(jawab["receipt"]["fromSurface"], false);
+    let diabaikan = jawab["receipt"]["diabaikan"].as_array().expect("daftar");
+    assert!(
+        diabaikan
+            .iter()
+            .any(|n| n.as_str().unwrap_or_default().contains("fromSurface")),
+        "fromSurface=false harus tercatat: {diabaikan:#?}"
     );
 }

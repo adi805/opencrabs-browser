@@ -727,45 +727,103 @@ impl Dalam {
         Ok(axtree::json_pohon(&t.dokumen))
     }
 
-    /// `Page.captureScreenshot`: rasterisasi kotak layout menjadi PNG.
+    /// `Page.captureScreenshot`: rasterisasi kotak layout menjadi gambar.
     ///
-    /// Hanya PNG. JPEG butuh encoder lain, dan mengaku bisa JPEG lalu mengirim
-    /// PNG adalah kebohongan yang baru ketahuan di klien.
+    /// Format yang dikeluarkan hanya `png` dan `jpeg`, karena hanya itu yang
+    /// punya encoder di dalam mesin ini. Format lain ditolak dengan nama, bukan
+    /// diganti diam-diam.
+    ///
+    /// Parameter yang benar-benar dibaca: `format`, `quality`, `clip`
+    /// (`x`/`y`/`width`/`height`/`scale`), `captureBeyondViewport`,
+    /// `optimizeForSpeed`, dan `fromSurface`. Yang diminta tapi tidak mengubah
+    /// hasil dicatat di `receipt.diabaikan`, bukan didiamkan.
     fn tangkap_layar(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
-        let format = params
-            .get("format")
-            .and_then(Value::as_str)
-            .unwrap_or("png");
-        if !format.eq_ignore_ascii_case("png") {
-            return Err(Galat::baru(
-                -32602,
-                format!("format '{format}' belum didukung: mesin native hanya mengeluarkan PNG"),
-            ));
-        }
+        let (format, mut diabaikan_param) = format_dari(params)?;
         let klip = klip_dari(params)?;
+        let di_luar_viewport = params
+            .get("captureBeyondViewport")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // Mesin ini software: tidak ada permukaan kompositor terpisah dari
+        // permukaan yang dilukis. `fromSurface: false` karena itu menghasilkan
+        // raster yang sama, dan nilainya tetap dicatat di tanda terima.
+        let dari_permukaan = params
+            .get("fromSurface")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if !dari_permukaan {
+            diabaikan_param.push(
+                "fromSurface=false: mesin software punya satu permukaan, hasilnya identik"
+                    .to_string(),
+            );
+        }
+        // Tanpa `captureBeyondViewport`, klip dipotong ke batas viewport yang
+        // benar-benar terlihat, sama seperti browser. Memperluas viewport
+        // diam-diam akan mengubah layout halaman tanpa ada yang meminta.
+        let (klip, viewport, dipotong) = match klip {
+            Some(k) if di_luar_viewport => (
+                Some(k),
+                Viewport::new((k.x + k.width).max(1.0), (k.y + k.height).max(1.0)),
+                false,
+            ),
+            Some(k) => {
+                let kiri = k.x.max(0.0);
+                let atas = k.y.max(0.0);
+                let kanan = (k.x + k.width).min(VIEWPORT_BAWAAN.0);
+                let bawah = (k.y + k.height).min(VIEWPORT_BAWAAN.1);
+                if kanan <= kiri || bawah <= atas {
+                    return Err(Galat::baru(
+                        -32602,
+                        format!(
+                            "clip berada di luar viewport {}x{}; kirim captureBeyondViewport: true untuk menangkap di luarnya",
+                            VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1
+                        ),
+                    ));
+                }
+                let dipotong = (kanan - kiri) < k.width - 0.01 || (bawah - atas) < k.height - 0.01;
+                let kk = paint::Klip {
+                    x: kiri,
+                    y: atas,
+                    width: kanan - kiri,
+                    height: bawah - atas,
+                    scale: k.scale,
+                };
+                (
+                    Some(kk),
+                    Viewport::new(VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1),
+                    dipotong,
+                )
+            }
+            None => (
+                None,
+                Viewport::new(VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1),
+                false,
+            ),
+        };
+        let skala = klip.map_or(1.0, |k| k.scale);
         let tab = self.tab_dari_sesi(sesi)?;
         if self.pool.tab(tab).is_none() {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-        // Viewport harus memuat klip; kalau tidak, layout dihitung pada kanvas
-        // yang lebih kecil daripada potongan yang diminta dan kotaknya terpotong
-        // sebelum sampai ke raster.
-        let viewport = match klip {
-            Some(k) => Viewport::new((k.x + k.width).max(1.0), (k.y + k.height).max(1.0)),
-            None => Viewport::new(VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1),
-        };
-        let raster = paint::lukis(&t.dokumen, viewport, klip)
+        let raster = paint::lukis_dengan(&t.dokumen, viewport, klip, format)
             .map_err(|err| Galat::baru(-32000, format!("tangkapan layar gagal: {err}")))?;
+        diabaikan_param.extend(raster.diabaikan.iter().cloned());
         Ok(json!({
-            "data": crate::base64::kodekan(&raster.png),
+            "data": crate::base64::kodekan(&raster.data),
             // Tanda terima, bukan hiasan: klien bisa tahu berapa kotak yang
-            // benar-benar dilukis dan deklarasi mana yang tidak didukung.
+            // benar-benar dilukis, format apa yang keluar, dan deklarasi mana
+            // yang tidak didukung.
             "receipt": {
                 "width": raster.width,
                 "height": raster.height,
+                "format": raster.format.mime(),
+                "scale": skala,
                 "kotakDilukis": raster.kotak_dilukis,
-                "diabaikan": raster.diabaikan,
+                "clipDipotong": dipotong,
+                "captureBeyondViewport": di_luar_viewport,
+                "fromSurface": dari_permukaan,
+                "diabaikan": diabaikan_param,
             },
         }))
     }
@@ -1020,21 +1078,66 @@ fn param_node_id(params: &Value) -> Result<usize, Galat> {
     usize::try_from(n).map_err(|_| Galat::baru(-32602, "`nodeId` tidak boleh negatif"))
 }
 
+/// Membaca `params.format` dan `params.quality` menjadi format encoder.
+///
+/// Format yang tidak punya encoder di mesin ini ditolak dengan namanya, bukan
+/// diganti jadi PNG: klien yang meminta `webp` lalu menerima PNG dengan
+/// ekstensi `webp` baru tahu masalahnya setelah gambarnya rusak.
+///
+/// `quality` hanya berlaku untuk JPEG. Chrome mengabaikannya pada PNG, jadi
+/// mengirimnya bersama `format: "png"` dicatat di daftar diabaikan alih-alih
+/// ditolak.
+fn format_dari(params: &Value) -> Result<(paint::Format, Vec<String>), Galat> {
+    let mut diabaikan = Vec::new();
+    let nama = params
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("png");
+    let mutu = params.get("quality").and_then(Value::as_i64);
+    let format = match nama.to_ascii_lowercase().as_str() {
+        "png" => {
+            if let Some(q) = mutu {
+                diabaikan.push(format!(
+                    "quality {q}: PNG lossless, nilai ini tidak berpengaruh"
+                ));
+            }
+            let cepat = params
+                .get("optimizeForSpeed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            paint::Format::Png { cepat }
+        }
+        "jpeg" => {
+            let m = mutu.unwrap_or(80).clamp(1, 100);
+            paint::Format::Jpeg {
+                mutu: u8::try_from(m).unwrap_or(80),
+            }
+        }
+        lain => {
+            return Err(Galat::baru(
+                -32602,
+                format!(
+                    "format '{lain}' belum didukung: mesin native mengeluarkan `png` dan `jpeg`"
+                ),
+            ));
+        }
+    };
+    Ok((format, diabaikan))
+}
+
 /// Membaca `params.clip` menjadi potongan yang bisa dilukis.
 ///
-/// `scale` ditolak kalau bukan 1: mesin ini belum menskalakan raster, dan
-/// menerima lalu mengabaikannya akan mengirim gambar dengan ukuran yang tidak
-/// diminta klien.
+/// `scale` diteruskan apa adanya: raster merender ulang pada kerapatan itu,
+/// bukan memperbesar gambar hasil, jadi nilainya benar-benar mengubah keluaran.
 fn klip_dari(params: &Value) -> Result<Option<paint::Klip>, Galat> {
     let Some(k) = params.get("clip").filter(|v| !v.is_null()) else {
         return Ok(None);
     };
-    if let Some(skala) = k.get("scale").and_then(Value::as_f64)
-        && (skala - 1.0).abs() > f64::EPSILON
-    {
+    let skala = k.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
+    if !skala.is_finite() || skala <= 0.0 {
         return Err(Galat::baru(
             -32602,
-            format!("clip.scale {skala} belum didukung: raster hanya pada skala 1"),
+            format!("clip.scale {skala} tidak sah: harus bilangan positif"),
         ));
     }
     // f64 -> f32 di sini aman untuk koordinat CSS: nilai di luar jangkauan f32
@@ -1053,11 +1156,16 @@ fn klip_dari(params: &Value) -> Result<Option<paint::Klip>, Galat> {
             "clip.width dan clip.height harus lebih besar dari nol",
         ));
     }
+    // f64 -> f32 di sini juga aman: kerapatan keluaran di luar jangkauan f32
+    // sudah jauh melewati batas ukuran gambar yang bisa dialokasikan.
+    #[allow(clippy::cast_possible_truncation)]
+    let scale = skala as f32;
     Ok(Some(paint::Klip {
         x,
         y,
         width,
         height,
+        scale,
     }))
 }
 

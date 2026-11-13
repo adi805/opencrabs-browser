@@ -132,6 +132,10 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         "raster melukis latar kotak dan glyph teks",
         "`fetch()` di dalam isolat",
         "peristiwa CDP",
+        // Batas screenshot yang masih benar-benar terbuka: encoder `webp`
+        // belum ada. Kalau baris ini hilang, daftar mengklaim screenshot
+        // melayani semua format yang diminta Chrome.
+        "`webp` (dan",
     ] {
         assert!(
             semua.contains(wajib),
@@ -166,5 +170,13 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("pengukuran teks belum ada"),
         "pengukuran teks sudah ada, jangan kembalikan kalimat lamanya: {semua}"
+    );
+    // `Page.captureScreenshot` sekarang melayani `jpeg`, `quality`,
+    // `optimizeForSpeed`, dan `clip.scale` sungguhan (dirender ulang pada
+    // kerapatan itu), jadi kalimat "hanya PNG pada skala 1" tidak boleh
+    // kembali: pembaca akan mengira format dan skala masih ditolak.
+    assert!(
+        !semua.contains("hanya PNG pada skala 1"),
+        "screenshot sudah multi-format dan multi-skala: {semua}"
     );
 }

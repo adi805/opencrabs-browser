@@ -32,6 +32,13 @@ futures-util = "0.3"
 html5ever = "0.40"
 markup5ever_rcdom = "0.40"
 nix = { version = "0.30", features = ["signal", "process", "fs"] }
+# Encoder JPEG untuk `Page.captureScreenshot` format `jpeg`. Rust murni,
+# tanpa dependensi, dan tidak memakai `unsafe` di jalur encode-nya.
+jpeg-encoder = "0.6"
+# Encoder PNG dengan pilihan level kompresi, supaya `optimizeForSpeed` punya
+# arti konkret alih-alih diterima lalu diabaikan. Versi ini sudah ada di lock
+# lewat `tiny-skia`, jadi tidak ada crate baru yang masuk.
+png = "0.17"
 # `parallel` mengaktifkan `unsafe impl Send/Sync for Runtime` di rquickjs-core.
 # Tanpa fitur itu isolat tidak bisa hidup di dalam state axum/daemon yang
 # multi-thread, dan `Engine: Send + Sync` tidak bisa dipenuhi. Fitur ini cuma

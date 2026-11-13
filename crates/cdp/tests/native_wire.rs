@@ -700,10 +700,11 @@ async fn accessibility_get_full_ax_tree_mengirim_peran_dan_nama() {
     mesin.stop().expect("berhenti");
 }
 
-/// AC: tangkapan layar adalah PNG sungguhan dengan ukuran yang diminta, dan
-/// format yang belum didukung ditolak, bukan diganti diam-diam.
+/// AC: tangkapan layar mengeluarkan PNG dan JPEG sungguhan dengan ukuran yang
+/// diminta, `clip.scale` benar-benar memperbesar keluaran, dan format yang
+/// belum punya encoder (`webp`) ditolak dengan namanya.
 #[tokio::test]
-async fn page_capture_screenshot_mengirim_png_asli_dan_menolak_format_lain() {
+async fn page_capture_screenshot_melayani_png_jpeg_dan_menolak_webp() {
     let mesin = nyalakan();
     let port = mesin.info().devtools_port;
     let mut soket = sambung(port, "/devtools/browser").await;
@@ -738,20 +739,31 @@ async fn page_capture_screenshot_mengirim_png_asli_dan_menolak_format_lain() {
         &mut soket,
         11,
         "Page.captureScreenshot",
-        json!({"format": "jpeg"}),
+        json!({"format": "jpeg", "quality": 70}),
+        &sesi,
+    )
+    .await;
+    assert!(jpeg.get("error").is_none(), "JPEG harus dilayani: {jpeg}");
+    let data = jpeg["result"]["data"].as_str().expect("data jpeg base64");
+    let bytes = cdp::base64::dekode(data).expect("base64 yang dikirim harus sah");
+    assert_eq!(&bytes[..3], b"\xff\xd8\xff", "harus JPEG asli");
+    assert_eq!(
+        jpeg["result"]["receipt"]["format"], "image/jpeg",
+        "tanda terima harus menyebut JPEG: {jpeg}"
+    );
+
+    let webp = minta_cdp_sesi(
+        &mut soket,
+        13,
+        "Page.captureScreenshot",
+        json!({"format": "webp"}),
         &sesi,
     )
     .await;
     assert_eq!(
-        jpeg["error"]["code"],
+        webp["error"]["code"],
         json!(-32602),
-        "JPEG harus ditolak, bukan dikirim sebagai PNG: {jpeg}"
-    );
-    assert!(
-        jpeg["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("PNG")),
-        "pesan galat harus menyebut format yang didukung: {jpeg}"
+        "webp belum punya encoder dan harus ditolak dengan nama: {webp}"
     );
 
     let skala = minta_cdp_sesi(
@@ -762,11 +774,14 @@ async fn page_capture_screenshot_mengirim_png_asli_dan_menolak_format_lain() {
         &sesi,
     )
     .await;
-    assert_eq!(
-        skala["error"]["code"],
-        json!(-32602),
-        "scale != 1 harus ditolak, bukan diabaikan: {skala}"
+    assert!(
+        skala.get("error").is_none(),
+        "scale 2 harus dilayani, bukan ditolak: {skala}"
     );
+    let data = skala["result"]["data"].as_str().expect("data skala base64");
+    let png = cdp::base64::dekode(data).expect("base64 yang dikirim harus sah");
+    let lebar = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    assert_eq!(lebar, 20, "10 px CSS pada skala 2 jadi 20 px");
 
     mesin.stop().expect("berhenti");
 }

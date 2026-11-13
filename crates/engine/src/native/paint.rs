@@ -17,6 +17,40 @@ use super::dom::{Document, NodeId};
 use super::gaya::GayaTerhitung;
 use super::layout::{self, Kotak, Viewport};
 
+/// Format keluaran yang bisa dikodekan raster.
+///
+/// `Format::Png` membawa sendiri pilihan kompresinya, karena
+/// `Page.captureScreenshot` punya `optimizeForSpeed`: klien yang mengutamakan
+/// waktu meminta PNG yang cepat dikodekan, bukan yang paling kecil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// PNG lossless. `cepat` memilih kompresi cepat alih-alih rapat.
+    Png { cepat: bool },
+    /// JPEG lossy dengan mutu 0-100. Raster software tidak punya tabel
+    /// kuantisasi lain, jadi mutu di sini benar-benar mutu encoder.
+    Jpeg { mutu: u8 },
+}
+
+impl Format {
+    /// Nama MIME yang benar untuk byte hasil [`Format`] ini.
+    #[must_use]
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Png { .. } => "image/png",
+            Self::Jpeg { .. } => "image/jpeg",
+        }
+    }
+
+    /// Magic bytes yang wajib muncul di awal berkas hasil encode.
+    #[must_use]
+    pub fn magic(self) -> &'static [u8] {
+        match self {
+            Self::Png { .. } => b"\x89PNG\r\n\x1a\n",
+            Self::Jpeg { .. } => b"\xff\xd8\xff",
+        }
+    }
+}
+
 /// Potongan halaman yang mau diambil, dalam koordinat CSS.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Klip {
@@ -24,6 +58,36 @@ pub struct Klip {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// `clip.scale` CDP: berapa piksel keluaran per satuan CSS.
+    ///
+    /// 1.0 berarti satu piksel per piksel. 2.0 merender ulang pada kerapatan
+    /// dua kali, bukan memperbesar gambar yang sudah jadi, sehingga glyph tetap
+    /// tajam dan ukuran kanvas ikut berlipat.
+    pub scale: f32,
+}
+
+impl Klip {
+    /// Klip pada skala 1: bentuk yang paling sering dipakai tes dan pemanggil.
+    #[must_use]
+    pub fn baru(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            scale: 1.0,
+        }
+    }
+
+    /// Kerapatan yang dipakai merender, sudah dijaga di atas nol.
+    #[must_use]
+    fn kerapatan(&self) -> f32 {
+        if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        }
+    }
 }
 
 /// Hasil satu kali rasterisasi.
@@ -31,8 +95,11 @@ pub struct Klip {
 pub struct Raster {
     pub width: u32,
     pub height: u32,
-    /// Byte PNG lengkap, siap dikirim sebagai base64 ke klien CDP.
-    pub png: Vec<u8>,
+    /// Byte hasil encode lengkap, sesuai [`Raster::format`], siap dikirim
+    /// sebagai base64 ke klien CDP.
+    pub data: Vec<u8>,
+    /// Format byte di [`Raster::data`].
+    pub format: Format,
     /// Piksel RGBA premultiplied, sesuai penyimpanan `tiny-skia`.
     pub rgba: Vec<u8>,
     /// Berapa kotak yang benar-benar dilukis.
@@ -58,20 +125,38 @@ impl Raster {
     }
 }
 
-/// Melukis dokumen pada ukuran viewport tertentu.
+/// Melukis dokumen pada ukuran viewport tertentu, sebagai PNG.
 ///
 /// Latar kanvas putih buram, sama seperti tangkapan layar halaman tanpa latar.
+/// Ini bentuk ringkas dari [`lukis_dengan`] untuk pemanggil yang tidak memilih
+/// format sendiri.
 pub fn lukis(
     doc: &Document,
     viewport: Viewport,
     klip: Option<Klip>,
 ) -> Result<Raster, NativeError> {
+    lukis_dengan(doc, viewport, klip, Format::Png { cepat: false })
+}
+
+/// Melukis dokumen dengan pilihan format keluaran.
+///
+/// `klip.scale` ikut menentukan ukuran kanvas: layout selalu dihitung pada
+/// satuan CSS, lalu setiap koordinat dikalikan kerapatan saat digambar. Itu
+/// sebabnya skala di sini bukan pembesaran gambar hasil, melainkan render ulang
+/// pada kerapatan lebih tinggi.
+pub fn lukis_dengan(
+    doc: &Document,
+    viewport: Viewport,
+    klip: Option<Klip>,
+    format: Format,
+) -> Result<Raster, NativeError> {
     let laporan = layout::hitung(doc, viewport)?;
+    let kerapatan = klip.map_or(1.0, |k| k.kerapatan());
     let (lebar, tinggi, geser) = match klip {
         Some(k) => (
-            k.width.max(1.0).round() as u32,
-            k.height.max(1.0).round() as u32,
-            (-k.x, -k.y),
+            (k.width.max(1.0) * kerapatan).round() as u32,
+            (k.height.max(1.0) * kerapatan).round() as u32,
+            (-k.x * kerapatan, -k.y * kerapatan),
         ),
         None => (
             viewport.width.max(1.0).round() as u32,
@@ -82,7 +167,9 @@ pub fn lukis(
     let mut pixmap = Pixmap::new(lebar, tinggi)
         .ok_or_else(|| NativeError::raster(format!("kanvas {lebar}x{tinggi} tidak bisa dibuat")))?;
     pixmap.fill(Color::WHITE);
-    let transform = Transform::from_translate(geser.0, geser.1);
+    // Geser sudah dalam piksel; kerapatan dikalikan sebelum terjemahan supaya
+    // setiap koordinat CSS mendarat di piksel keluaran yang benar.
+    let transform = Transform::from_translate(geser.0, geser.1).pre_scale(kerapatan, kerapatan);
 
     let mut kotak_dilukis = 0usize;
     let mut baris_dilukis = 0usize;
@@ -131,24 +218,99 @@ pub fn lukis(
         };
         let gaya = laporan.terhitung.get(node).cloned().unwrap_or_default();
         let warna = warna_teks(&gaya, &mut diabaikan, *node);
-        let (baris, glyph) = lukis_teks(&mut pixmap, isi, &gaya, &kotak, warna, geser);
+        let (baris, glyph) = lukis_teks(&mut pixmap, isi, &gaya, &kotak, warna, geser, kerapatan);
         baris_dilukis += baris;
         glyph_dilukis += glyph;
     }
 
-    let png = pixmap
-        .encode_png()
-        .map_err(|e| NativeError::raster(format!("PNG gagal dikodekan: {e}")))?;
+    let data = match format {
+        Format::Png { cepat } => kodekan_png(&pixmap, cepat)?,
+        Format::Jpeg { mutu } => kodekan_jpeg(&pixmap, mutu)?,
+    };
     Ok(Raster {
         width: lebar,
         height: tinggi,
-        png,
+        data,
+        format,
         rgba: pixmap.data().to_vec(),
         kotak_dilukis,
         baris_dilukis,
         glyph_dilukis,
         diabaikan,
     })
+}
+
+/// Piksel RGBA *straight* (bukan premultiplied) untuk encoder PNG.
+///
+/// `tiny-skia` menyimpan warna premultiplied; PNG menyimpan warna straight
+/// dengan kanal alfa terpisah. Mengirim yang premultiplied membuat piksel
+/// semi-transparan terbaca lebih gelap di klien.
+fn rgba_lurus(pixmap: &Pixmap) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixmap.data().len());
+    for p in pixmap.pixels() {
+        let c = p.demultiply();
+        out.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+    out
+}
+
+/// Piksel RGB untuk encoder JPEG, dengan latar putih sebagai dasar.
+///
+/// JPEG tidak punya kanal alfa. Melubangi alfa berarti menebak: piksel yang
+/// transparan dikomposit di atas putih, sama seperti kanvas ini sendiri.
+fn rgb_di_atas_putih(pixmap: &Pixmap) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixmap.pixels().len() * 3);
+    for p in pixmap.pixels() {
+        let a = u32::from(p.alpha());
+        let atas = |c: u8| {
+            // Nilai tersimpan premultiplied: c = straight * a / 255. Sisa ruang
+            // ke 255 diisi putih, jadi hasilnya c + (255 - a).
+            (u32::from(c) + (255 - a)).min(255) as u8
+        };
+        out.extend_from_slice(&[atas(p.red()), atas(p.green()), atas(p.blue())]);
+    }
+    out
+}
+
+fn kodekan_png(pixmap: &Pixmap, cepat: bool) -> Result<Vec<u8>, NativeError> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, pixmap.width(), pixmap.height());
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        // `optimizeForSpeed` punya arti konkret di sini: tukar ukuran berkas
+        // dengan waktu encode, bukan parameter yang diterima lalu diabaikan.
+        enc.set_compression(if cepat {
+            png::Compression::Fast
+        } else {
+            png::Compression::Default
+        });
+        let mut w = enc
+            .write_header()
+            .map_err(|e| NativeError::raster(format!("PNG gagal ditulis: {e}")))?;
+        w.write_image_data(&rgba_lurus(pixmap))
+            .map_err(|e| NativeError::raster(format!("PNG gagal dikodekan: {e}")))?;
+        w.finish()
+            .map_err(|e| NativeError::raster(format!("PNG gagal ditutup: {e}")))?;
+    }
+    Ok(out)
+}
+
+fn kodekan_jpeg(pixmap: &Pixmap, mutu: u8) -> Result<Vec<u8>, NativeError> {
+    let lebar = u16::try_from(pixmap.width())
+        .map_err(|_| NativeError::raster(format!("lebar {} terlalu besar", pixmap.width())))?;
+    let tinggi = u16::try_from(pixmap.height())
+        .map_err(|_| NativeError::raster(format!("tinggi {} terlalu besar", pixmap.height())))?;
+    let mut out = Vec::new();
+    let enc = jpeg_encoder::Encoder::new(&mut out, mutu);
+    enc.encode(
+        &rgb_di_atas_putih(pixmap),
+        lebar,
+        tinggi,
+        jpeg_encoder::ColorType::Rgb,
+    )
+    .map_err(|e| NativeError::raster(format!("JPEG gagal dikodekan: {e}")))?;
+    Ok(out)
 }
 
 /// Warna teks dari gaya terhitung. Warna bawaan CSS adalah hitam.
@@ -212,6 +374,7 @@ fn lukis_teks(
     kotak: &Kotak,
     warna: Color,
     geser: (f32, f32),
+    kerapatan: f32,
 ) -> (usize, usize) {
     let Some(face) = super::teks::face() else {
         return (0, 0);
@@ -249,10 +412,13 @@ fn lukis_teks(
                 && let Some(jalur) = pembangun.jalur.finish()
             {
                 // Sumbu Y font ke atas, kanvas ke bawah: skala negatif pada
-                // Y. Terjemahan dilakukan setelah skala supaya pena berada
-                // di koordinat piksel.
-                let transform = Transform::from_translate(pena + geser.0, baseline + geser.1)
-                    .pre_scale(skala, -skala);
+                // Y. Pena dan baseline masih satuan CSS, jadi kerapatan
+                // dikalikan di sini sebelum diterjemahkan ke piksel.
+                let transform = Transform::from_translate(
+                    pena * kerapatan + geser.0,
+                    baseline * kerapatan + geser.1,
+                )
+                .pre_scale(skala * kerapatan, -skala * kerapatan);
                 pixmap.fill_path(&jalur, &paint, FillRule::Winding, transform, None);
                 dilukis_glyph += 1;
                 ada_glyph = true;
@@ -413,7 +579,10 @@ mod tests {
     fn png_memuat_magic_bytes_dan_ukuran_viewport() {
         let doc = Document::parse_html("<body><p>x</p></body>").unwrap();
         let raster = lukis(&doc, Viewport::new(320.0, 200.0), None).unwrap();
-        assert_eq!(ukuran_png(&raster.png), (320, 200));
+        assert_eq!(ukuran_png(&raster.data), (320, 200));
+        assert_eq!(raster.format, Format::Png { cepat: false });
+        assert_eq!(raster.format.mime(), "image/png");
+        assert_eq!(&raster.data[..8], raster.format.magic());
         assert_eq!(raster.width, 320);
         assert_eq!(raster.height, 200);
         assert_eq!(raster.rgba.len(), (320 * 200 * 4) as usize);
@@ -484,15 +653,107 @@ mod tests {
             "<body><div style=\"width:40px;height:40px;background-color:#00ff00\"></div></body>",
         )
         .unwrap();
-        let klip = Klip {
-            x: 10.0,
-            y: 10.0,
-            width: 20.0,
-            height: 20.0,
-        };
+        let klip = Klip::baru(10.0, 10.0, 20.0, 20.0);
         let raster = lukis(&doc, Viewport::new(100.0, 100.0), Some(klip)).unwrap();
-        assert_eq!(ukuran_png(&raster.png), (20, 20));
+        assert_eq!(ukuran_png(&raster.data), (20, 20));
         assert_eq!(raster.piksel(0, 0), Some([0, 255, 0, 255]));
+    }
+
+    /// `clip.scale` melipatgandakan ukuran keluaran dengan merender ulang pada
+    /// kerapatan lebih tinggi, bukan memperbesar gambar yang sudah jadi.
+    #[test]
+    fn skala_klip_melipatgandakan_piksel() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:40px;height:40px;background-color:#00ff00\"></div></body>",
+        )
+        .unwrap();
+        let mut klip = Klip::baru(10.0, 10.0, 20.0, 20.0);
+        klip.scale = 2.0;
+        let raster = lukis(&doc, Viewport::new(100.0, 100.0), Some(klip)).unwrap();
+        assert_eq!(ukuran_png(&raster.data), (40, 40), "20 px CSS pada skala 2");
+        assert_eq!(raster.width, 40);
+        assert_eq!(raster.piksel(0, 0), Some([0, 255, 0, 255]));
+        assert_eq!(
+            raster.piksel(39, 39),
+            Some([0, 255, 0, 255]),
+            "kotak 40x40 CSS menutup seluruh klip 20x20 CSS"
+        );
+    }
+
+    /// Skala juga memperbesar glyph: teks yang sama pada skala 2 menutup dua
+    /// kali lipat piksel, jadi tidak ada alfa yang hilang saat diperbesar.
+    #[test]
+    fn skala_klip_memperbesar_glyph() {
+        let doc = Document::parse_html("<body><p>WWWW</p></body>").unwrap();
+        let satu = lukis(&doc, Viewport::new(200.0, 100.0), None).unwrap();
+        let mut klip = Klip::baru(0.0, 0.0, 200.0, 100.0);
+        klip.scale = 2.0;
+        let dua = lukis(&doc, Viewport::new(200.0, 100.0), Some(klip)).unwrap();
+        assert_eq!((dua.width, dua.height), (400, 200));
+        let gelap_satu = jumlah_piksel_gelap(&satu);
+        let gelap_dua = jumlah_piksel_gelap(&dua);
+        assert!(gelap_satu > 0, "teks harus terlukis pada skala 1");
+        assert!(
+            gelap_dua > gelap_satu * 3,
+            "skala 2 harus menutup sekitar empat kali piksel: {gelap_satu} -> {gelap_dua}"
+        );
+    }
+
+    /// Format JPEG harus mengeluarkan JPEG sungguhan, bukan PNG yang dilabeli.
+    #[test]
+    fn jpeg_memuat_magic_bytes_jpeg() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:30px;height:30px;background-color:#0000ff\"></div></body>",
+        )
+        .unwrap();
+        let raster = lukis_dengan(
+            &doc,
+            Viewport::new(60.0, 60.0),
+            None,
+            Format::Jpeg { mutu: 80 },
+        )
+        .unwrap();
+        assert_eq!(&raster.data[..3], b"\xff\xd8\xff", "harus JPEG sungguhan");
+        assert_eq!(raster.format.mime(), "image/jpeg");
+        assert_eq!(raster.kotak_dilukis, 1);
+        assert!(
+            !raster.data.starts_with(b"\x89PNG"),
+            "JPEG tidak boleh berupa PNG"
+        );
+    }
+
+    /// `optimizeForSpeed` mengubah hasil encode, bukan diterima lalu diabaikan:
+    /// kompresi cepat menghasilkan berkas yang tidak lebih kecil daripada
+    /// kompresi rapat untuk isi yang sama.
+    #[test]
+    fn optimize_for_speed_memilih_kompresi_cepat() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:120px;height:120px;background-color:#123456\">\
+             <p>teks untuk mengisi kanvas</p></div></body>",
+        )
+        .unwrap();
+        let lambat = lukis_dengan(
+            &doc,
+            Viewport::new(120.0, 120.0),
+            None,
+            Format::Png { cepat: false },
+        )
+        .unwrap();
+        let cepat = lukis_dengan(
+            &doc,
+            Viewport::new(120.0, 120.0),
+            None,
+            Format::Png { cepat: true },
+        )
+        .unwrap();
+        assert_eq!(&lambat.data[..8], Format::Png { cepat: false }.magic());
+        assert_eq!(&cepat.data[..8], Format::Png { cepat: false }.magic());
+        assert!(
+            cepat.data.len() >= lambat.data.len(),
+            "kompresi cepat tidak boleh lebih kecil: {} vs {}",
+            cepat.data.len(),
+            lambat.data.len()
+        );
     }
 
     /// Menghitung piksel yang lebih gelap dari ambang, di dalam kotak tertentu.

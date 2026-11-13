@@ -69,9 +69,13 @@ pub const CELAH: &[&str] = &[
      karena peregangan spasi belum ada, dan glyph tidak dipotong ke kotaknya \
      (`overflow` belum ada), jadi baris yang lebih lebar dari kotak tetap \
      tergambar penuh",
-    "`Page.captureScreenshot` hanya PNG pada skala 1 dengan viewport bawaan \
-     800x600: `captureBeyondViewport`, `optimizeForSpeed`, `fromSurface`, dan \
-     `clip.scale` tidak didukung, dan JPEG ditolak alih-alih dikirim sebagai PNG",
+    "`Page.captureScreenshot` mengeluarkan `png` dan `jpeg` saja: `webp` (dan \
+     format lain di luar dua itu) belum punya encoder di mesin ini, jadi \
+     permintaannya ditolak dengan nama formatnya. Yang sudah dihormati: \
+     `quality`, `optimizeForSpeed`, `clip.scale` (render ulang pada kerapatan \
+     itu, bukan pembesaran gambar hasil), `captureBeyondViewport`, dan \
+     `fromSurface` (dicatat, hasilnya sama karena mesin software cuma punya \
+     satu permukaan)",
     "pohon aksesibilitas belum menghitung `aria-labelledby` berantai, status \
      *focusable*/*selected*/*expanded*, dan konten di dalam `<iframe>`",
     "`fetch()` di dalam isolat JavaScript belum ada: dokumen `http`/`https` \
