@@ -163,11 +163,18 @@ figure is the receipt that the gate passes in the environment that enforces it.
   test measures the process, so a cap violation would show up as a memory number
   rather than as a named failure.
 
-## CI re-measurement after the text commits: the gate is red
+## CI re-measurement after the text commits: the gate went red, then closed
+
+**Closed on 2026-11-13 by `2e3a1bf`.** The cause was a per-tab `LaporanLayout`
+retained in `TabPanas` and the fix is below ("Cause: measured" through "Result"),
+where CI job `budget` reads 62.9 MB. The rest of this section is the state as
+measured before that fix: it is kept because it is the red half of the
+discrimination proof, not because it still describes the tree.
 
 Measured by CI job `budget`, not by this laptop. The section above ends with the
-gate green at 70.0 MB in CI on `ae02432`. That is no longer true, and any record
-that still quotes 88.7-89.9 MB as "under the ceiling, enforced in CI" is stale.
+gate green at 70.0 MB in CI on `ae02432`. That was the state before the text
+commits, and any record that still quotes 88.7-89.9 MB as "under the ceiling,
+enforced in CI" is stale.
 
 | CI run | Commit | Budget job | PSS at 99 tabs | Baseline |
 |---|---|---|---|---|
@@ -206,29 +213,83 @@ text:
 - `bcff1ea` (16:56 WIB) `feat(engine): paint native text glyphs in the raster`
   adds glyph outlines and the painting path.
 
-### Cause: INFERRED, not measured
+### Cause: measured, and it was the retained layout
 
-The arithmetic points at the three per-node maps, not at the font. The budget
-workload is 1500 `div` of inline text per tab, 3005 nodes, 99 tabs, so those maps
-hold roughly 1500 text entries and 3000 computed-style entries per tab. At a few
-hundred bytes per entry across 99 tabs that is the 35 to 40 MB gap between the
-70.0 MB green run and the 105 to 110 MB red ones. The embedded font is 759 KB in
-the binary and cannot account for 40 MB on its own.
+The arithmetic pointed at the three per-node maps. The measurement says the maps
+cost a fraction of the gap, and the real owner was a different object: every hot
+tab carried a whole `LaporanLayout` that nothing in the production path read.
 
-That is arithmetic, not a measurement, and it is written as inferred on purpose.
-To turn it into evidence, in this order:
+Two numbers, both from tests that count allocation instead of PSS, so they are
+deterministic and do not move with host load:
 
-1. Run the budget test at `a23e77a` with the layout maps retained but text
-   painting disabled, and again with the maps dropped after layout completes, on
-   the same runner. The difference between the two numbers is the retention cost.
-2. Only then choose the fix: a cheaper representation (index a `Vec` by node slot
-   instead of hashing), dropping the maps once layout finishes, or lowering the
-   hot-tab cap.
+| What | Test | Bytes per tab | MB per tab |
+|---|---|---|---|
+| `LaporanLayout` alone | `crates/engine/tests/laporan_retensi.rs` | 577 930 | 0.551 |
+| DOM arena alone | `crates/engine/tests/dom_retensi.rs` | 677 614 | 0.646 |
 
-### What is not being done about it
+They are bounds on two different documents of the same 3005-node size, so they are
+not added together. `dom_retensi` builds 1500 short-text rows and its own layout
+comes to 205 194 B; `laporan_retensi` builds the budget workload the CI gate uses,
+and that layout is the 577 930 B above. The DOM arena is what a tab legitimately
+retains. The layout was the part with no reader.
 
-The ceiling stays at 100 MB. Lowering `tab_pool::PAGU_MB` to make the red go
-away, or raising it to 120 MB, would both turn the gate into a number that
-measures nothing, which is the failure mode the gate was written to prevent (see
-"The gate rejected its own first design"). The regression stays open until a
-measurement shows the daemon back under the ceiling.
+Inside the report, the split on the budget workload (1500 `div`, 3005 nodes) is
+`kotak` 98 304 B (3004 boxes), `gaya` 144 344 B (1504 entries), `terhitung`
+258 048 B (3007 entries), `teks` 77 234 B (1500 entries). So 25 hot tabs pinned
+13.8 MB of a value no reader asked for.
+
+Allocator fragmentation is ruled out rather than assumed away.
+`crates/browserd/tests/native_99_tabs_trim.rs` opens 99 tabs in process and then
+calls `malloc_trim(0)`:
+
+```
+awal 2.4 MB -> 99 tab 41.9 MB (+39.5) -> trim 41.6 MB (allocator mengembalikan 0.3 MB, trim=true)
+```
+
+0.3 MB comes back, so the rest is referenced data. That is what sent the search
+to the owner of the data instead of to malloc tuning.
+
+### The fix
+
+`crates/engine/src/native/tab_pool.rs` stopped storing a layout per tab
+(`2e3a1bf`). Layout is a pure function of `(document, viewport)`, and its only
+production reader is the paint layer, which recomputes it in
+`paint::lukis_dengan`. `TabPool::viewport` and `dengan_viewport` existed only to
+feed that stored copy, so they went with it.
+
+Nothing was loosened. `PAGU_MB` stays 100.0, the hot cap stays 25, and the gate
+still runs on the release profile in CI job `budget`.
+
+### Result: green in CI, with the number
+
+| CI run | Commit | Budget job | PSS at 99 tabs | Baseline |
+|---|---|---|---|---|
+| 43460811394 | `21901cc` (fix) | **pass** | **62.9 MB** | 9.3 MB |
+| 43447587347 | `62264bb` (same code as the red run) | pass | 95.9 MB | 9.2 MB |
+| 43415375465 | `c61cbd0` (pre-fix) | fail | 110.6 MB | 9.3 MB |
+
+The post-fix figure is 62.9 MB against a 100 MB ceiling: 37 MB of headroom.
+
+### One thing this section got wrong, recorded rather than hidden
+
+The paragraph above used to say "this is the gate doing its job, not a flake".
+Half of that was wrong. `62264bb` is a docs-only commit whose tree is identical
+to `c61cbd0` in every `.rs`, `.toml` and `.yml` file (verified with
+`git diff --name-only c61cbd0..62264bb`, which lists three `docs/prd` files and
+nothing else). The same code measured 110.6 MB and 95.9 MB on two different
+runners, so the pre-fix gate was flaky inside a ~15 MB band that straddled the
+ceiling. Four red runs in a row was a real regression, but the ceiling was being
+approached, not blown past by a stable margin.
+
+That matters for reading the fix: 62.9 MB sits 37 MB below the ceiling, outside
+that band, so the green is not a lucky draw from the same distribution the red
+runs came from. It is a different number because it is a different program.
+
+### What is still not proven
+
+- PSS with the hot tabs holding real remote pages instead of
+  `setDocumentContent` documents.
+- Whether the daemon returns memory after tabs are closed. `idle_reap_secs = 0`
+  in every run here on purpose.
+- Why 95.9 and 110.6 MB differed on identical code. Runner page cache and linker
+  layout are the candidates, and neither was measured.
