@@ -63,3 +63,45 @@ jobs:
       - name: Disk sesudah build
         if: always()
         run: df -h /
+
+  # Anggaran PSS daemon ditegakkan pada profil `release`, karena binary itulah
+  # yang dikirim ke pengguna dan hanya angka itulah yang dirasakan mesin.
+  #
+  # Percobaan pertama memakai profil antara (`inherits = "release"` dengan
+  # `lto = false`, `codegen-units = 16`) supaya build-nya ringan. Itu salah dan
+  # gate-nya sendiri yang membuktikannya: daemon profil antara itu terukur
+  # **109,3 MB** pada 99 tab, sementara binary release terukur 89,9 dan 89,3 MB.
+  # Tanpa LTO, ~20 MB hilang ke kode yang tidak di-inline. Gate yang mengukur
+  # binary yang tidak pernah dikirim cuma punya dua akhir: merah permanen, atau
+  # pagu dinaikkan sampai tidak berarti apa-apa.
+  #
+  # Job terpisah, bukan step di `gate`: profil release tidak berbagi artefak
+  # dengan profil dev, jadi build-nya dingin dan lama. Batas waktunya sendiri
+  # supaya gerbang cepat tetap cepat, dan supaya build dingin tidak pernah
+  # terbaca sebagai "gate timeout" yang menyamar jadi kegagalan kode.
+  budget:
+    name: budget (PSS daemon 99 tab, release)
+    runs-on: ubuntu-latest
+    needs: gate
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+
+      - name: Disk sebelum build
+        run: df -h /
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: test daemon budget
+        run: cargo test -p browserd --test native_daemon_budget --release --locked -- --nocapture
+
+      - name: Disk sesudah build
+        if: always()
+        run: df -h /
