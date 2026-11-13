@@ -21,7 +21,6 @@ use std::time::{Duration, Instant};
 use super::NativeError;
 use super::dom::Document;
 use super::js::{Isolat, PaguIsolat};
-use super::layout::{LaporanLayout, Viewport, hitung};
 
 /// Biaya PSS marginal satu tab hidup, dalam MB.
 ///
@@ -122,11 +121,19 @@ impl ColdStore for MemoryColdStore {
 }
 
 /// Satu tab yang sedang hidup di RAM.
+///
+/// **Tidak ada `LaporanLayout` di sini, dan itu disengaja.** Layout adalah
+/// fungsi murni dari `(dokumen, viewport)`: satu-satunya pembacanya di jalur
+/// produksi adalah lapisan lukis, dan lapisan itu menghitung ulang sendiri
+/// lewat `paint::lukis_dengan`. Menyimpannya berarti membayar 0,551 MB per tab
+/// pada beban budget untuk data yang tidak dibaca siapa pun: 13,8 MB di 25 tab
+/// panas, angka yang diukur di `crates/engine/tests/laporan_retensi.rs` dan
+/// yang menjelaskan sebagian regresi PSS di
+/// `docs/prd/BUKTI-PSS-DAEMON 131126-0323.md`.
 pub struct TabPanas {
     pub id: TabId,
     pub url: String,
     pub dokumen: Document,
-    pub layout: LaporanLayout,
     pub isolat: Isolat,
     pub terakhir_dipakai: Instant,
 }
@@ -160,7 +167,6 @@ pub struct TabPool<C: ColdStore> {
     dingin: C,
     maks_panas: usize,
     maks_total: usize,
-    viewport: Viewport,
     pagu_isolat: PaguIsolat,
     berikutnya: u64,
     pub jumlah_singkir: usize,
@@ -175,7 +181,6 @@ impl<C: ColdStore> TabPool<C> {
             dingin,
             maks_panas: tab_panas_maksimum(BASELINE_MB),
             maks_total,
-            viewport: Viewport::new(1280.0, 800.0),
             pagu_isolat: PaguIsolat::default(),
             berikutnya: 1,
             jumlah_singkir: 0,
@@ -185,12 +190,6 @@ impl<C: ColdStore> TabPool<C> {
     #[must_use]
     pub fn dengan_maks_panas(mut self, maks_panas: usize) -> Self {
         self.maks_panas = maks_panas;
-        self
-    }
-
-    #[must_use]
-    pub fn dengan_viewport(mut self, viewport: Viewport) -> Self {
-        self.viewport = viewport;
         self
     }
 
@@ -245,8 +244,8 @@ impl<C: ColdStore> TabPool<C> {
     }
 
     fn bangun(&self, id: TabId, url: &str, html: &str) -> Result<TabPanas, PoolError> {
+        // Layout sengaja tidak dihitung di sini: lihat catatan di `TabPanas`.
         let dokumen = Document::parse_html(html)?;
-        let layout = hitung(&dokumen, self.viewport)?;
         let isolat = Isolat::new(self.pagu_isolat)?;
         if let Some(judul) = dokumen.judul() {
             isolat.pasang_judul(&judul)?;
@@ -255,7 +254,6 @@ impl<C: ColdStore> TabPool<C> {
             id,
             url: url.to_string(),
             dokumen,
-            layout,
             isolat,
             terakhir_dipakai: Instant::now(),
         })
@@ -432,7 +430,10 @@ mod tests {
         assert_eq!(tab.dokumen.jumlah_node(), node_dingin);
         assert_eq!(tab.url, "https://a.test");
         assert_eq!(tab.dokumen.judul().as_deref(), Some("tab"));
-        assert!(!tab.layout.kotak.is_empty(), "layout dihitung ulang");
+        assert!(
+            !tab.dokumen.nodes().is_empty(),
+            "dokumen dipulihkan ke RAM, bukan cuma metadata"
+        );
     }
 
     #[test]
