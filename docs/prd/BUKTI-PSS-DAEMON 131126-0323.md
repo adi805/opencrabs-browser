@@ -162,3 +162,73 @@ figure is the receipt that the gate passes in the environment that enforces it.
 - The 25-hot-tab cap is asserted in the pool-only test, not in this one; this
   test measures the process, so a cap violation would show up as a memory number
   rather than as a named failure.
+
+## CI re-measurement after the text commits: the gate is red
+
+Measured by CI job `budget`, not by this laptop. The section above ends with the
+gate green at 70.0 MB in CI on `ae02432`. That is no longer true, and any record
+that still quotes 88.7-89.9 MB as "under the ceiling, enforced in CI" is stale.
+
+| CI run | Commit | Budget job | PSS at 99 tabs | Baseline |
+|---|---|---|---|---|
+| 43340680688 | `ae02432` | pass | 70.0 MB | 8.9 MB |
+| 43342364963 | `11ebfd6` | pass | not recorded here | n/a |
+| 43405324790 | `3614fcd` | **fail** | **107.7 MB** | 9.1 MB |
+| 43406098635 | `5e687cb` | **fail** | **106.3 MB** | 9.3 MB |
+| 43411910557 | `1e55054` | **fail** | **105.3 MB** | 9.1 MB |
+| 43415375465 | `c61cbd0` | **fail** | **110.6 MB** | 9.3 MB |
+
+This is the gate doing its job, not a flake: four consecutive commits, four
+different daemon pids, every reading between 105.3 and 110.6 MB against the same
+100 MB ceiling. The panic is at
+`crates/browserd/tests/native_daemon_budget.rs:417`:
+
+```
+PSS daemon 110.6 MB melewati pagu 100 MB: daemon pid 7350: PSS 110.6 MB (awal 9.3 MB) untuk 99 target, dokumen 3005 node, 99 tab dalam 1.4 detik, pagu 100 MB
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.61s
+```
+
+The laptop figure of 88.7-89.9 MB does not contradict these runs, because it was
+taken at 07:20-07:35 WIB and the first text commit is 11:49 WIB. Both figures are
+honest; only the claim that the current tree is under the ceiling is false.
+
+### What changed between the green run and the red ones
+
+`11ebfd6` (08:06 WIB) is the last commit whose CI was green. Two code commits
+land between it and the first red run, both in the native engine, both about
+text:
+
+- `a23e77a` (11:49 WIB) `feat(engine): measure native text and create layout
+  boxes` adds a 759 720-byte `DejaVuSans.ttf` to the binary, a text measurement
+  module, and three per-document maps in `crates/engine/src/native/layout.rs`:
+  `gaya` (`HashMap<NodeId, Vec<(String, String)>>`), `terhitung`
+  (`HashMap<NodeId, GayaTerhitung>`) and `teks` (`HashMap<NodeId, String>`).
+- `bcff1ea` (16:56 WIB) `feat(engine): paint native text glyphs in the raster`
+  adds glyph outlines and the painting path.
+
+### Cause: INFERRED, not measured
+
+The arithmetic points at the three per-node maps, not at the font. The budget
+workload is 1500 `div` of inline text per tab, 3005 nodes, 99 tabs, so those maps
+hold roughly 1500 text entries and 3000 computed-style entries per tab. At a few
+hundred bytes per entry across 99 tabs that is the 35 to 40 MB gap between the
+70.0 MB green run and the 105 to 110 MB red ones. The embedded font is 759 KB in
+the binary and cannot account for 40 MB on its own.
+
+That is arithmetic, not a measurement, and it is written as inferred on purpose.
+To turn it into evidence, in this order:
+
+1. Run the budget test at `a23e77a` with the layout maps retained but text
+   painting disabled, and again with the maps dropped after layout completes, on
+   the same runner. The difference between the two numbers is the retention cost.
+2. Only then choose the fix: a cheaper representation (index a `Vec` by node slot
+   instead of hashing), dropping the maps once layout finishes, or lowering the
+   hot-tab cap.
+
+### What is not being done about it
+
+The ceiling stays at 100 MB. Lowering `tab_pool::PAGU_MB` to make the red go
+away, or raising it to 120 MB, would both turn the gate into a number that
+measures nothing, which is the failure mode the gate was written to prevent (see
+"The gate rejected its own first design"). The regression stays open until a
+measurement shows the daemon back under the ceiling.
