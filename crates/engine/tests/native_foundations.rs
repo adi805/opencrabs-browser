@@ -122,10 +122,14 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // dari face yang ditanam dan node teks menghasilkan kotak layout
     // (diuji di `native::layout`); yang menggantikannya adalah batas yang
     // lebih sempit: satu face, tanpa webfont, tanpa shaping.
+    // "raster tidak melukis teks" juga dicabut setelah `native::paint`
+    // melukis glyph dari outline TrueType; yang tersisa adalah batas yang
+    // lebih sempit: tanpa gambar/gradien/border, tanpa tebal sintetis,
+    // `justify` masih rata kiri, dan tidak ada pemotongan ke kotak.
     // Yang tersisa di daftar adalah celah yang masih benar-benar terbuka.
     for wajib in [
         "pengukuran teks hanya satu face",
-        "raster hanya melukis",
+        "raster melukis latar kotak dan glyph teks",
         "`fetch()` di dalam isolat",
         "peristiwa CDP",
     ] {
@@ -144,6 +148,13 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("rasterisasi bitmap"),
         "rasterisasi sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
+    );
+    // Kalimat lama "teks ... tidak dilukis" sudah tidak benar: glyph dilukis
+    // dari outline face yang ditanam. Kalau kalimat itu kembali, pembaca
+    // mengira halaman teks masih menghasilkan kanvas kosong.
+    assert!(
+        !semua.contains("kanvas kosong"),
+        "teks sudah dilukis, jangan kembalikan kalimat lamanya: {semua}"
     );
     assert!(
         !semua.contains("pengambilan dokumen dari jaringan"),

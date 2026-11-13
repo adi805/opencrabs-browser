@@ -65,6 +65,12 @@ pub struct LaporanLayout {
     /// Lapisan lukis dan pengukur teks membaca angka dari sini supaya tidak
     /// menghitung ulang dan berbeda pendapat dengan layout.
     pub terhitung: HashMap<NodeId, GayaTerhitung>,
+    /// Teks node setelah perataan spasi, persis seperti yang diukur layout.
+    /// Lapisan lukis membungkusnya dengan `teks::bungkus` pada lebar kotaknya,
+    /// jadi yang dilukis adalah teks yang sama yang menghasilkan kotak itu.
+    pub teks: HashMap<NodeId, String>,
+    /// Node teks yang dinyatakan tidak terlihat oleh gaya warisan.
+    pub teks_tersembunyi: std::collections::HashSet<NodeId>,
     /// Hal yang sengaja tidak dijalankan oleh kaskade: at-rule dan
     /// `<link rel=stylesheet>`.
     pub catatan_kaskade: Vec<String>,
@@ -187,24 +193,27 @@ pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, Nativ
         return Ok(laporan);
     }
 
-    let akar = if anak_teratas.len() == 1 {
-        anak_teratas[0]
-    } else {
-        let gaya = Style {
-            display: Display::Flex,
-            flex_direction: FlexDirection::Column,
-            size: Size {
-                width: Dimension::percent(1.0),
-                height: Dimension::auto(),
-            },
-            ..Default::default()
-        };
-        let wadah = taffy.new_leaf(gaya).map_err(NativeError::layout)?;
-        for anak in anak_teratas {
-            taffy.add_child(wadah, anak).map_err(NativeError::layout)?;
-        }
-        wadah
+    // Akar SELALU dibungkus wadah selebar viewport, termasuk saat dokumen
+    // cuma punya satu elemen teratas. Tanpa wadah, `taffy` tidak memberi akar
+    // berlebar `auto` ukuran penuh ruang yang tersedia, jadi `<html>` (dan
+    // semua blok di bawahnya) menyusut selebar isinya. Akibatnya `text-align`
+    // tidak punya ruang untuk menggeser apa pun: rata kiri, tengah, dan kanan
+    // menghasilkan raster yang identik. Di browser, blok `width: auto`
+    // mengisi containing block, dan wadah ini yang menjadi containing block
+    // itu.
+    let gaya_wadah = Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        size: Size {
+            width: Dimension::percent(1.0),
+            height: Dimension::auto(),
+        },
+        ..Default::default()
     };
+    let akar = taffy.new_leaf(gaya_wadah).map_err(NativeError::layout)?;
+    for anak in anak_teratas {
+        taffy.add_child(akar, anak).map_err(NativeError::layout)?;
+    }
 
     // Daun tanpa konteks (elemen kosong) tetap diukur seperti sebelumnya:
     // nol, kecuali gayanya menentukan ukuran. Hanya daun teks yang punya
@@ -264,14 +273,20 @@ fn tempatkan(
         // perataan spasi tidak menghasilkan kotak sama sekali, supaya
         // indentasi HTML tidak menambah tinggi halaman.
         let gaya = pohon.gaya(id).cloned().unwrap_or_default();
+        if !gaya.terlihat {
+            laporan.teks_tersembunyi.insert(id);
+            return Ok(None);
+        }
+        let rapi = super::teks::rapikan(isi);
         let konteks = KonteksTeks {
-            teks: super::teks::rapikan(isi),
+            teks: rapi.clone(),
             ukuran_font: gaya.ukuran_font,
             tinggi_baris: gaya.tinggi_baris,
         };
         if konteks.teks.is_empty() {
             return Ok(None);
         }
+        laporan.teks.insert(id, rapi);
         let daun = taffy
             .new_leaf_with_context(taffy_style_teks(), konteks)
             .map_err(NativeError::layout)?;
@@ -673,6 +688,10 @@ mod tests {
         // font-size 32px harus membuat teks dua kali lebih lebar dan lebih
         // tinggi daripada 16px. Kalau layout membaca gaya teks sendiri dan
         // bukan warisan induk, angka ini akan sama.
+        //
+        // Yang diukur lebar ISI teksnya, bukan lebar kotak: kotak daun teks
+        // melebar selebar containing block (sama seperti blok di browser),
+        // jadi lebarnya tidak lagi mencerminkan lebar tulisannya.
         let kecil = doc("<html><body><p id=\"p\">Halo dunia</p></body></html>");
         let besar =
             doc("<html><body><p id=\"p\" style=\"font-size:32px\">Halo dunia</p></body></html>");
@@ -680,14 +699,19 @@ mod tests {
         let l2 = hitung(&besar, Viewport::new(800.0, 600.0)).unwrap();
         let teks1 = teks_dari(&kecil, "p");
         let teks2 = teks_dari(&besar, "p");
+        let g1 = l1.gaya_terhitung(teks1).unwrap();
+        let g2 = l2.gaya_terhitung(teks2).unwrap();
+        assert_eq!(g1.ukuran_font, 16.0, "ukuran font awal 16px");
+        assert_eq!(g2.ukuran_font, 32.0, "font-size induk harus diwarisi teks");
+        let isi = l1.teks.get(&teks1).expect("teks p harus tercatat");
+        let w1 = crate::native::teks::lebar(isi, g1.ukuran_font);
+        let w2 = crate::native::teks::lebar(isi, g2.ukuran_font);
+        assert!(
+            w2 > w1 * 1.8,
+            "32px harus hampir dua kali 16px: {w2} vs {w1}"
+        );
         let k1 = l1.kotak_untuk(teks1).unwrap();
         let k2 = l2.kotak_untuk(teks2).unwrap();
-        assert!(
-            k2.width > k1.width * 1.8,
-            "32px harus hampir dua kali 16px: {} vs {}",
-            k2.width,
-            k1.width
-        );
         assert!(k2.height > k1.height, "baris 32px lebih tinggi");
     }
 

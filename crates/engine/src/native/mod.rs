@@ -61,9 +61,14 @@ pub const CELAH: &[&str] = &[
      `.notdef`), dan tidak ada shaping/kerning/ligatur, jadi teks Arab, \
      Devanagari, atau emoji diukur bukan selebar bentuk aslinya",
     "peristiwa DOM (klik, input, fokus) belum ada; itu tugas lapisan hands",
-    "raster hanya melukis latar kotak dari atribut `style` inline; teks, gambar, \
-     gradien, bayangan, garis (`border`), dan `border-radius` tidak dilukis, jadi \
-     halaman yang isinya teks saja menghasilkan kanvas kosong",
+    "raster melukis latar kotak dan glyph teks, tapi belum melukis gambar, \
+     gradien, bayangan, garis (`border`), maupun `border-radius`. Teks dilukis \
+     dengan face yang sama seperti pengukuran, jadi tidak ada tebal sintetis: \
+     `font-weight` tidak mengubah bentuk glyph, hanya `font-size` dan warna \
+     yang berpengaruh. `text-align: justify` diperlakukan seperti rata kiri \
+     karena peregangan spasi belum ada, dan glyph tidak dipotong ke kotaknya \
+     (`overflow` belum ada), jadi baris yang lebih lebar dari kotak tetap \
+     tergambar penuh",
     "`Page.captureScreenshot` hanya PNG pada skala 1 dengan viewport bawaan \
      800x600: `captureBeyondViewport`, `optimizeForSpeed`, `fromSurface`, dan \
      `clip.scale` tidak didukung, dan JPEG ditolak alih-alih dikirim sebagai PNG",

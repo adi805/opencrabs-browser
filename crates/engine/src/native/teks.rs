@@ -40,6 +40,47 @@ pub fn tersedia() -> bool {
     metrik().is_some()
 }
 
+/// Face yang dipakai mesin, untuk lapisan lukis yang butuh outline glyph.
+///
+/// Yang dikembalikan adalah face yang **sama** dengan yang dipakai mengukur,
+/// jadi lebar yang dihitung layout dan glyph yang dilukis tidak bisa berbeda
+/// pendapat. `None` berarti berkas yang ditanam rusak, dan itu kesalahan
+/// build, bukan input pengguna.
+#[must_use]
+pub fn face() -> Option<&'static ttf_parser::Face<'static>> {
+    metrik()
+}
+
+/// Skala dari unit font ke piksel untuk satu `font-size`.
+///
+/// Dipakai lapisan lukis supaya outline glyph dan lebar hasil ukur memakai
+/// pembagi `units_per_em` yang sama.
+#[must_use]
+pub fn skala(ukuran_font: f32) -> f32 {
+    metrik().map_or(0.0, |f| ukuran_font / f32::from(f.units_per_em()))
+}
+
+/// Jarak dari tepi atas baris ke garis dasar (baseline), dalam piksel.
+///
+/// Dipakai lapisan lukis untuk menempatkan glyph di dalam kotak teks: baseline
+/// ada `ascender` di bawah tepi atas kotak, karena kotak setinggi satu baris
+/// penuh (`ascender - descender + line_gap`).
+#[must_use]
+pub fn jarak_baseline(ukuran_font: f32) -> f32 {
+    metrik().map_or(0.0, |f| {
+        f32::from(f.ascender()) / f32::from(f.units_per_em()) * ukuran_font
+    })
+}
+
+/// Lebar satu karakter pada ukuran font tertentu, termasuk fallback `.notdef`.
+///
+/// Lapisan lukis memakainya untuk memajukan pena antar glyph, sehingga posisi
+/// glyph sama dengan posisi yang dipakai [`lebar`] saat mengukur.
+#[must_use]
+pub fn lebar_karakter(c: char, ukuran_font: f32) -> f32 {
+    metrik().map_or(0.0, |face| lebar_char(face, c, skala(ukuran_font)))
+}
+
 /// `units_per_em` face yang ditanam. Dipakai tes untuk mengunci identitas font.
 #[must_use]
 pub fn units_per_em() -> Option<u16> {
