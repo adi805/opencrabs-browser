@@ -781,9 +781,266 @@ fn escape_atribut(nilai: &str, out: &mut String) {
     }
 }
 
+/// Posisi sisip untuk [`Document::sisip_html`], mengikuti nama
+/// `insertAdjacentHTML` di DOM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PosisiSisip {
+    /// Sebelum elemen itu sendiri, sebagai saudara.
+    Sebelum,
+    /// Sebagai anak pertama.
+    Awal,
+    /// Sebagai anak terakhir.
+    Akhir,
+    /// Sesudah elemen itu sendiri, sebagai saudara.
+    Sesudah,
+}
+
+/// Mengurai HTML sebagai **fragmen**, bukan dokumen.
+///
+/// `parse_html` membungkus input dengan `html`/`head`/`body`, dan itu benar
+/// untuk dokumen utuh tapi salah untuk `innerHTML`: menempelkan hasilnya ke
+/// sebuah `<div>` akan menyisipkan `<body>` di dalam `<div>`. Fragmen diurai
+/// dengan elemen konteks yang sama jenisnya dengan wadahnya, jadi
+/// `<tr>` di dalam `<tbody>` tetap menjadi baris, bukan teks.
+fn urai_fragmen(html: &str, konteks: &str) -> Result<Vec<Node>, NativeError> {
+    use html5ever::{QualName, local_name, ns, parse_fragment};
+
+    let nama = match konteks {
+        "table" => local_name!("table"),
+        "tbody" | "thead" | "tfoot" => local_name!("tbody"),
+        "tr" => local_name!("tr"),
+        "select" => local_name!("select"),
+        "template" => local_name!("template"),
+        _ => local_name!("div"),
+    };
+    let dom = parse_fragment(
+        RcDom::default(),
+        Default::default(),
+        QualName::new(None, ns!(html), nama),
+        Vec::new(),
+        true,
+    )
+    .one(html);
+
+    // Fragmen tidak punya node dokumen sendiri, dan parser tetap membungkus
+    // hasilnya dengan satu elemen akar (`html` kalau konteksnya elemen biasa).
+    // Yang dipakai adalah anak-anak akar itu, sementara akar buatan parser
+    // dibuang: kalau tidak, `<div>` lahir di dalam `<div>` dan hasil `innerHTML`
+    // memuat `<html></html>` yang tidak pernah ditulis halaman.
+    //
+    // Nomor 0 disediakan sebagai induk semu. Kontraknya dipakai
+    // `Document::tempel_fragmen`, yang membaca `nodes[0].children` sebagai anak
+    // tingkat atas fragmen.
+    let mut nodes = vec![Node {
+        kind: NodeKind::Document,
+        attrs: Vec::new(),
+        parent: None,
+        children: Vec::new(),
+        bayang: None,
+        bingkai: None,
+    }];
+    let induk = 0;
+    for akar in dom.document.children.borrow().iter() {
+        for anak in akar.children.borrow().iter() {
+            if let Some(id) = bangun(anak, &mut nodes, induk) {
+                nodes[induk].children.push(id);
+            }
+        }
+    }
+    Ok(nodes)
+}
+
+/// Operasi HTML-fragmen dan klon, yaitu bagian `innerHTML` setter,
+/// `insertAdjacentHTML`, `cloneNode`, dan `replaceChildren` yang butuh arena.
+impl Document {
+    /// Menyalin fragmen hasil [`urai_fragmen`] ke arena ini dan menggantungkan
+    /// salinannya di bawah `id`.
+    ///
+    /// Nomor node hasil urai milik arena sementara, jadi harus digeser seperti
+    /// [`Self::pasang_bingkai`]. Salinan, bukan pindah: arena sementara dibuang
+    /// setelah ini.
+    fn tempel_fragmen(&mut self, induk: NodeId, fragmen: Vec<Node>) -> Result<(), NativeError> {
+        let geser = self.nodes.len();
+        for (i, mut node) in fragmen.into_iter().enumerate() {
+            node.parent = if i == 0 {
+                None
+            } else {
+                node.parent.map(|p| p + geser)
+            };
+            node.children = node.children.iter().map(|&c| c + geser).collect();
+            self.nodes.push(node);
+        }
+        // Anak tingkat atas fragmen adalah 0..jumlah_anak, karena `urai_fragmen`
+        // selalu memakai nomor 0 sebagai induk semunya.
+        let akar = geser;
+        let jumlah = self.nodes[akar].children.clone();
+        self.nodes[akar].children.clear();
+        for anak in jumlah {
+            self.nodes[anak].parent = Some(induk);
+            self.nodes[induk].children.push(anak);
+        }
+        Ok(())
+    }
+
+    /// `innerHTML` setter: membuang seluruh anak `id`, lalu mengisi dengan
+    /// fragmen hasil urai.
+    ///
+    /// Anak lama dilepas, bukan dihapus dari arena: nomor node yang masih
+    /// dipegang skrip halaman tidak boleh bergeser, dan node lepas memang cara
+    /// [`Self::lepas`] bekerja.
+    pub fn ganti_dalam_html(&mut self, id: NodeId, html: &str) -> Result<(), NativeError> {
+        let tag = match self.nodes.get(id) {
+            None => return Err(NativeError::dom(format!("node {id} tidak ada"))),
+            Some(n) => match &n.kind {
+                NodeKind::Element(t) => t.clone(),
+                NodeKind::ShadowRoot { .. } => "div".to_owned(),
+                _ => {
+                    return Err(NativeError::dom(format!("node {id} tidak bisa diisi HTML")));
+                }
+            },
+        };
+        let fragmen = urai_fragmen(html, &tag)?;
+        for anak in std::mem::take(&mut self.nodes[id].children) {
+            self.nodes[anak].parent = None;
+        }
+        self.tempel_fragmen(id, fragmen)
+    }
+
+    /// `insertAdjacentHTML`: menyisipkan fragmen di salah satu empat posisi.
+    pub fn sisip_html(
+        &mut self,
+        id: NodeId,
+        posisi: PosisiSisip,
+        html: &str,
+    ) -> Result<(), NativeError> {
+        let Some(node) = self.nodes.get(id) else {
+            return Err(NativeError::dom(format!("node {id} tidak ada")));
+        };
+        let tag = match &node.kind {
+            NodeKind::Element(t) => t.clone(),
+            _ => "div".to_owned(),
+        };
+        let fragmen = urai_fragmen(html, &tag)?;
+        match posisi {
+            PosisiSisip::Awal | PosisiSisip::Akhir => {
+                let sebelum = if posisi == PosisiSisip::Awal {
+                    self.nodes[id].children.first().copied()
+                } else {
+                    None
+                };
+                let jumlah_lama = self.nodes[id].children.len();
+                self.tempel_fragmen(id, fragmen)?;
+                // `tempel_fragmen` menambahkan di belakang; untuk `awal` blok
+                // baru harus dipindah ke depan anak lama.
+                if let Some(acuan) = sebelum {
+                    let baru: Vec<NodeId> = self.nodes[id].children[jumlah_lama..].to_vec();
+                    self.nodes[id].children.drain(jumlah_lama..);
+                    let pos = self.nodes[id]
+                        .children
+                        .iter()
+                        .position(|&c| c == acuan)
+                        .unwrap_or(0);
+                    for (i, anak) in baru.into_iter().enumerate() {
+                        self.nodes[id].children.insert(pos + i, anak);
+                    }
+                }
+                Ok(())
+            }
+            PosisiSisip::Sebelum | PosisiSisip::Sesudah => {
+                let induk = self.nodes[id].parent.ok_or_else(|| {
+                    NativeError::dom(format!("node {id} tidak punya induk untuk disisipi"))
+                })?;
+                let acuan = if posisi == PosisiSisip::Sebelum {
+                    Some(id)
+                } else {
+                    self.nodes[induk]
+                        .children
+                        .iter()
+                        .position(|&c| c == id)
+                        .and_then(|p| self.nodes[induk].children.get(p + 1).copied())
+                };
+                let jumlah_lama = self.nodes[induk].children.len();
+                self.tempel_fragmen(induk, fragmen)?;
+                let baru: Vec<NodeId> = self.nodes[induk].children[jumlah_lama..].to_vec();
+                self.nodes[induk].children.drain(jumlah_lama..);
+                let pos = match acuan {
+                    Some(a) => self.nodes[induk]
+                        .children
+                        .iter()
+                        .position(|&c| c == a)
+                        .unwrap_or(self.nodes[induk].children.len()),
+                    None => self.nodes[induk].children.len(),
+                };
+                for (i, anak) in baru.into_iter().enumerate() {
+                    self.nodes[induk].children.insert(pos + i, anak);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `cloneNode(dalam)`: menyalin satu simpul ke arena yang sama.
+    ///
+    /// Salinan punya nomor baru dan **tidak** ikut tergantung di induk mana
+    /// pun, sama seperti DOM: yang menempelkan adalah `appendChild`. Shadow
+    /// root dan dokumen `<iframe>` tidak ikut tersalin, karena keduanya pohon
+    /// terpisah dan klon yang membawa keduanya akan menggandakan pemiliknya.
+    pub fn klon(&mut self, id: NodeId, dalam: bool) -> Result<NodeId, NativeError> {
+        let Some(node) = self.nodes.get(id) else {
+            return Err(NativeError::dom(format!("node {id} tidak ada")));
+        };
+        if id == self.root {
+            return Err(NativeError::dom("akar dokumen tidak bisa diklon"));
+        }
+        let kind = node.kind.clone();
+        let attrs = node.attrs.clone();
+        let baru = self.nodes.len();
+        self.nodes.push(Node {
+            kind,
+            attrs,
+            parent: None,
+            children: Vec::new(),
+            bayang: None,
+            bingkai: None,
+        });
+        if dalam {
+            let anak_anak: Vec<NodeId> = self.nodes[id].children.clone();
+            for anak in anak_anak {
+                let salinan = self.klon(anak, true)?;
+                self.nodes[salinan].parent = Some(baru);
+                self.nodes[baru].children.push(salinan);
+            }
+        }
+        Ok(baru)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fragmen_tidak_membawa_akar_buatan_parser() {
+        // Parser membungkus fragmen dengan `<html>`; akar itu harus dibuang,
+        // bukan ditempel ke dirinya sendiri. Sebelum diperbaiki, hasilnya memuat
+        // `<html></html>` dan pohonnya punya siklus (node 0 jadi anak dirinya).
+        let fragmen = urai_fragmen("<b>baru</b> teks", "div").unwrap();
+        let akar = &fragmen[0];
+        assert_eq!(
+            akar.children.len(),
+            2,
+            "dua anak tingkat atas: <b> dan teks"
+        );
+        let tag: Vec<&str> = fragmen.iter().filter_map(|n| n.tag()).collect();
+        assert_eq!(tag, ["b"], "akar buatan parser tidak boleh ikut");
+        // Siklus: setiap node hanya boleh menunjuk anak yang nomornya lebih besar
+        // dari dirinya, karena arena dibangun dengan nomor naik.
+        for (i, node) in fragmen.iter().enumerate() {
+            for &c in &node.children {
+                assert!(c > i, "node {i} menunjuk anak {c}: pohon bersiklus");
+            }
+        }
+    }
 
     #[test]
     fn mengurai_html_dan_menghitung_node() {

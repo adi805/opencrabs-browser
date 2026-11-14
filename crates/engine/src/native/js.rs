@@ -325,10 +325,9 @@ globalThis.navigator = {
 /// sebelum `document` dipasang, sehingga tidak ada global tambahan yang bisa
 /// dipakai skrip halaman untuk menyidik mesin ini.
 ///
-/// Batas yang masih ada dan **tidak** disembunyikan: tidak ada `innerHTML`
-/// setter, tidak ada `style`/`classList`, tidak ada `dataset`, tidak ada
-/// `insertAdjacentHTML`, dan `querySelectorAll` mengembalikan `Array` biasa
-/// alih-alih `NodeList`. Semuanya tercatat di [`super::CELAH`].
+/// Batas yang **tidak** disembunyikan: `querySelectorAll` mengembalikan `Array`
+/// biasa alih-alih `NodeList` hidup, tidak ada `document.write`, dan tidak ada
+/// `style`/CSSOM yang bisa ditulis. Semuanya tercatat di [`super::CELAH`].
 /// Nama global tempat dispatcher peristiwa dipasang. Non-enumerable supaya
 /// tidak muncul di `Object.keys(globalThis)`; lihat komentar di akhir
 /// [`JEMBATAN_DOM`] untuk alasan ia tidak dihapus seperti `__dom`.
@@ -489,12 +488,202 @@ const JEMBATAN_DOM: &str = r##"
       get: function () { return panggil("text", idDari(this)); },
       set: function (v) { panggil("setText", idDari(this), v); },
     },
-    // Getter saja. Setter `innerHTML` berarti mengurai HTML lalu mengganti
-    // seluruh anak, dan itu belum ada; CELAH menyebutnya.
+    // Setter `innerHTML` mengurai fragmen lalu mengganti seluruh anak. Uraiannya
+    // di Rust (`Document::ganti_dalam_html`), karena parser HTML5 ada di sana
+    // dan menyalinnya ke JavaScript berarti dua parser yang bisa menyimpang.
     innerHTML: {
       get: function () { return panggil("html", idDari(this)); },
+      set: function (v) { panggil("setHtml", idDari(this), v); },
+    },
+    // `outerHTML` getter. Setter-nya di DOM berarti mengganti simpul itu
+    // sendiri di induknya dengan hasil uraian; itu belum ada dan disebut di
+    // CELAH, bukan diam-diam diabaikan.
+    outerHTML: {
+      get: function () { return panggil("outer", idDari(this)); },
     },
   });
+
+  // --- classList, dataset, dan saudara ------------------------------------
+  //
+  // Semuanya bekerja di atas atribut yang sudah ada (`attr`/`setAttr`/
+  // `delAttr`), jadi tidak ada state kedua yang bisa menyimpang dari pohon.
+  // `classList` sengaja objek baru tiap akses: DOM sungguhan mengembalikan
+  // `DOMTokenList` hidup yang sama, tapi satu-satunya hal yang dibaca skrip
+  // darinya adalah isinya, dan isi itu selalu dibaca ulang dari atribut.
+  function daftarKelas(el) {
+    var mentah = panggil("attr", idDari(el), "class");
+    if (mentah === null || mentah === undefined) return [];
+    var bagian = String(mentah).split(/\s+/);
+    var hasil = [];
+    for (var i = 0; i < bagian.length; i++) {
+      if (bagian[i]) hasil.push(bagian[i]);
+    }
+    return hasil;
+  }
+
+  function tulisKelas(el, daftar) {
+    var unik = [];
+    for (var i = 0; i < daftar.length; i++) {
+      if (unik.indexOf(daftar[i]) < 0) unik.push(daftar[i]);
+    }
+    if (unik.length) panggil("setAttr", idDari(el), "class", unik.join(" "));
+    else panggil("delAttr", idDari(el), "class");
+  }
+
+  function Kelas(el) {
+    this.__el = el;
+  }
+  Object.defineProperties(Kelas.prototype, {
+    length: { get: function () { return daftarKelas(this.__el).length; } },
+    value: { get: function () { return daftarKelas(this.__el).join(" "); } },
+  });
+  Kelas.prototype.item = function (i) { return daftarKelas(this.__el)[i] || null; };
+  Kelas.prototype.contains = function (n) {
+    return daftarKelas(this.__el).indexOf(String(n)) >= 0;
+  };
+  Kelas.prototype.add = function () {
+    var d = daftarKelas(this.__el);
+    for (var i = 0; i < arguments.length; i++) {
+      var n = String(arguments[i]);
+      if (n && d.indexOf(n) < 0) d.push(n);
+    }
+    tulisKelas(this.__el, d);
+  };
+  Kelas.prototype.remove = function () {
+    var buang = Array.prototype.map.call(arguments, String);
+    var d = daftarKelas(this.__el).filter(function (n) { return buang.indexOf(n) < 0; });
+    tulisKelas(this.__el, d);
+  };
+  Kelas.prototype.toggle = function (n, paksa) {
+    var nama = String(n);
+    var ada = daftarKelas(this.__el).indexOf(nama) >= 0;
+    var harus_ada = paksa === undefined ? !ada : !!paksa;
+    if (harus_ada && !ada) this.add(nama);
+    if (!harus_ada && ada) this.remove(nama);
+    return harus_ada;
+  };
+  Kelas.prototype.replace = function (lama, baru) {
+    var d = daftarKelas(this.__el);
+    var i = d.indexOf(String(lama));
+    if (i < 0) return false;
+    d[i] = String(baru);
+    tulisKelas(this.__el, d);
+    return true;
+  };
+  Kelas.prototype.forEach = function (fn, ini) {
+    var d = daftarKelas(this.__el);
+    for (var i = 0; i < d.length; i++) fn.call(ini, d[i], i, this);
+  };
+  Kelas.prototype.toString = function () { return daftarKelas(this.__el).join(" "); };
+
+  Object.defineProperty(SimpulElemen.prototype, "classList", {
+    get: function () { return new Kelas(this); },
+  });
+
+  // `dataset` memakai Proxy karena namanya sembarang: `data-ubah-nama` dibaca
+  // sebagai `.ubahNama`. Pemetaan camelCase <-> tanda hubung ada di sini, dan
+  // nilainya tetap di atribut, jadi tidak ada salinan yang bisa basi.
+  //
+  // Batas yang jujur: `Object.keys(el.dataset)` kosong karena tidak ada operasi
+  // jembatan yang mendaftar atribut, dan itu disebut di CELAH.
+  function namaData(kunci) {
+    return "data-" + String(kunci).replace(/[A-Z]/g, function (c) {
+      return "-" + c.toLowerCase();
+    });
+  }
+
+  function datasetDari(el) {
+    return new Proxy({}, {
+      get: function (_t, kunci) {
+        if (typeof kunci !== "string") return undefined;
+        var v = panggil("attr", idDari(el), namaData(kunci));
+        return v === null ? undefined : v;
+      },
+      set: function (_t, kunci, nilai) {
+        panggil("setAttr", idDari(el), namaData(kunci), String(nilai));
+        return true;
+      },
+      deleteProperty: function (_t, kunci) {
+        panggil("delAttr", idDari(el), namaData(kunci));
+        return true;
+      },
+      has: function (_t, kunci) {
+        if (typeof kunci !== "string") return false;
+        return panggil("attr", idDari(el), namaData(kunci)) !== null;
+      },
+    });
+  }
+
+  Object.defineProperty(SimpulElemen.prototype, "dataset", {
+    get: function () { return datasetDari(this); },
+  });
+
+  // Anak elemen dari sebuah **nomor** node, bukan objek. Dipakai pencarian
+  // saudara, yang sudah memegang nomor induk dan tidak perlu membungkusnya.
+  function anakElemenDari(id) {
+    var anak = panggil("children", id) || [];
+    var hasil = [];
+    for (var i = 0; i < anak.length; i++) {
+      if (panggil("nodeType", anak[i]) === 1) hasil.push(anak[i]);
+    }
+    return hasil;
+  }
+
+  function saudara(el, arah) {
+    var induk = panggil("parent", idDari(el));
+    if (induk < 0) return null;
+    var anak = anakElemenDari(induk);
+    var sendiri = idDari(el);
+    for (var i = 0; i < anak.length; i++) {
+      if (anak[i] === sendiri) {
+        var j = i + arah;
+        return j >= 0 && j < anak.length ? bungkus(anak[j]) : null;
+      }
+    }
+    return null;
+  }
+
+  Object.defineProperties(SimpulElemen.prototype, {
+    nextElementSibling: { get: function () { return saudara(this, 1); } },
+    previousElementSibling: { get: function () { return saudara(this, -1); } },
+    // `ownerDocument` selalu dokumen yang memuat isolat ini: satu tab satu
+    // dokumen, jadi tidak ada dokumen lain yang bisa jadi pemilik.
+    ownerDocument: { get: function () { return dokumen; } },
+    isConnected: { get: function () { return panggil("connected", idDari(this)); } },
+  });
+
+  SimpulElemen.prototype.matches = function (s) {
+    return panggil("matches", idDari(this), String(s));
+  };
+  // `closest` naik lewat `parent`, bukan lewat `parentNode` yang membungkus:
+  // jalur itu tidak membuat objek baru untuk leluhur yang tidak dipakai.
+  SimpulElemen.prototype.closest = function (s) {
+    var selektor = String(s);
+    var kini = idDari(this);
+    while (kini >= 0) {
+      if (panggil("matches", kini, selektor)) return objekDari(kini);
+      kini = panggil("parent", kini);
+    }
+    return null;
+  };
+
+  SimpulElemen.prototype.insertAdjacentHTML = function (posisi, html) {
+    panggil("insertHtml", idDari(this), String(posisi), String(html));
+  };
+
+  SimpulElemen.prototype.cloneNode = function (dalam) {
+    return bungkus(panggil("clone", idDari(this), dalam ? "1" : "0"));
+  };
+
+  SimpulElemen.prototype.replaceChildren = function () {
+    var anak = (panggil("children", idDari(this)) || []).slice();
+    for (var i = 0; i < anak.length; i++) panggil("remove", anak[i]);
+    for (var j = 0; j < arguments.length; j++) {
+      var baru = arguments[j];
+      if (baru === null || baru === undefined) continue;
+      panggil("append", idDari(this), idDari(baru));
+    }
+  };
 
   SimpulElemen.prototype.getElementsByTagName = function (tag) {
     return (panggil("tagAll", idDari(this), String(tag)) || []).map(bungkus);
@@ -1138,6 +1327,9 @@ fn op_dom(
             | "remove"
             | "setTitle"
             | "attachShadow"
+            | "setHtml"
+            | "insertHtml"
+            | "clone"
     ) && let Some(halaman) = halaman
     {
         halaman.naikkan_versi();
@@ -1392,6 +1584,52 @@ fn op_dom(
             dok.dalam_html(id)
                 .map(|isi| json!(isi))
                 .ok_or_else(|| format!("node {id} tidak ada"))
+        }
+        "outer" => {
+            let id = nomor(a)?;
+            let dok = kunci(dokumen);
+            dok.luar_html(id)
+                .map(|isi| json!(isi))
+                .ok_or_else(|| format!("node {id} bukan elemen"))
+        }
+        "setHtml" => {
+            let id = nomor(a)?;
+            kunci(dokumen)
+                .ganti_dalam_html(id, b)
+                .map_err(|e| e.to_string())?;
+            Ok(json!(null))
+        }
+        "insertHtml" => {
+            let id = nomor(a)?;
+            let posisi = match b {
+                "beforebegin" => super::dom::PosisiSisip::Sebelum,
+                "afterbegin" => super::dom::PosisiSisip::Awal,
+                "beforeend" => super::dom::PosisiSisip::Akhir,
+                "afterend" => super::dom::PosisiSisip::Sesudah,
+                lain => return Err(format!("posisi sisip tidak dikenal: {lain:?}")),
+            };
+            kunci(dokumen)
+                .sisip_html(id, posisi, c)
+                .map_err(|e| e.to_string())?;
+            Ok(json!(null))
+        }
+        "clone" => {
+            let id = nomor(a)?;
+            let dalam = b == "1";
+            let baru = kunci(dokumen).klon(id, dalam).map_err(|e| e.to_string())?;
+            Ok(json!(baru))
+        }
+        "matches" => {
+            let id = nomor(a)?;
+            let dok = kunci(dokumen);
+            dok.cocok(id, b)
+                .map(|ya| json!(ya))
+                .map_err(|e| e.to_string())
+        }
+        "connected" => {
+            let id = nomor(a)?;
+            let dok = kunci(dokumen);
+            Ok(json!(dok.terpasang(id)))
         }
         "tagAll" => {
             let id = nomor(a)?;
@@ -3105,6 +3343,257 @@ mod tests {
         assert_eq!(
             isolat.eval("typeof document.getElementById").unwrap(),
             "undefined"
+        );
+    }
+
+    // ── G10 lanjutan: permukaan DOM yang dipakai halaman nyata ─────────────
+    //
+    // Setiap tes di bawah gagal sebelum kemampuannya ada; itu syarat satu
+    // baris `CELAH` boleh hilang. Yang diuji bukan "ada fungsi bernama X",
+    // tapi "efeknya sampai ke pohon Rust" atau "nilainya sama dengan yang
+    // dijawab browser sungguhan untuk fixture yang sama".
+
+    #[test]
+    fn class_list_menambah_dan_menghapus_kelas() {
+        let (isolat, dok) = isolat_dengan("<div id=\"a\" class=\"satu dua\"></div>");
+        // `contains` harus benar untuk kelas yang ada di atribut, bukan hanya
+        // untuk yang ditambahkan lewat `classList`.
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').classList.contains('dua')")
+                .unwrap(),
+            "true"
+        );
+        isolat
+            .eval(
+                "var el = document.getElementById('a'); \
+                   el.classList.add('tiga'); el.classList.remove('satu');",
+            )
+            .unwrap();
+        // Kunci dokumen sekali: `isi(&dok).cari_id(..).map(|id| isi(&dok)..)`
+        // mengunci ulang mutex yang masih dipegang temporer statement yang sama,
+        // dan itu deadlock, bukan tes yang lambat.
+        let id = isi(&dok).cari_id("a").unwrap();
+        assert_eq!(
+            isi(&dok).node(id).unwrap().attr("class"),
+            Some("dua tiga"),
+            "classList harus menulis atribut class di pohon Rust"
+        );
+        // `toggle` mengembalikan keadaan sesudahnya, dan `length` menghitung.
+        assert_eq!(isolat.eval("el.classList.toggle('dua')").unwrap(), "false");
+        assert_eq!(isolat.eval("el.classList.length").unwrap(), "1");
+        assert_eq!(isolat.eval("el.className").unwrap(), "tiga");
+    }
+
+    #[test]
+    fn dataset_membaca_dan_menulis_atribut_data() {
+        let (isolat, dok) = isolat_dengan("<div id=\"a\" data-ubah-nama=\"lama\"></div>");
+        // Nama ber-tanda hubung jadi camelCase, seperti di browser.
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').dataset.ubahNama")
+                .unwrap(),
+            "lama"
+        );
+        isolat
+            .eval("document.getElementById('a').dataset.baruSekali = 'isi';")
+            .unwrap();
+        let id = isi(&dok).cari_id("a").unwrap();
+        assert_eq!(
+            isi(&dok).node(id).unwrap().attr("data-baru-sekali"),
+            Some("isi"),
+            "dataset harus menulis atribut data-* di pohon Rust"
+        );
+        // Menghapus lewat `delete` membuang atributnya, bukan menyisakan string
+        // kosong yang akan terbaca sebagai `data-x=""` oleh CSS.
+        isolat
+            .eval("delete document.getElementById('a').dataset.baruSekali;")
+            .unwrap();
+        assert_eq!(isi(&dok).node(id).unwrap().attr("data-baru-sekali"), None);
+    }
+
+    #[test]
+    fn setter_inner_html_mengganti_isi_elemen() {
+        let (isolat, dok) = isolat_dengan("<div id=\"a\"><span>lama</span></div>");
+        isolat
+            .eval("document.getElementById('a').innerHTML = '<b>baru</b> teks';")
+            .unwrap();
+        let id = isi(&dok).cari_id("a").unwrap();
+        // Isi lama hilang seluruhnya, dan yang baru ter-parse jadi simpul
+        // sungguhan: satu elemen <b> plus satu simpul teks.
+        assert_eq!(
+            isi(&dok).dalam_html(id).as_deref(),
+            Some("<b>baru</b> teks")
+        );
+        assert_eq!(
+            isi(&dok).anak_tata(id).len(),
+            2,
+            "harus ada dua anak: <b> dan teks"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').textContent")
+                .unwrap(),
+            "baru teks"
+        );
+    }
+
+    #[test]
+    fn insert_adjacent_html_menyisipkan_di_posisi() {
+        let (isolat, dok) = isolat_dengan("<div id=\"a\"><i>tengah</i></div>");
+        isolat
+            .eval(
+                "var el = document.getElementById('a'); \
+                 el.insertAdjacentHTML('afterbegin', '<b>awal</b>'); \
+                 el.insertAdjacentHTML('beforeend', '<u>akhir</u>');",
+            )
+            .unwrap();
+        let id = isi(&dok).cari_id("a").unwrap();
+        assert_eq!(
+            isi(&dok).dalam_html(id).as_deref(),
+            Some("<b>awal</b><i>tengah</i><u>akhir</u>")
+        );
+        // `beforebegin` dan `afterend` menyentuh saudara, bukan anak: blok baru
+        // mendarat di depan `#a` di induknya, bukan di dalamnya.
+        isolat
+            .eval("el.insertAdjacentHTML('beforebegin', '<p>sebelum</p>');")
+            .unwrap();
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').previousElementSibling.outerHTML")
+                .unwrap(),
+            "<p>sebelum</p>"
+        );
+        assert_eq!(
+            isi(&dok).dalam_html(id).as_deref(),
+            Some("<b>awal</b><i>tengah</i><u>akhir</u>"),
+            "beforebegin tidak boleh menambah anak"
+        );
+    }
+
+    #[test]
+    fn outer_html_mengembalikan_tag_sendiri() {
+        let (isolat, _dok) = isolat_dengan("<div id=\"a\" class=\"x\"><b>isi</b></div>");
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').outerHTML")
+                .unwrap(),
+            "<div id=\"a\" class=\"x\"><b>isi</b></div>"
+        );
+    }
+
+    #[test]
+    fn matches_dan_closest_memakai_selektor() {
+        let (isolat, _dok) = isolat_dengan(
+            "<div id=\"luar\" class=\"kartu\"><section><span id=\"dalam\" class=\"label\">x</span></section></div>",
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('dalam').matches('.label')")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('dalam').matches('div')")
+                .unwrap(),
+            "false"
+        );
+        // `closest` naik sampai ketemu, dan berhenti di akar tanpa melempar.
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('dalam').closest('.kartu').id")
+                .unwrap(),
+            "luar"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('dalam').closest('.tidak-ada')")
+                .unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn next_dan_previous_element_sibling_melewati_teks() {
+        let (isolat, _dok) = isolat_dengan(
+            "<div><i id=\"a\">1</i> teks <i id=\"b\">2</i> teks <i id=\"c\">3</i></div>",
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').nextElementSibling.id")
+                .unwrap(),
+            "b",
+            "simpul teks di antaranya harus dilewati"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('c').nextElementSibling")
+                .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('c').previousElementSibling.id")
+                .unwrap(),
+            "b"
+        );
+    }
+
+    #[test]
+    fn owner_document_dan_is_connected() {
+        let (isolat, _dok) = isolat_dengan("<div id=\"a\"></div>");
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').isConnected")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('a').ownerDocument === document")
+                .unwrap(),
+            "true"
+        );
+        // Simpul yang dibuat tapi belum ditempel bukan bagian dokumen.
+        isolat
+            .eval("var lepas = document.createElement('p');")
+            .unwrap();
+        assert_eq!(isolat.eval("lepas.isConnected").unwrap(), "false");
+        isolat.eval("document.body.appendChild(lepas);").unwrap();
+        assert_eq!(isolat.eval("lepas.isConnected").unwrap(), "true");
+    }
+
+    #[test]
+    fn replace_children_dan_clone_node() {
+        let (isolat, dok) = isolat_dengan("<div id=\"a\"><i>1</i><i>2</i></div>");
+        isolat
+            .eval("document.getElementById('a').replaceChildren(document.createElement('b'));")
+            .unwrap();
+        let id = isi(&dok).cari_id("a").unwrap();
+        assert_eq!(isi(&dok).dalam_html(id).as_deref(), Some("<b></b>"));
+
+        // `cloneNode(true)` menyalin subtree sebagai simpul baru, bukan
+        // mengembalikan simpul yang sama: menempelkan hasil klon tidak boleh
+        // memindahkan yang asli.
+        isolat
+            .eval("var asli = document.getElementById('a'); var salinan = asli.cloneNode(true);")
+            .unwrap();
+        assert_eq!(
+            isolat.eval("salinan === asli").unwrap(),
+            "false",
+            "klon harus simpul lain"
+        );
+        assert_eq!(
+            isolat.eval("salinan.outerHTML").unwrap(),
+            "<div id=\"a\"><b></b></div>"
+        );
+        let sebelum = isi(&dok).jumlah_elemen();
+        isolat.eval("document.body.appendChild(salinan);").unwrap();
+        assert_eq!(
+            isi(&dok).jumlah_elemen(),
+            sebelum + 2,
+            "menempelkan salinan menambah div dan anaknya, bukan memindahkan asli"
         );
     }
 }

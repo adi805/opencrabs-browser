@@ -132,8 +132,16 @@ pub const CELAH: &[&str] = &[
      jembatan W4b, dan `<script>` di dokumen **dijalankan** sejak W5 \
      (`native::js::tests::skrip_sebaris_berjalan_saat_halaman_dibuka`): mutasi \
      yang ditulis JavaScript-nya terlihat oleh `DOM.getDocument` dan oleh \
-     raster. Yang belum dari permukaan DOM: `classList`, setter `innerHTML`, \
-     `dataset`, `insertAdjacentHTML`, dan `outerHTML`",
+     raster. Permukaan DOM yang dipakai skrip halaman kini lengkap untuk \
+     bentuk yang diuji: setter `innerHTML`, `outerHTML`, `classList`, \
+     `dataset`, `insertAdjacentHTML`, `matches`, `closest`, \
+     `nextElementSibling`/`previousElementSibling`, `ownerDocument`, \
+     `isConnected`, `replaceChildren`, dan `cloneNode` \
+     (`native::js::tests::setter_inner_html_mengganti_isi_elemen`, \
+     `class_list_menambah_dan_menghapus_kelas`, \
+     `matches_dan_closest_memakai_selektor`). Yang belum: `NodeList` hidup \
+     (hasil kueri adalah `Array`), `document.write`, dan `style`/CSSOM yang \
+     bisa ditulis",
     "mesin mengirim peristiwa CDP untuk domain yang sudah di-`enable` \
      (`Runtime.consoleAPICalled`, `Runtime.executionContextCreated`, \
      `Page.loadEventFired`, `Network.requestWillBeSent`/`responseReceived`), \
