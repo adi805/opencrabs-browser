@@ -40,6 +40,7 @@ const STEPS: &[Step] = &[
 
 pub fn run() -> Result<()> {
     let mut failed: Vec<&str> = Vec::new();
+    let awal = crate::sensus::ambil();
 
     for step in STEPS {
         print!("-> {:<8}", step.name);
@@ -50,16 +51,23 @@ pub fn run() -> Result<()> {
 
         if output.status.success() {
             println!("ok");
-            continue;
+        } else {
+            println!("GAGAL");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            for line in stdout.lines().chain(stderr.lines()) {
+                println!("   {line}");
+            }
+            failed.push(step.name);
         }
 
-        println!("GAGAL");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        for line in stdout.lines().chain(stderr.lines()) {
-            println!("   {line}");
+        // Sensus hanya bermakna sesudah langkah yang melahirkan mesin. Langkah
+        // lain tidak menyentuh proses, dan memeriksa di antara mereka cuma
+        // menambah kebisingan tanpa menambah bukti.
+        if step.name == "test" && crate::sensus::bandingkan(&awal, &crate::sensus::ambil()).is_err()
+        {
+            failed.push("sensus");
         }
-        failed.push(step.name);
     }
 
     if failed.is_empty() {

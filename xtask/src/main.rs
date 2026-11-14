@@ -8,6 +8,8 @@
 mod bench;
 mod check;
 mod doctor;
+mod e2e;
+mod sensus;
 
 use std::process::ExitCode;
 
@@ -17,7 +19,8 @@ fn print_help() {
 
 perintah:
   doctor   cek mesin: biner engine, port bebas, disk, konfigurasi
-  check    fmt + clippy -D warnings + test unit
+  check    fmt + clippy -D warnings + test unit + sensus proses
+  e2e      jalankan daemon native lalu kontrak CDP ujung ke ujung
   bench    jalankan harness bench/ (argumen diteruskan ke node)
 "
     );
@@ -31,6 +34,7 @@ fn main() -> ExitCode {
     let result = match cmd {
         "doctor" => doctor::run(),
         "check" => check::run(),
+        "e2e" => e2e::run(&rest),
         "bench" => bench::run(&rest),
         "help" | "--help" | "-h" => {
             print_help();

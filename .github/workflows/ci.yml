@@ -58,6 +58,16 @@ jobs:
       - name: test
         run: cargo test --workspace --locked
 
+      # Kontrak CDP ujung ke ujung terhadap daemon native sungguhan. `cargo test`
+      # membuktikan tiap potongan; hanya langkah ini yang membuktikan
+      # rangkaiannya, dan hanya di sini daemon yang dikirim benar-benar dijalankan.
+      # Binernya dibangun eksplisit karena `cargo test` tidak selalu menghasilkan
+      # `target/debug/browserd`.
+      - name: e2e
+        run: |
+          cargo build -p browserd --locked
+          cargo xtask e2e
+
       # Kehabisan disk harus terlihat sebagai kegagalan yang jelas, bukan galat
       # linker yang membingungkan.
       - name: Disk sesudah build
