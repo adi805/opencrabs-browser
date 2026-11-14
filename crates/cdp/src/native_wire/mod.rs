@@ -9,10 +9,15 @@
 //!
 //! Yang dijual di sini hanya yang benar-benar jalan. Mesin ini **menerima**
 //! `Input.dispatchMouseEvent` dan menjalankan pendengar halaman yang
-//! didaftarkan skrip lewat `addEventListener`, tapi belum **mengirim**
-//! peristiwa CDP ke klien (tidak ada `Runtime.consoleAPICalled` atau
-//! `Network.*`). Yang belum ada dijawab dengan galat yang menyebut lapisannya,
-//! bukan dengan jawaban kosong yang terlihat seperti sukses.
+//! didaftarkan skrip lewat `addEventListener`, dan sejak W8 juga **mengirim**
+//! peristiwa CDP ke klien: `Runtime.consoleAPICalled` dan
+//! `Runtime.executionContextCreated` sesudah `Runtime.enable`,
+//! `Page.loadEventFired` sesudah `Page.enable`, serta
+//! `Network.requestWillBeSent`/`Network.responseReceived` untuk dokumen yang
+//! benar-benar diambil dari jaringan (lihat [`peristiwa`]). Peristiwa hanya
+//! dikirim untuk domain yang sudah di-`enable` oleh sesi itu, dan sisanya
+//! dijawab dengan galat yang menyebut lapisannya, bukan dengan jawaban kosong
+//! yang terlihat seperti sukses.
 //!
 //! Dokumen `http`/`https` diambil lewat [`jaringan`] **sebelum** kunci state
 //! dipegang: satu navigasi yang lambat tidak boleh membekukan tab lain.
@@ -20,6 +25,7 @@
 pub mod ambil;
 pub mod gaya;
 pub mod jaringan;
+pub mod peristiwa;
 pub mod state;
 
 pub use ambil::{KebijakanJaringan, Keputusan, PengambilJaringan};
@@ -479,6 +485,15 @@ async fn layani(socket: WebSocket, state: NativeState, sesi: Option<String>) {
             None => (None, LembarJaringan::default()),
         };
         let jawaban = state.tangani_ambil(&teks, sesi.as_deref(), dokumen, gaya);
+        // Peristiwa dikirim sebelum balasan: klien yang menunggu balasan
+        // sebuah `evaluate` tidak boleh kehilangan `console.log` yang lahir
+        // dari evaluasi itu sendiri, dan urutan ini membuat satu putaran
+        // baca sudah memuat keduanya.
+        for peristiwa in state.ambil_peristiwa(sesi.as_deref()) {
+            if tx.send(AxumMessage::Text(peristiwa.into())).await.is_err() {
+                return;
+            }
+        }
         if let Some(jawaban) = jawaban
             && tx.send(AxumMessage::Text(jawaban.into())).await.is_err()
         {

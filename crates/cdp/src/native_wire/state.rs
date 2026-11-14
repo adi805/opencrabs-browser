@@ -27,6 +27,7 @@ use engine::native::{
 use serde_json::{Map, Value, json};
 
 use super::jaringan::{Ambilan, Sumber};
+use super::peristiwa::{self, Antrean, Domain};
 
 /// Penyimpanan dingin yang bisa dipakai lewat `dyn`.
 ///
@@ -140,9 +141,14 @@ impl Galat {
                 "kotak layout belum memisahkan padding, border, dan margin; \
                  `DOM.getBoxModel` butuh keempatnya, dan mengarangnya jadi kebohongan"
             }
-            "Network.enable" | "Network.getCookies" | "Network.setCookie" => {
-                "tidak ada tumpukan jaringan di mesin ini; dokumen masuk lewat \
-                 `Page.setDocumentContent`"
+            // `Network.enable` sudah dijawab sungguhan sejak peristiwa
+            // jaringan ada. Yang belum adalah penyimpanan cookie: mesin ini
+            // tidak punya jar, jadi membalas `getCookies` dengan daftar kosong
+            // akan menyamakan "tidak ada cookie" dengan "tidak bisa membaca
+            // cookie".
+            "Network.getCookies" | "Network.setCookie" | "Network.setCookies" => {
+                "penyimpanan cookie belum ada; permintaan jaringan hanya lahir \
+                 dari navigasi dan tidak membawa cookie balik"
             }
             _ => "metode ini tidak dikenal mesin native",
         };
@@ -225,6 +231,8 @@ struct Dalam {
     /// lalu melepas di tempat lain akan menghasilkan klik yang tidak pernah
     /// terjadi di browser sungguhan.
     tekanan: BTreeMap<TabId, NodeId>,
+    /// Peristiwa CDP yang lahir di tengah penanganan, menunggu dikuras soket.
+    peristiwa: Antrean,
 }
 
 /// State mesin native, dipakai bersama oleh server dan tes.
@@ -276,6 +284,7 @@ impl NativeState {
                 sesi: BTreeMap::new(),
                 berikut_sesi: 1,
                 tekanan: BTreeMap::new(),
+                peristiwa: Antrean::default(),
             })),
         }
     }
@@ -322,6 +331,16 @@ impl NativeState {
         gaya: LembarJaringan,
     ) -> Option<String> {
         self.kunci().tangani(teks, sesi, ambilan, gaya)
+    }
+
+    /// Menguras peristiwa CDP yang menunggu, siap dikirim ke soket.
+    ///
+    /// Dipanggil [`super::layani`] setelah tiap frame dijawab. `sesi` adalah
+    /// sesi milik soket itu: `None` untuk soket browser (menerima semua),
+    /// `Some(s)` untuk soket satu halaman (hanya miliknya).
+    #[must_use]
+    pub fn ambil_peristiwa(&self, sesi: Option<&str>) -> Vec<String> {
+        self.kunci().peristiwa.ambil(sesi)
     }
 
     /// Daftar target dalam bentuk `/json/list` milik Chrome, tanpa URL soket
@@ -499,14 +518,12 @@ impl Dalam {
             "DOM.resolveNode" => self.dom_simpul(params, sesi),
             "Runtime.evaluate" => self.evaluasi(params, sesi),
             "Input.dispatchMouseEvent" => self.kirim_mouse(params, sesi),
-            // Metode yang tidak mengubah apa pun di mesin ini. Dijawab `{}`
-            // karena memang tidak ada yang perlu dilakukan, bukan karena
-            // fiturnya ada: mesin ini tidak mengirim peristiwa.
-            "Page.enable"
-            | "Page.disable"
-            | "Page.setLifecycleEventsEnabled"
-            | "Runtime.enable"
-            | "Runtime.disable"
+            // `enable` bukan no-op lagi: domain yang aktif menentukan peristiwa
+            // mana yang boleh dikirim (lihat [`super::peristiwa`]).
+            "Runtime.enable" | "Runtime.disable" | "Page.enable" | "Page.disable"
+            | "Network.enable" | "Network.disable" => self.domain_ubah(metode, sesi),
+            // Metode yang memang tidak mengubah apa pun di mesin ini.
+            "Page.setLifecycleEventsEnabled"
             | "DOM.enable"
             | "DOM.disable"
             | "Log.enable"
@@ -561,7 +578,16 @@ impl Dalam {
         let tab = self.tab_dari_id(id)?;
         self.pool.tutup(tab).map_err(pool_galat)?;
         self.tabs.remove(&tab);
-        self.sesi.retain(|_, t| *t != tab);
+        let dilepas: Vec<String> = self
+            .sesi
+            .iter()
+            .filter(|(_, t)| **t == tab)
+            .map(|(s, _)| s.clone())
+            .collect();
+        for sesi in dilepas {
+            self.sesi.remove(&sesi);
+            self.peristiwa.lupakan(&sesi);
+        }
         Ok(())
     }
 
@@ -595,7 +621,12 @@ impl Dalam {
         self.sesi
             .remove(sesi)
             .map(|_| ())
-            .ok_or_else(|| Galat::baru(-32001, format!("sesi '{sesi}' tidak dikenal")))
+            .ok_or_else(|| Galat::baru(-32001, format!("sesi '{sesi}' tidak dikenal")))?;
+        // Peristiwa milik sesi yang sudah dilepas tidak akan pernah ada yang
+        // membacanya; membiarkannya menumpuk berarti kebocoran memori yang
+        // tumbuh seumur daemon.
+        self.peristiwa.lupakan(sesi);
+        Ok(())
     }
 
     fn tab_dari_id(&self, id: &str) -> Result<TabId, Galat> {
@@ -667,6 +698,34 @@ impl Dalam {
             meta.url = dok.url.clone();
             meta.judul = judul;
         }
+        // Peristiwa jaringan hanya lahir dari dokumen yang benar-benar diambil:
+        // `dok.jaringan` terisi kalau navigasinya menyentuh jaringan, jadi
+        // navigasi `about:blank` tidak mengarang permintaan yang tidak pernah
+        // terjadi.
+        if let Some(sesi) = sesi {
+            let waktu = peristiwa::sekarang();
+            if let Some(sumber) = dok.jaringan.as_ref() {
+                let id = format!("{}.{}", tab.0, loader_id(tab));
+                self.peristiwa.kirim(
+                    sesi,
+                    Domain::Network,
+                    peristiwa::permintaan_dikirim(&id, &sumber.url, waktu),
+                );
+                self.peristiwa.kirim(
+                    sesi,
+                    Domain::Network,
+                    peristiwa::jawaban_diterima(
+                        &id,
+                        &sumber.url,
+                        sumber.status,
+                        &sumber.content_type,
+                        waktu,
+                    ),
+                );
+            }
+            self.peristiwa
+                .kirim(sesi, Domain::Page, peristiwa::muat_selesai(waktu));
+        }
         let sesudah = self.sidik(tab)?;
         Ok(json!({
             "frameId": frame_id(tab),
@@ -703,6 +762,16 @@ impl Dalam {
         let judul = self.pool.tab(tab).and_then(|t| t.dokumen().judul());
         if let Some(meta) = self.tabs.get_mut(&tab) {
             meta.judul = judul;
+        }
+        // Dokumen baru selesai dimuat: itulah yang dimaksud `Page.loadEventFired`.
+        // Mesin ini tidak punya fase `DOMContentLoaded` terpisah, jadi satu
+        // peristiwa ini mewakili selesainya pemasangan dokumen.
+        if let Some(sesi) = sesi {
+            self.peristiwa.kirim(
+                sesi,
+                Domain::Page,
+                peristiwa::muat_selesai(peristiwa::sekarang()),
+            );
         }
         let sesudah = self.sidik(tab)?;
         Ok(json!({ "receipt": banding(&sebelum, &sesudah) }))
@@ -1135,6 +1204,37 @@ impl Dalam {
         }))
     }
 
+    /// Menandai domain aktif/nonaktif untuk satu sesi, lalu mengirim
+    /// `Runtime.executionContextCreated` saat `Runtime.enable` datang.
+    ///
+    /// Konteks dikirim **sesudah** `enable`, bukan saat tab dibuat: klien yang
+    /// belum meminta domain `Runtime` tidak boleh menerima peristiwa apa pun
+    /// dari domain itu.
+    fn domain_ubah(&mut self, metode: &str, sesi: Option<&str>) -> Result<Value, Galat> {
+        let sesi = sesi.ok_or_else(|| {
+            Galat::baru(
+                -32602,
+                format!("{metode} butuh sessionId: domain aktif dicatat per sesi"),
+            )
+        })?;
+        let aktif = metode.ends_with(".enable");
+        self.peristiwa.ubah_domain(sesi, metode, aktif);
+        if aktif && metode == "Runtime.enable" {
+            let tab = self.tab_dari_sesi(Some(sesi))?;
+            let url = self
+                .tabs
+                .get(&tab)
+                .map(|meta| meta.url.clone())
+                .unwrap_or_default();
+            self.peristiwa.kirim(
+                sesi,
+                Domain::Runtime,
+                peristiwa::konteks_dibuat(sesi, tab.0 as i64, &url),
+            );
+        }
+        Ok(json!({}))
+    }
+
     fn evaluasi(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
         let ekspresi = param_teks(params, "expression")?;
@@ -1142,12 +1242,27 @@ impl Dalam {
         if self.pool.tab(tab).is_none() {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
-        let keluaran = {
+        let (keluaran, baris_log) = {
             let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-            t.isolat
+            let keluaran = t
+                .isolat
                 .eval_bertipe(&ekspresi)
-                .map_err(|err| Galat::baru(-32000, format!("skrip gagal: {err}")))?
+                .map_err(|err| Galat::baru(-32000, format!("skrip gagal: {err}")))?;
+            // Buffer log dikuras di sini, bukan dibaca: `console.log` yang
+            // sudah dilaporkan tidak boleh dikirim ulang di evaluasi
+            // berikutnya, atau klien melihat baris yang sama berkali-kali.
+            (keluaran, t.isolat.ambil_log())
         };
+        if let Some(sesi) = sesi {
+            let waktu = peristiwa::sekarang();
+            for baris in baris_log {
+                self.peristiwa.kirim(
+                    sesi,
+                    Domain::Runtime,
+                    peristiwa::console_dipanggil(&baris, tab.0 as i64, waktu),
+                );
+            }
+        }
         let sesudah = self.sidik(tab)?;
         Ok(json!({
             "result": remote_object(keluaran),

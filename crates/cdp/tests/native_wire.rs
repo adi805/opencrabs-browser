@@ -477,9 +477,10 @@ async fn metode_belum_ada_menjawab_galat_yang_menyebut_lapisannya() {
         // `Page.captureScreenshot` dulu di sini; sekarang dijawab sungguhan,
         // jadi yang menguji cabang "belum ada" adalah MHTML dan PDF.
         (3, "Page.printToPDF", "PDF"),
-        // `DOM.querySelector` dulu di sini; sekarang dijawab sungguhan, jadi
-        // yang menguji cabang "belum ada" adalah tumpukan jaringan.
-        (4, "Network.enable", "jaringan"),
+        // `DOM.querySelector` dulu di sini; sekarang dijawab sungguhan, dan
+        // `Network.enable` juga sudah (peristiwa jaringan dikirim sejak W8),
+        // jadi yang menguji cabang "belum ada" adalah penyimpanan cookie.
+        (4, "Network.getCookies", "cookie"),
         // `Input.dispatchMouseEvent` dulu di sini; sekarang dijawab sungguhan,
         // jadi yang menguji cabang "belum ada" adalah peristiwa papan ketik.
         (5, "Input.dispatchKeyEvent", "papan ketik"),

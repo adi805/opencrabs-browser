@@ -136,7 +136,10 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         "pengukuran teks hanya satu face",
         "raster melukis latar kotak dan glyph teks",
         "`fetch()` di dalam isolat",
-        "peristiwa CDP",
+        // Batas peristiwa CDP yang masih terbuka. Kalau baris ini hilang,
+        // daftar mengklaim mesin mendorong peristiwa ke klien tanpa ditanya,
+        // padahal antreannya baru dikuras sesudah klien mengirim frame.
+        "antreannya baru dikuras sesudah klien mengirim satu frame",
         // Batas at-rule yang masih terbuka. Kalau baris ini hilang, daftar
         // mengklaim `@media` sudah dijalankan padahal isinya masih dilewati,
         // dan halaman yang menaruh tata letaknya di dalam `@media` akan

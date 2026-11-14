@@ -15,8 +15,7 @@
 //! di dalam biner (`crates/engine/assets/DejaVuSans.ttf`), dan node teks
 //! menghasilkan kotak layout yang dibungkus pada lebar induknya.
 //!
-//! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan:
-//! peristiwa DOM, `fetch` di dalam isolat, dan peristiwa CDP.
+//! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan.
 //! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
 //!
 //! Permukaan CDP-nya **tidak** ada di sini. Crate ini sengaja nol pengetahuan
@@ -115,8 +114,14 @@ pub const CELAH: &[&str] = &[
      cakupannya masih inti DOM (cari, buat, sisip, hapus, teks, atribut, \
      `children`/`parentNode`, `title`), belum `classList`, `innerHTML` setter, \
      `dataset`, maupun `insertAdjacentHTML`",
-    "mesin tidak mengirim peristiwa CDP (`Runtime.consoleAPICalled`, `Page.loadEventFired`, \
-     `Network.*`); klien yang menunggu event akan menunggu selamanya",
+    "mesin mengirim peristiwa CDP untuk domain yang sudah di-`enable` \
+     (`Runtime.consoleAPICalled`, `Runtime.executionContextCreated`, \
+     `Page.loadEventFired`, `Network.requestWillBeSent`/`responseReceived`), \
+     tapi antreannya baru dikuras sesudah klien mengirim satu frame: klien yang \
+     diam menunggu peristiwa tidak menerima apa pun sampai ia bicara lagi, \
+     karena tidak ada jalur dorong dari mesin ke soket. `Runtime.exceptionThrown`, \
+     `Page.frameNavigated`, `DOM.documentUpdated`, dan `Log.entryAdded` belum \
+     ada, dan `Network.*` hanya melaporkan dokumen navigasi, bukan subresource",
     "elemen di dalam `<iframe>` tidak bisa ditelusuri mesin native (AC-015): \
      `html5ever` hanya mem-parse dokumen induk, isi `<iframe src>` tidak dimuat \
      dan tidak di-parse, jadi kueri selektor maupun pohon AX berhenti di batas \

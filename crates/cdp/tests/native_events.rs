@@ -324,3 +324,183 @@ async fn pendengar_tipe_lain_bisa_dipicu() {
 
     mesin.stop().expect("berhenti");
 }
+
+/// Balasan untuk `id`, plus setiap peristiwa yang lewat sementara menunggunya.
+///
+/// `tunggu_id` membuang pesan tanpa `id`, dan itu cukup untuk tes lama yang
+/// tidak peduli peristiwa. Tes di bawah justru menilai peristiwanya, jadi
+/// pesan tanpa `id` harus dikumpulkan, bukan dibuang.
+async fn tunggu_dengan_peristiwa(soket: &mut Klien, id: i64) -> (Value, Vec<Value>) {
+    let mut peristiwa = Vec::new();
+    let batas = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let sisa = batas.saturating_duration_since(tokio::time::Instant::now());
+        let pesan = tokio::time::timeout(sisa, soket.next())
+            .await
+            .expect("waktu habis menunggu balasan")
+            .expect("soket tertutup")
+            .expect("pesan rusak");
+        let TsMessage::Text(teks) = pesan else {
+            continue;
+        };
+        let nilai: Value = serde_json::from_str(teks.as_str()).expect("balasan JSON");
+        if nilai.get("id").and_then(Value::as_i64) == Some(id) {
+            return (nilai, peristiwa);
+        }
+        if nilai.get("method").is_some() {
+            peristiwa.push(nilai);
+        }
+    }
+}
+
+/// Mengirim perintah dan mengembalikan balasannya beserta peristiwa yang
+/// menyertainya.
+async fn kirim_pantau(
+    soket: &mut Klien,
+    id: i64,
+    metode: &str,
+    params: Value,
+    sesi: &str,
+) -> (Value, Vec<Value>) {
+    let pesan = json!({"id": id, "method": metode, "params": params, "sessionId": sesi});
+    soket
+        .send(TsMessage::Text(pesan.to_string().into()))
+        .await
+        .expect("mengirim perintah");
+    tunggu_dengan_peristiwa(soket, id).await
+}
+
+fn nama_peristiwa(daftar: &[Value]) -> Vec<String> {
+    daftar
+        .iter()
+        .filter_map(|p| p["method"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Mesin mengirim peristiwa CDP ke klien yang berlangganan.
+///
+/// Ini tes yang membedakan "menerima perintah" dari "berbicara protokol":
+/// klien membuka soket, meminta tiga domain, lalu **menunggu** peristiwa yang
+/// tidak pernah ia minta secara eksplisit. Mesin yang hanya menjawab balasan
+/// akan menggantung di sini sampai batas waktu.
+#[tokio::test]
+async fn peristiwa_cdp_terkirim_ke_klien() {
+    let mesin = NativeEngine::start(spec()).expect("mesin native menyala");
+    let port = mesin.info().devtools_port;
+    let mut soket = sambung(port).await;
+    let sesi = tab_dengan(&mut soket, HALAMAN).await;
+
+    // 1. Runtime.enable membuka domain Runtime dan mengirim konteks eksekusi.
+    let (jawab, peristiwa) = kirim_pantau(&mut soket, 10, "Runtime.enable", json!({}), &sesi).await;
+    assert!(jawab.get("error").is_none(), "Runtime.enable: {jawab}");
+    let nama = nama_peristiwa(&peristiwa);
+    assert!(
+        nama.contains(&"Runtime.executionContextCreated".to_owned()),
+        "konteks eksekusi harus dikirim saat enable: {nama:?}"
+    );
+    let konteks = peristiwa
+        .iter()
+        .find(|p| p["method"] == "Runtime.executionContextCreated")
+        .expect("ada peristiwa konteks");
+    assert_eq!(konteks["sessionId"], sesi, "peristiwa membawa sesi asalnya");
+    assert_eq!(
+        konteks["params"]["context"]["auxData"]["frameId"], sesi,
+        "frameId menunjuk sesi yang meminta"
+    );
+
+    // 2. Page.enable lalu dokumen baru: load event.
+    let (jawab, _) = kirim_pantau(&mut soket, 11, "Page.enable", json!({}), &sesi).await;
+    assert!(jawab.get("error").is_none(), "Page.enable: {jawab}");
+    let (jawab, peristiwa) = kirim_pantau(
+        &mut soket,
+        12,
+        "Page.setDocumentContent",
+        json!({"frameId": sesi, "html": HALAMAN}),
+        &sesi,
+    )
+    .await;
+    assert!(jawab.get("error").is_none(), "setDocumentContent: {jawab}");
+    let nama = nama_peristiwa(&peristiwa);
+    assert!(
+        nama.contains(&"Page.loadEventFired".to_owned()),
+        "dokumen yang dipasang harus memicu loadEventFired: {nama:?}"
+    );
+
+    // 3. console.log di halaman jadi Runtime.consoleAPICalled, dan hanya sekali.
+    let (jawab, peristiwa) = kirim_pantau(
+        &mut soket,
+        13,
+        "Runtime.evaluate",
+        json!({"expression": "console.log('halo dari halaman'); 1", "returnByValue": true}),
+        &sesi,
+    )
+    .await;
+    assert!(jawab.get("error").is_none(), "evaluate: {jawab}");
+    let console: Vec<&Value> = peristiwa
+        .iter()
+        .filter(|p| p["method"] == "Runtime.consoleAPICalled")
+        .collect();
+    assert_eq!(
+        console.len(),
+        1,
+        "satu baris log, satu peristiwa: {peristiwa:?}"
+    );
+    assert_eq!(console[0]["params"]["type"], "log");
+    assert_eq!(
+        console[0]["params"]["args"][0]["value"], "halo dari halaman",
+        "isi log ikut terkirim, bukan cuma namanya"
+    );
+    assert_eq!(console[0]["sessionId"], sesi);
+
+    // 4. Evaluasi tanpa console.log tidak mengulang peristiwa lama: buffer
+    //    sudah dikuras, bukan dibaca berulang.
+    let (_, peristiwa) = kirim_pantau(
+        &mut soket,
+        14,
+        "Runtime.evaluate",
+        json!({"expression": "2 + 2", "returnByValue": true}),
+        &sesi,
+    )
+    .await;
+    assert!(
+        peristiwa
+            .iter()
+            .all(|p| p["method"] != "Runtime.consoleAPICalled"),
+        "log lama tidak boleh terkirim ulang: {peristiwa:?}"
+    );
+
+    mesin.stop().expect("berhenti");
+}
+
+/// Klien yang tidak pernah memanggil `*.enable` tidak menerima peristiwa.
+///
+/// Sisi negatif ini yang membuat tes di atas bermakna: mesin yang mengirim
+/// peristiwa ke semua orang akan lulus tes positif tanpa pernah menghormati
+/// langganan klien.
+#[tokio::test]
+async fn tanpa_enable_tidak_ada_peristiwa() {
+    let mesin = NativeEngine::start(spec()).expect("mesin native menyala");
+    let port = mesin.info().devtools_port;
+    let mut soket = sambung(port).await;
+    let sesi = tab_dengan(&mut soket, HALAMAN).await;
+
+    let (jawab, peristiwa) = kirim_pantau(
+        &mut soket,
+        20,
+        "Runtime.evaluate",
+        json!({"expression": "console.log('tidak dilanggan'); 7", "returnByValue": true}),
+        &sesi,
+    )
+    .await;
+    assert!(jawab.get("error").is_none(), "evaluate: {jawab}");
+    assert_eq!(
+        jawab["result"]["result"]["value"], 7,
+        "evaluasi tetap berjalan tanpa langganan"
+    );
+    assert!(
+        peristiwa.is_empty(),
+        "tanpa Runtime.enable tidak boleh ada peristiwa: {peristiwa:?}"
+    );
+
+    mesin.stop().expect("berhenti");
+}

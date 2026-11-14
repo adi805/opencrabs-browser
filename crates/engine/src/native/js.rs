@@ -1217,6 +1217,20 @@ impl Isolat {
         })
     }
 
+    /// Baris `console.log` yang belum dilaporkan, sekaligus mengosongkan
+    /// buffer.
+    ///
+    /// Dipakai jalur CDP: `Runtime.consoleAPICalled` harus dikirim sekali per
+    /// baris, dan buffer yang tidak dikosongkan akan mengirim ulang baris lama
+    /// di setiap evaluasi berikutnya.
+    #[must_use]
+    pub fn ambil_log(&self) -> Vec<String> {
+        let json = self
+            .eval("(function(){var a=globalThis.__log||[];globalThis.__log=[];return JSON.stringify(a)})()")
+            .unwrap_or_else(|_| "[]".to_string());
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
     /// Baris yang dicatat `console.log` sejak isolat dibuat.
     #[must_use]
     pub fn log(&self) -> Vec<String> {
