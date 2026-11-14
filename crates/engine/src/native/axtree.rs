@@ -10,9 +10,10 @@
 //! tag dan atribut ARIA; apa pun yang tidak dikenal jadi `generic`, bukan
 //! ditebak.
 //!
-//! Yang belum ada dan tidak diklaim: perhitungan nama yang memakai
-//! `aria-labelledby` berantai lintas dokumen, status *focusable*/*selected*,
-//! dan pohon AX untuk konten di dalam `<iframe>` (iframe belum dimuat).
+//! Yang belum ada dan tidak diklaim: pohon AX untuk konten di dalam
+//! `<iframe>`. Iframe belum dimuat sama sekali (`html5ever` hanya mem-parse
+//! dokumen induk), jadi tidak ada dokumen anak yang bisa dijadikan pohon;
+//! itu AC-015 dan dikerjakan bersama penelusuran iframe, bukan di sini.
 
 use serde_json::{Value, json};
 
@@ -33,6 +34,24 @@ pub struct AxNode {
     pub backend: Option<NodeId>,
     pub parent: Option<String>,
     pub children: Vec<String>,
+    /// Bisa menerima fokus lewat Tab atau `element.focus()`.
+    pub focusable: bool,
+    /// Sedang memegang fokus.
+    ///
+    /// Selalu `false` hari ini: mesin ini belum punya state fokus
+    /// (`focus()` mengirim peristiwanya tanpa memindahkan `activeElement`),
+    /// jadi menebaknya dari `autofocus` akan mengarang keadaan yang tidak
+    /// pernah benar-benar terjadi. Fieldnya tetap ada supaya bentuk CDP-nya
+    /// tidak berubah saat state fokus menyusul.
+    pub focused: bool,
+    /// `aria-selected` atau `<option selected>`; `None` kalau tidak berlaku.
+    pub selected: Option<bool>,
+    /// `aria-expanded`; `None` kalau elemennya tidak bisa dibuka-tutup.
+    pub expanded: Option<bool>,
+    /// `disabled` atau `aria-disabled`.
+    pub disabled: bool,
+    /// `aria-checked`, `checked` pada checkbox/radio, atau `aria-pressed`.
+    pub checked: Option<bool>,
 }
 
 /// Tag yang tidak pernah muncul di pohon aksesibilitas.
@@ -47,6 +66,7 @@ const NAMA_DARI_ISI: &[&str] = &[
     "button",
     "paragraph",
     "listitem",
+    "option",
     "cell",
     "columnheader",
     "rowheader",
@@ -133,14 +153,59 @@ fn peran(doc: &Document, id: NodeId) -> String {
 
 /// Nama yang dibaca agen, berurutan dari yang paling otoritatif.
 ///
-/// Urutannya mengikuti prioritas ARIA: `aria-label`, lalu `alt` untuk gambar,
-/// lalu `placeholder` untuk kontrol form, lalu `title`, lalu isi teks elemen
-/// untuk peran yang memang dinamai dari isinya.
+/// Urutannya mengikuti prioritas ARIA: `aria-labelledby`, lalu `aria-label`,
+/// lalu `alt` untuk gambar, lalu `placeholder` untuk kontrol form, lalu
+/// `title`, lalu isi teks elemen untuk peran yang memang dinamai dari isinya.
+///
+/// `aria-labelledby` adalah yang pertama karena itu satu-satunya atribut yang
+/// menunjuk elemen LAIN sebagai sumber nama; kalau operator menulisnya, ia
+/// lebih tahu daripada teks di dalam elemen ini. Nilainya daftar id dipisah
+/// spasi, dan namanya digabung dengan spasi, persis seperti accname.
 fn nama(doc: &Document, id: NodeId, role: &str) -> String {
+    nama_dalam(doc, id, role, false, &mut Vec::new())
+}
+
+/// `sebagai_label` berarti simpul ini sedang dipakai sebagai sumber nama
+/// (`aria-labelledby`), jadi isi teksnya dihitung walaupun perannya tidak ada
+/// di [`NAMA_DARI_ISI`]. Tanpa itu, `<span id="lbl">Nama</span>` akan
+/// menyumbang string kosong karena `span` berperan `generic`.
+///
+/// `dikunjungi` adalah penjaga siklus: `a` yang menunjuk `b` yang menunjuk `a`
+/// akan berputar selamanya kalau tidak dicatat. Yang dikembalikan untuk siklus
+/// adalah string kosong, bukan galat, karena accname yang melingkar memang
+/// tidak punya nama yang bisa dibacakan.
+fn nama_dalam(
+    doc: &Document,
+    id: NodeId,
+    role: &str,
+    sebagai_label: bool,
+    dikunjungi: &mut Vec<NodeId>,
+) -> String {
     let Some(node) = doc.node(id) else {
         return String::new();
     };
-    for attr in ["aria-label", "alt", "placeholder", "title", "value"] {
+    if dikunjungi.contains(&id) {
+        return String::new();
+    }
+    dikunjungi.push(id);
+
+    if let Some(daftar) = node.attr("aria-labelledby") {
+        let gabung = daftar
+            .split_whitespace()
+            .filter_map(|rujukan| doc.cari_id(rujukan))
+            .map(|target| {
+                let peran_target = peran(doc, target);
+                nama_dalam(doc, target, &peran_target, true, dikunjungi)
+            })
+            .filter(|teks| !teks.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !gabung.is_empty() {
+            return gabung;
+        }
+    }
+
+    for attr in ["aria-label", "alt", "placeholder", "title"] {
         if let Some(v) = node.attr(attr) {
             let rapi = v.trim();
             if !rapi.is_empty() {
@@ -148,10 +213,72 @@ fn nama(doc: &Document, id: NodeId, role: &str) -> String {
             }
         }
     }
-    if NAMA_DARI_ISI.contains(&role) {
+    // `value` hanya menamai kontrol form, dan hanya pada `<input>`.
+    // `<option value="x">Label</option>` dibacakan sebagai "Label", bukan
+    // "x": isi elemennya yang dilihat pengguna, sedangkan `value` adalah
+    // nilai yang dikirim ke server. Memakai `value` di sana akan menamai
+    // pilihan dengan teks yang tidak pernah tampil di layar.
+    if node.tag() == Some("input")
+        && let Some(v) = node.attr("value")
+    {
+        let rapi = v.trim();
+        if !rapi.is_empty() {
+            return rapi.to_string();
+        }
+    }
+    if sebagai_label || NAMA_DARI_ISI.contains(&role) {
         return doc.teks(id).trim().to_string();
     }
     String::new()
+}
+
+/// Nilai boolean dari atribut yang boleh ditulis `true`/`false` (ARIA), atau
+/// hadir-tanpa-nilai (HTML, mis. `disabled`).
+fn boolean_attr(doc: &Document, id: NodeId, nama_attr: &str) -> Option<bool> {
+    let node = doc.node(id)?;
+    let v = node.attr(nama_attr)?;
+    let rapi = v.trim();
+    if rapi.is_empty() {
+        return Some(true);
+    }
+    if rapi.eq_ignore_ascii_case("true") {
+        return Some(true);
+    }
+    if rapi.eq_ignore_ascii_case("false") {
+        return Some(false);
+    }
+    None
+}
+
+/// Tag yang bisa menerima fokus tanpa `tabindex`.
+const FOKUSABLE: &[&str] = &[
+    "a", "button", "input", "select", "textarea", "summary", "iframe", "object", "audio", "video",
+];
+
+/// Apakah elemen ini bisa menerima fokus.
+///
+/// `tabindex="-1"` tetap fokusabel secara program, hanya tidak lewat Tab, jadi
+/// keberadaan atributnya sudah cukup. `<a>` tanpa `href` tidak fokusabel, dan
+/// elemen `disabled` tidak fokusabel sekalipun tag-nya ada di daftar.
+fn fokusabel(doc: &Document, id: NodeId) -> bool {
+    let Some(node) = doc.node(id) else {
+        return false;
+    };
+    if boolean_attr(doc, id, "disabled").unwrap_or(false)
+        || boolean_attr(doc, id, "aria-disabled").unwrap_or(false)
+    {
+        return false;
+    }
+    if node.attr("tabindex").is_some() {
+        return true;
+    }
+    let Some(tag) = node.tag() else {
+        return false;
+    };
+    if tag == "a" {
+        return node.attr("href").is_some();
+    }
+    FOKUSABLE.contains(&tag)
 }
 
 /// Apakah elemen ini harus disembunyikan dari agen.
@@ -203,6 +330,32 @@ pub fn pohon(doc: &Document) -> Vec<AxNode> {
         let nomor = out.len().to_string();
         let ignored = terabaikan(doc, id);
         let label = nama(doc, id, &role);
+        // Status diambil dari atribut, bukan dari state internal: mesin ini
+        // belum menyimpan state fokus atau buka-tutup, jadi yang bisa
+        // dipertanggungjawabkan hanya apa yang tertulis di dokumen. Menebak
+        // sisanya akan mengarang keadaan yang tidak pernah terjadi.
+        let disabled = boolean_attr(doc, id, "disabled").unwrap_or(false)
+            || boolean_attr(doc, id, "aria-disabled").unwrap_or(false);
+        let selected = boolean_attr(doc, id, "aria-selected")
+            .or_else(|| boolean_attr(doc, id, "selected"))
+            .filter(|_| {
+                matches!(
+                    role.as_str(),
+                    "option" | "tab" | "row" | "gridcell" | "treeitem"
+                )
+            });
+        let expanded = boolean_attr(doc, id, "aria-expanded").filter(|_| {
+            matches!(
+                role.as_str(),
+                "combobox" | "button" | "treeitem" | "row" | "group" | "generic"
+            )
+        });
+        let checked = boolean_attr(doc, id, "aria-checked")
+            .or_else(|| boolean_attr(doc, id, "aria-pressed"))
+            .or_else(|| {
+                matches!(role.as_str(), "checkbox" | "radio")
+                    .then(|| boolean_attr(doc, id, "checked").unwrap_or(false))
+            });
         out.push(AxNode {
             id: nomor.clone(),
             role,
@@ -211,6 +364,12 @@ pub fn pohon(doc: &Document) -> Vec<AxNode> {
             backend: Some(id),
             parent: induk.clone(),
             children: Vec::new(),
+            focusable: !ignored && fokusabel(doc, id),
+            focused: false,
+            selected,
+            expanded,
+            disabled,
+            checked,
         });
         let mut anak: Vec<NodeId> = node.children.clone();
         anak.reverse();
@@ -236,6 +395,14 @@ pub fn pohon(doc: &Document) -> Vec<AxNode> {
     out
 }
 
+/// Satu entri `properties` CDP: `{"name": ..., "value": {"type": ..., "value": ...}}`.
+fn properti(nama: &str, nilai: bool) -> Value {
+    json!({
+        "name": nama,
+        "value": { "type": "booleanOrUndefined", "value": nilai },
+    })
+}
+
 /// Bentuk JSON `Accessibility.getFullAXTree`, siap dikirim ke klien.
 #[must_use]
 pub fn json_pohon(doc: &Document) -> Value {
@@ -249,6 +416,32 @@ pub fn json_pohon(doc: &Document) -> Value {
                 "name": { "type": "computedString", "value": n.name },
                 "childIds": n.children,
             });
+            // Status dikirim sebagai `properties`, sama seperti Chrome. Yang
+            // `None` sengaja tidak dikirim: klien membedakan "tidak berlaku"
+            // dari "false", dan mengirim `false` untuk elemen yang tidak punya
+            // konsep itu akan membuat agen membacanya sebagai keadaan nyata.
+            let mut props: Vec<Value> = Vec::new();
+            if n.focusable {
+                props.push(properti("focusable", true));
+            }
+            if n.focused {
+                props.push(properti("focused", true));
+            }
+            if n.disabled {
+                props.push(properti("disabled", true));
+            }
+            if let Some(v) = n.selected {
+                props.push(properti("selected", v));
+            }
+            if let Some(v) = n.expanded {
+                props.push(properti("expanded", v));
+            }
+            if let Some(v) = n.checked {
+                props.push(properti("checked", v));
+            }
+            if !props.is_empty() {
+                obj["properties"] = Value::Array(props);
+            }
             if let Some(backend) = n.backend {
                 obj["backendDOMNodeId"] = json!(backend);
             }
@@ -372,5 +565,170 @@ mod tests {
         assert_eq!(h2["name"]["type"], "computedString");
         assert!(h2["backendDOMNodeId"].as_u64().is_some());
         assert!(h2["parentId"].is_string());
+    }
+
+    #[test]
+    fn aria_labelledby_menggabung_beberapa_id() {
+        let doc = Document::parse_html(
+            "<body><span id=\"depan\">Halo</span><span id=\"belakang\">Dunia</span>\
+             <button aria-labelledby=\"depan belakang\">X</button></body>",
+        )
+        .unwrap();
+        let simpul = pohon(&doc);
+        assert_eq!(
+            cari(&simpul, "button", "Halo Dunia").name,
+            "Halo Dunia",
+            "dua id digabung dengan spasi, berurutan sesuai atributnya"
+        );
+    }
+
+    #[test]
+    fn aria_labelledby_menang_atas_isi_elemen() {
+        // Elemen yang menunjuk sumber nama lain harus memakai sumber itu,
+        // bukan teksnya sendiri; kalau tidak, tombol berikon akan terbaca
+        // sebagai "X" dan bukan sebagai maksud sebenarnya.
+        let doc = Document::parse_html(
+            "<body><span id=\"lbl\">Tutup dialog</span>\
+             <button aria-labelledby=\"lbl\">X</button></body>",
+        )
+        .unwrap();
+        let simpul = pohon(&doc);
+        assert_eq!(cari(&simpul, "button", "Tutup dialog").name, "Tutup dialog");
+        assert!(
+            simpul.iter().all(|n| n.name != "X"),
+            "teks tombol tidak boleh dipakai saat aria-labelledby ada"
+        );
+    }
+
+    #[test]
+    fn aria_labelledby_berantai_dan_siklus_berhenti() {
+        // Berantai: label menunjuk label lain. Melingkar: dua elemen saling
+        // menunjuk. Yang kedua tidak boleh berputar selamanya; hasilnya nama
+        // kosong, dan pohonnya tetap selesai dibangun.
+        let doc = Document::parse_html(
+            "<body><span id=\"a\" aria-labelledby=\"b\">dari-a</span>\
+             <span id=\"b\">dari-b</span>\
+             <span id=\"p\" aria-labelledby=\"q\">p</span>\
+             <span id=\"q\" aria-labelledby=\"p\">q</span>\
+             <button aria-labelledby=\"a\">X</button></body>",
+        )
+        .unwrap();
+        let simpul = pohon(&doc);
+        assert_eq!(
+            cari(&simpul, "button", "dari-b").name,
+            "dari-b",
+            "rantai a->b harus sampai ke ujungnya"
+        );
+    }
+
+    #[test]
+    fn siklus_labelledby_tidak_menggantung() {
+        let doc = Document::parse_html(
+            "<body><span id=\"p\" aria-labelledby=\"q\">p</span>\
+             <span id=\"q\" aria-labelledby=\"p\">q</span></body>",
+        )
+        .unwrap();
+        let simpul = pohon(&doc);
+        // Inti tes ini bukan nilai namanya, tapi bahwa panggilan di atas
+        // KEMBALI. Tanpa penjaga siklus, pohon(&doc) tidak pernah selesai.
+        assert!(!simpul.is_empty(), "pohon tetap terbangun");
+    }
+
+    #[test]
+    fn status_focusable_selected_expanded_terbaca() {
+        let doc = Document::parse_html(
+            "<body><input type=\"checkbox\" checked>\
+             <button aria-expanded=\"true\">Menu</button>\
+             <select><option selected>satu</option><option>dua</option></select>\
+             <a href=\"/x\">tautan</a><a>tanpa-href</a>\
+             <button disabled>mati</button></body>",
+        )
+        .unwrap();
+        let simpul = pohon(&doc);
+
+        let kotak = cari(&simpul, "checkbox", "");
+        assert_eq!(kotak.checked, Some(true), "checked pada checkbox");
+        assert!(kotak.focusable, "checkbox fokusabel");
+
+        let menu = cari(&simpul, "button", "Menu");
+        assert_eq!(menu.expanded, Some(true), "aria-expanded terbaca");
+
+        let satu = cari(&simpul, "option", "satu");
+        assert_eq!(satu.selected, Some(true), "<option selected> terbaca");
+
+        assert!(
+            cari(&simpul, "link", "tautan").focusable,
+            "<a href> fokusabel"
+        );
+        assert!(
+            !cari(&simpul, "link", "tanpa-href").focusable,
+            "<a> tanpa href tidak fokusabel"
+        );
+
+        let mati = cari(&simpul, "button", "mati");
+        assert!(mati.disabled, "disabled terbaca");
+        assert!(!mati.focusable, "elemen disabled tidak fokusabel");
+    }
+
+    #[test]
+    fn properties_hanya_memuat_status_yang_berlaku() {
+        let doc = Document::parse_html(
+            "<body><button aria-expanded=\"false\">Tutup</button><p>teks</p></body>",
+        )
+        .unwrap();
+        let isi = json_pohon(&doc);
+        let simpul = isi["nodes"].as_array().expect("nodes array");
+
+        let tombol = simpul
+            .iter()
+            .find(|n| n["role"]["value"] == "button")
+            .expect("tombol ada");
+        let props = tombol["properties"]
+            .as_array()
+            .expect("tombol punya properties");
+        let nama_props: Vec<&str> = props.iter().filter_map(|p| p["name"].as_str()).collect();
+        assert!(nama_props.contains(&"focusable"), "{nama_props:?}");
+        assert!(nama_props.contains(&"expanded"), "{nama_props:?}");
+        assert!(
+            !nama_props.contains(&"selected"),
+            "tombol tidak punya konsep selected: {nama_props:?}"
+        );
+
+        let ekspansi = props
+            .iter()
+            .find(|p| p["name"] == "expanded")
+            .expect("ada properti expanded");
+        assert_eq!(
+            ekspansi["value"]["value"],
+            json!(false),
+            "false tetap dikirim"
+        );
+        assert_eq!(ekspansi["value"]["type"], "booleanOrUndefined");
+
+        let paragraf = simpul
+            .iter()
+            .find(|n| n["role"]["value"] == "paragraph")
+            .expect("paragraf ada");
+        assert!(
+            paragraf.get("properties").is_none(),
+            "simpul tanpa status tidak punya array properties kosong"
+        );
+    }
+
+    #[test]
+    fn nama_option_dari_isi_bukan_dari_value() {
+        // `value` adalah nilai yang dikirim ke server, bukan yang dibaca
+        // pengguna. Memakainya sebagai nama akan membuat daftar pilihan
+        // terbaca sebagai kode internal yang tidak pernah tampil di layar.
+        let doc = Document::parse_html(
+            "<body><select><option value=\"kode-1\">Pilihan satu</option></select></body>",
+        )
+        .unwrap();
+        let simpul = pohon(&doc);
+        assert_eq!(cari(&simpul, "option", "Pilihan satu").name, "Pilihan satu");
+        assert!(
+            simpul.iter().all(|n| n.name != "kode-1"),
+            "nilai kirim tidak boleh jadi nama"
+        );
     }
 }
