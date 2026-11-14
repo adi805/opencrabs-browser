@@ -123,9 +123,17 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // (diuji di `native::layout`); yang menggantikannya adalah batas yang
     // lebih sempit: satu face, tanpa webfont, tanpa shaping.
     // "raster tidak melukis teks" juga dicabut setelah `native::paint`
-    // melukis glyph dari outline TrueType; yang tersisa adalah batas yang
-    // lebih sempit: tanpa gambar/gradien/border, tanpa tebal sintetis,
-    // `justify` masih rata kiri, dan tidak ada pemotongan ke kotak.
+    // melukis glyph dari outline TrueType, lalu klausa "tanpa gambar/gradien/
+    // border, tanpa tebal sintetis, `justify` rata kiri, tidak ada pemotongan"
+    // dicabut setelah keempatnya dilukis; yang tersisa adalah batas yang lebih
+    // sempit: tanpa bayangan, `border` per sisi, dan `object-fit` selain
+    // `fill`.
+    // "mesin tidak mengirim peristiwa CDP" dicabut setelah
+    // `cdp::native_wire::peristiwa` mengantre `Runtime.consoleAPICalled`,
+    // `Runtime.executionContextCreated`, `Page.loadEventFired`, dan
+    // `Network.requestWillBeSent`/`responseReceived`, lalu `layani` mengurasnya
+    // sesudah tiap frame; yang menggantikannya adalah batas yang lebih sempit:
+    // tidak ada jalur dorong, dan domain lain belum ada.
     // "stylesheet eksternal tidak diambil" dicabut setelah
     // `cdp::native_wire::gaya` mengambil `<link rel=stylesheet>` beserta
     // `@import` rekursif dan memasangnya di posisi `<link>`-nya; yang
@@ -192,6 +200,23 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // `optimizeForSpeed`, dan `clip.scale` sungguhan (dirender ulang pada
     // kerapatan itu), jadi kalimat "hanya PNG pada skala 1" tidak boleh
     // kembali: pembaca akan mengira format dan skala masih ditolak.
+    // Klausa lama "belum melukis gambar, gradien, border, maupun radius"
+    // sudah tidak benar sejak `native::paint` melukis keempatnya (diuji di
+    // modul itu: gradien, border, radius, PNG, dan JPEG). Kalau klausa itu
+    // kembali, pembaca mengira halaman bergambar masih keluar sebagai kotak
+    // kosong.
+    for usang in [
+        "belum melukis gambar",
+        "belum melukis gradien",
+        "justify` diperlakukan seperti rata kiri",
+        "tidak ada tebal sintetis",
+        "glyph tidak dipotong",
+    ] {
+        assert!(
+            !semua.contains(usang),
+            "kemampuan raster sudah ditutup, jangan kembalikan `{usang}`: {semua}"
+        );
+    }
     assert!(
         !semua.contains("hanya PNG pada skala 1"),
         "screenshot sudah multi-format dan multi-skala: {semua}"

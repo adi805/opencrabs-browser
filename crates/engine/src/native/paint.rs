@@ -1,16 +1,21 @@
 //! Rasterisasi kotak layout menjadi PNG lewat `tiny-skia`.
 //!
-//! Ini lapisan **eyes** versi minimum yang bisa dipertanggungjawabkan: yang
-//! dilukis adalah latar kotak dari kaskade ([`super::css::Kaskade`]) dan outline
+//! Ini lapisan **eyes**: yang dilukis adalah latar kotak dari kaskade
+//! ([`super::css::Kaskade`]) beserta gradiennya, garis `border` dengan
+//! `border-radius`, isi `<img>` yang byte-nya diserahkan pemanggil, dan outline
 //! glyph dari face TrueType yang sama dengan pengukur layout ([`super::teks`]).
-//! Gambar, gradien, bayangan, border, radius, shaping, dan font fallback belum
-//! dilukis atau dihitung; batasnya disebut di [`super::CELAH`], bukan ditutupi
-//! dengan warna atau bentuk karangan.
+//! Bayangan, shaping, dan font fallback belum ada; batasnya disebut di
+//! [`super::CELAH`], bukan ditutupi dengan warna atau bentuk karangan.
 //!
 //! Warna yang tidak dikenali **tidak** ditebak: deklarasinya masuk ke
 //! [`Raster::diabaikan`] dan pikselnya dibiarkan seperti latar.
 
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
+use std::collections::HashMap;
+
+use tiny_skia::{
+    Color, FillRule, FilterQuality, GradientStop, LinearGradient, Mask, Paint, Path, PathBuilder,
+    Pixmap, PixmapPaint, Point, RadialGradient, Rect, Shader, SpreadMode, Stroke, Transform,
+};
 
 use super::NativeError;
 use super::css::LembarLuar;
@@ -109,6 +114,10 @@ pub struct Raster {
     pub baris_dilukis: usize,
     /// Berapa glyph yang benar-benar dilukis.
     pub glyph_dilukis: usize,
+    /// Berapa `<img>` yang benar-benar dilukis dari byte yang diserahkan
+    /// pemanggil. `0` berarti tidak ada gambar yang berhasil didekode, bukan
+    /// berarti halaman tidak punya gambar.
+    pub gambar_dilukis: usize,
     /// Deklarasi warna yang bentuknya dikenali tapi nilainya tidak didukung.
     pub diabaikan: Vec<String>,
 }
@@ -166,6 +175,25 @@ pub fn lukis_dengan_lembar(
     format: Format,
     eksternal: &[LembarLuar],
 ) -> Result<Raster, NativeError> {
+    lukis_dengan_sumber(doc, viewport, klip, format, eksternal, &HashMap::new())
+}
+
+/// Melukis dokumen dengan lembar gaya eksternal **dan** byte gambar yang sudah
+/// diambil pemanggil.
+///
+/// Peta `gambar` memetakan nilai `src` apa adanya ke byte berkasnya. Mesin ini
+/// tidak membuka soket sendiri: pengambilan gambar tunduk pada kebijakan
+/// jaringan daemon, sama seperti `fetch()` dan `<link rel=stylesheet>`. `src`
+/// yang tidak ada di peta tidak dilukis dan dilaporkan di
+/// [`Raster::diabaikan`], bukan diganti kotak abu-abu.
+pub fn lukis_dengan_sumber(
+    doc: &Document,
+    viewport: Viewport,
+    klip: Option<Klip>,
+    format: Format,
+    eksternal: &[LembarLuar],
+    gambar: &HashMap<String, Vec<u8>>,
+) -> Result<Raster, NativeError> {
     let laporan = layout::hitung_dengan(doc, viewport, eksternal)?;
     let kerapatan = klip.map_or(1.0, |k| k.kerapatan());
     let (lebar, tinggi, geser) = match klip {
@@ -190,34 +218,102 @@ pub fn lukis_dengan_lembar(
     let mut kotak_dilukis = 0usize;
     let mut baris_dilukis = 0usize;
     let mut glyph_dilukis = 0usize;
+    let mut gambar_dilukis = 0usize;
     let mut diabaikan = Vec::new();
     for kotak in &laporan.kotak {
-        // Warna dibaca dari gaya hasil kaskade, bukan dari atribut `style`:
-        // aturan `<style>` harus ikut terpakai, dan layout serta lukis wajib
-        // memakai angka yang sama.
-        let Some(deklarasi) = laporan.gaya.get(&kotak.node) else {
-            continue;
-        };
-        let Some((nama_deklarasi, warna)) = warna_latar(deklarasi) else {
-            continue;
-        };
-        let Some(warna) = warna else {
-            diabaikan.push(format!(
-                "node {}: `{nama_deklarasi}` tidak didukung",
-                kotak.node
-            ));
-            continue;
-        };
-        if warna.alpha() == 0.0 || kotak.width <= 0.0 || kotak.height <= 0.0 {
+        if kotak.width <= 0.0 || kotak.height <= 0.0 {
             continue;
         }
         let Some(rect) = Rect::from_xywh(kotak.x, kotak.y, kotak.width, kotak.height) else {
             continue;
         };
-        let mut paint = Paint::default();
-        paint.set_color(warna);
-        pixmap.fill_rect(rect, &paint, transform, None);
-        kotak_dilukis += 1;
+        let deklarasi: &[(String, String)] =
+            laporan.gaya.get(&kotak.node).map_or(&[][..], Vec::as_slice);
+        let radius = sudut_radius(deklarasi);
+        let jalur = jalur_kotak(rect, radius);
+
+        // Latar: warna solid lebih dulu, lalu gradien. Deklarasi yang bentuknya
+        // dikenali tapi tidak bisa dilukis masuk laporan, bukan jadi tebakan.
+        match warna_latar(deklarasi) {
+            Some((_, Some(warna))) => {
+                if warna.alpha() > 0.0 {
+                    let mut paint = Paint::default();
+                    paint.set_color(warna);
+                    pixmap.fill_path(&jalur, &paint, FillRule::Winding, transform, None);
+                    kotak_dilukis += 1;
+                }
+            }
+            Some((nama_deklarasi, None)) => match gradien_latar(deklarasi) {
+                Some(gradien) => {
+                    if let Some(shader) = shader_gradien(&gradien, rect) {
+                        let paint = Paint {
+                            shader,
+                            ..Paint::default()
+                        };
+                        pixmap.fill_path(&jalur, &paint, FillRule::Winding, transform, None);
+                        kotak_dilukis += 1;
+                    } else {
+                        diabaikan.push(format!(
+                            "node {}: `{nama_deklarasi}` tidak bisa dipetakan ke kotaknya",
+                            kotak.node
+                        ));
+                    }
+                }
+                None => diabaikan.push(format!(
+                    "node {}: `{nama_deklarasi}` tidak didukung",
+                    kotak.node
+                )),
+            },
+            None => {}
+        }
+
+        // Garis tepi dilukis di dalam kotak: jalurnya digeser setengah tebal
+        // supaya stroke tidak melebar ke luar batas elemen seperti di CSS.
+        if let Some((tebal, warna)) = tepi(deklarasi, &mut diabaikan, kotak.node) {
+            let setengah = tebal / 2.0;
+            let dalam = Rect::from_xywh(
+                kotak.x + setengah,
+                kotak.y + setengah,
+                kotak.width - tebal,
+                kotak.height - tebal,
+            );
+            if let Some(dalam) = dalam {
+                let mut paint = Paint::default();
+                paint.set_color(warna);
+                paint.anti_alias = true;
+                let stroke = Stroke {
+                    width: tebal,
+                    ..Stroke::default()
+                };
+                let jalur_tepi = jalur_kotak(dalam, (radius - setengah).max(0.0));
+                pixmap.stroke_path(&jalur_tepi, &paint, &stroke, transform, None);
+                kotak_dilukis += 1;
+            }
+        }
+
+        // Isi `<img>`: byte-nya datang dari pemanggil, tidak diambil di sini.
+        if let Some(node) = doc.node(kotak.node)
+            && node.tag() == Some("img")
+        {
+            let src = node.attr("src").unwrap_or("");
+            match gambar.get(src) {
+                Some(bytes) => match dekode_gambar(bytes) {
+                    Some(gambar) => {
+                        lukis_gambar(&mut pixmap, &gambar, rect, radius, transform);
+                        gambar_dilukis += 1;
+                    }
+                    None => diabaikan.push(format!(
+                        "node {}: `src=\"{src}\"` bukan PNG/JPEG yang bisa didekode",
+                        kotak.node
+                    )),
+                },
+                None if !src.is_empty() => diabaikan.push(format!(
+                    "node {}: `src=\"{src}\"` tidak diserahkan pemanggil",
+                    kotak.node
+                )),
+                None => {}
+            }
+        }
     }
 
     // Teks dilukis setelah latar, supaya glyph tidak tertimpa kotak yang
@@ -234,7 +330,8 @@ pub fn lukis_dengan_lembar(
         };
         let gaya = laporan.terhitung.get(node).cloned().unwrap_or_default();
         let warna = warna_teks(&gaya, &mut diabaikan, *node);
-        let (baris, glyph) = lukis_teks(&mut pixmap, isi, &gaya, &kotak, warna, geser, kerapatan);
+        let potong = potong_teks(doc, &laporan, *node);
+        let (baris, glyph) = lukis_teks(&mut pixmap, isi, &gaya, &kotak, warna, transform, potong);
         baris_dilukis += baris;
         glyph_dilukis += glyph;
     }
@@ -252,6 +349,7 @@ pub fn lukis_dengan_lembar(
         kotak_dilukis,
         baris_dilukis,
         glyph_dilukis,
+        gambar_dilukis,
         diabaikan,
     })
 }
@@ -380,8 +478,12 @@ impl ttf_parser::OutlineBuilder for PembangunGlyph {
 ///
 /// Pembungkusan memakai [`super::teks::bungkus`] pada lebar kotak, jadi baris
 /// yang dilukis adalah baris yang menghasilkan tinggi kotak itu. Perataan
-/// mengikuti `text-align` warisan; `justify` diperlakukan seperti `left`
-/// karena peregangan spasi belum ada, dan itu dicatat di [`super::CELAH`].
+/// mengikuti `text-align` warisan; `justify` benar-benar meregangkan spasi pada
+/// semua baris kecuali baris terakhir, sama seperti CSS. `font-weight` 600 ke
+/// atas ditebalkan secara sintetis, karena mesin ini hanya menanam satu face:
+/// glyph yang sama dilukis dua kali dengan geseran kecil. Kalau `potong` benar,
+/// glyph dipotong ke kotak elemen lewat mask, jadi `overflow: hidden` benar
+/// benar menyembunyikan bagian yang keluar, bukan sekadar diterima.
 /// Mengembalikan `(baris, glyph)` yang benar-benar dilukis.
 fn lukis_teks(
     pixmap: &mut Pixmap,
@@ -389,8 +491,8 @@ fn lukis_teks(
     gaya: &GayaTerhitung,
     kotak: &Kotak,
     warna: Color,
-    geser: (f32, f32),
-    kerapatan: f32,
+    transform: Transform,
+    potong: bool,
 ) -> (usize, usize) {
     let Some(face) = super::teks::face() else {
         return (0, 0);
@@ -407,16 +509,43 @@ fn lukis_teks(
     let mut paint = Paint::default();
     paint.set_color(warna);
     paint.anti_alias = true;
+    let mask = if potong {
+        mask_kotak(pixmap, kotak, transform)
+    } else {
+        None
+    };
+
+    // Tebal sintetis: satu face hanya punya satu bobot, jadi glyph yang sama
+    // dilukis ulang dengan geseran sepersekian em. Ambang 600 sama dengan
+    // `font-weight: semibold` ke atas, dan nilainya nol untuk bobot normal
+    // supaya tidak ada piksel tambahan yang tidak diminta.
+    let tebal_sintetis = if gaya.tebal_font >= 600 {
+        (gaya.ukuran_font * 0.03).max(0.4)
+    } else {
+        0.0
+    };
+    let perataan = gaya.perataan.as_deref();
+    let rata_tengah = perataan == Some("center");
+    let rata_kanan = matches!(perataan, Some("right") | Some("end"));
+    let rata_justify = perataan == Some("justify");
+    let jumlah_baris = baris.len();
 
     let mut dilukis_baris = 0usize;
     let mut dilukis_glyph = 0usize;
     for (i, isi_baris) in baris.iter().enumerate() {
         let lebar_baris = super::teks::lebar(isi_baris, gaya.ukuran_font);
-        let x_awal = match gaya.perataan.as_deref() {
-            Some("center") => kotak.x + (kotak.width - lebar_baris) / 2.0,
-            Some("right") | Some("end") => kotak.x + kotak.width - lebar_baris,
-            // `left`, `start`, `justify`, dan nilai tak dikenal: rata kiri.
-            _ => kotak.x,
+        // Baris terakhir `justify` tetap rata kiri: CSS tidak meregangkan baris
+        // penutup, dan meregangkannya akan membuat satu kata tampak terpecah.
+        let (x_awal, tambahan_spasi) = if rata_justify && i + 1 < jumlah_baris {
+            let spasi = isi_baris.chars().filter(|c| *c == ' ').count();
+            let sisa = (kotak.width - lebar_baris).max(0.0);
+            (kotak.x, if spasi > 0 { sisa / spasi as f32 } else { 0.0 })
+        } else if rata_tengah {
+            (kotak.x + (kotak.width - lebar_baris) / 2.0, 0.0)
+        } else if rata_kanan {
+            (kotak.x + kotak.width - lebar_baris, 0.0)
+        } else {
+            (kotak.x, 0.0)
         };
         let baseline = kotak.y + baseline_baris + i as f32 * gaya.tinggi_baris;
         let mut pena = x_awal;
@@ -427,19 +556,26 @@ fn lukis_teks(
             if face.outline_glyph(glyph, &mut pembangun).is_some()
                 && let Some(jalur) = pembangun.jalur.finish()
             {
-                // Sumbu Y font ke atas, kanvas ke bawah: skala negatif pada
-                // Y. Pena dan baseline masih satuan CSS, jadi kerapatan
-                // dikalikan di sini sebelum diterjemahkan ke piksel.
-                let transform = Transform::from_translate(
-                    pena * kerapatan + geser.0,
-                    baseline * kerapatan + geser.1,
-                )
-                .pre_scale(skala * kerapatan, -skala * kerapatan);
-                pixmap.fill_path(&jalur, &paint, FillRule::Winding, transform, None);
+                // Sumbu Y font ke atas, kanvas ke bawah: skala negatif pada Y.
+                // Pena dan baseline masih satuan CSS; `transform` sudah membawa
+                // kerapatan dan geseran klip.
+                let t = transform
+                    .pre_translate(pena, baseline)
+                    .pre_scale(skala, -skala);
+                pixmap.fill_path(&jalur, &paint, FillRule::Winding, t, mask.as_ref());
+                if tebal_sintetis > 0.0 {
+                    let t2 = transform
+                        .pre_translate(pena + tebal_sintetis, baseline)
+                        .pre_scale(skala, -skala);
+                    pixmap.fill_path(&jalur, &paint, FillRule::Winding, t2, mask.as_ref());
+                }
                 dilukis_glyph += 1;
                 ada_glyph = true;
             }
             pena += super::teks::lebar_karakter(c, gaya.ukuran_font);
+            if c == ' ' {
+                pena += tambahan_spasi;
+            }
         }
         if ada_glyph {
             dilukis_baris += 1;
@@ -578,6 +714,538 @@ fn warna_nama(nama: &str) -> Option<Color> {
         _ => return None,
     };
     Some(Color::from_rgba8(r, g, b, 255))
+}
+
+/// Satu gradien latar yang sudah diurai dari deklarasi CSS.
+#[derive(Debug, Clone, PartialEq)]
+enum Gradien {
+    /// `linear-gradient(<arah>, <stop>...)`. Sudut mengikuti CSS: `0deg` ke
+    /// atas, `90deg` ke kanan.
+    Linear {
+        derajat: f32,
+        stop: Vec<(f32, Color)>,
+    },
+    /// `radial-gradient(<stop>...)`. Pusat di tengah kotak, jari-jari setengah
+    /// sisi terpanjang.
+    Radial { stop: Vec<(f32, Color)> },
+}
+
+impl Gradien {
+    fn stop(&self) -> &[(f32, Color)] {
+        match self {
+            Self::Linear { stop, .. } | Self::Radial { stop } => stop,
+        }
+    }
+}
+
+/// Mencari deklarasi gradien latar di antara deklarasi pemenang kaskade.
+///
+/// `background-image` didahulukan atas shorthand `background`, sama seperti
+/// urutan prioritas di [`warna_latar`]. `None` berarti tidak ada gradien yang
+/// bisa diurai; pemanggil yang memutuskan apakah itu dilaporkan.
+fn gradien_latar(deklarasi: &[(String, String)]) -> Option<Gradien> {
+    for kunci in ["background-image", "background"] {
+        let Some((_, nilai)) = deklarasi.iter().find(|(k, _)| k == kunci) else {
+            continue;
+        };
+        if let Some(g) = urai_gradien(nilai) {
+            return Some(g);
+        }
+    }
+    None
+}
+
+/// Mengurai `linear-gradient(...)` atau `radial-gradient(...)`.
+///
+/// Hanya bentuk yang benar-benar dilukis yang diterima: dua stop atau lebih,
+/// warna yang dikenali [`urai_warna`], dan arah yang bisa dipetakan ke sudut.
+/// Bentuk lain menghasilkan `None` supaya dilaporkan, bukan diganti gradien
+/// karangan.
+fn urai_gradien(nilai: &str) -> Option<Gradien> {
+    let v = nilai.trim();
+    let (linear, isi) = if let Some(s) = v.strip_prefix("linear-gradient(") {
+        (true, s)
+    } else {
+        (false, v.strip_prefix("radial-gradient(")?)
+    };
+    let isi = isi.trim_end().strip_suffix(')')?;
+    let bagian = pecah_koma(isi);
+    if bagian.len() < 2 {
+        return None;
+    }
+    // Argumen pertama hanya arah kalau ia memang arah. `red, blue` tidak punya
+    // arah, dan itu berarti gradien ke bawah menurut CSS.
+    let (derajat, sisa) = match urai_arah_gradien(&bagian[0]) {
+        Some(d) => (d, &bagian[1..]),
+        None if linear => (180.0, &bagian[..]),
+        None => (0.0, &bagian[..]),
+    };
+    let mut stop = Vec::with_capacity(sisa.len());
+    for (i, mentah) in sisa.iter().enumerate() {
+        let (warna_teks, posisi) = pisah_posisi(mentah);
+        let warna = urai_warna(&warna_teks)?;
+        let p = posisi.unwrap_or_else(|| {
+            if sisa.len() <= 1 {
+                0.0
+            } else {
+                i as f32 / (sisa.len() - 1) as f32
+            }
+        });
+        stop.push((p.clamp(0.0, 1.0), warna));
+    }
+    if stop.len() < 2 {
+        return None;
+    }
+    if linear {
+        Some(Gradien::Linear { derajat, stop })
+    } else {
+        Some(Gradien::Radial { stop })
+    }
+}
+
+/// Memecah argumen fungsi CSS pada koma di kedalaman nol.
+///
+/// `rgb(1, 2, 3)` mengandung koma yang bukan pemisah argumen; memakai
+/// `split(',')` biasa akan memotong warnanya jadi tiga bagian yang tidak bisa
+/// diurai.
+fn pecah_koma(isi: &str) -> Vec<String> {
+    let mut hasil = Vec::new();
+    let mut kini = String::new();
+    let mut dalam = 0i32;
+    for c in isi.chars() {
+        match c {
+            '(' => {
+                dalam += 1;
+                kini.push(c);
+            }
+            ')' => {
+                dalam -= 1;
+                kini.push(c);
+            }
+            ',' if dalam == 0 => {
+                if !kini.trim().is_empty() {
+                    hasil.push(kini.trim().to_owned());
+                }
+                kini.clear();
+            }
+            _ => kini.push(c),
+        }
+    }
+    if !kini.trim().is_empty() {
+        hasil.push(kini.trim().to_owned());
+    }
+    hasil
+}
+
+/// Arah gradien linear sebagai sudut CSS, atau `None` kalau bukan arah.
+fn urai_arah_gradien(nilai: &str) -> Option<f32> {
+    let v = nilai.trim().to_ascii_lowercase();
+    if let Some(deg) = v.strip_suffix("deg") {
+        return deg.trim().parse::<f32>().ok();
+    }
+    let sisa = v.strip_prefix("to ")?;
+    let kata: Vec<&str> = sisa.split_whitespace().collect();
+    match kata.as_slice() {
+        ["top"] => Some(0.0),
+        ["right"] => Some(90.0),
+        ["bottom"] => Some(180.0),
+        ["left"] => Some(270.0),
+        ["top", "right"] | ["right", "top"] => Some(45.0),
+        ["bottom", "right"] | ["right", "bottom"] => Some(135.0),
+        ["bottom", "left"] | ["left", "bottom"] => Some(225.0),
+        ["top", "left"] | ["left", "top"] => Some(315.0),
+        _ => None,
+    }
+}
+
+/// Memisahkan posisi opsional di ujung satu stop, mis. `#fff 40%`.
+///
+/// Pencarian dilakukan dari belakang pada kedalaman kurung nol, jadi spasi di
+/// dalam `rgb(255, 255, 255)` tidak dianggap pemisah.
+fn pisah_posisi(nilai: &str) -> (String, Option<f32>) {
+    let mut dalam = 0i32;
+    let mut potong = None;
+    for (i, c) in nilai.char_indices().rev() {
+        match c {
+            ')' => dalam += 1,
+            '(' => dalam -= 1,
+            c if c.is_whitespace() && dalam == 0 => {
+                potong = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(i) = potong else {
+        return (nilai.trim().to_owned(), None);
+    };
+    let (kiri, kanan) = nilai.split_at(i);
+    let kanan = kanan.trim();
+    match kanan
+        .strip_suffix('%')
+        .and_then(|p| p.trim().parse::<f32>().ok())
+    {
+        Some(p) => (kiri.trim().to_owned(), Some(p / 100.0)),
+        None => (nilai.trim().to_owned(), None),
+    }
+}
+
+/// Shader gradien untuk satu kotak, dalam koordinat CSS kotak itu.
+///
+/// Transformasi yang dipakai saat melukis ikut diterapkan ke shader, jadi
+/// titik di sini cukup ditulis pada satuan CSS yang sama dengan jalurnya.
+fn shader_gradien(g: &Gradien, rect: Rect) -> Option<Shader<'static>> {
+    let stop: Vec<GradientStop> = g
+        .stop()
+        .iter()
+        .map(|(p, c)| GradientStop::new(*p, *c))
+        .collect();
+    match g {
+        Gradien::Linear { derajat, .. } => {
+            let (x0, y0, x1, y1) = titik_linear(*derajat, rect);
+            LinearGradient::new(
+                Point::from_xy(x0, y0),
+                Point::from_xy(x1, y1),
+                stop,
+                SpreadMode::Pad,
+                Transform::identity(),
+            )
+        }
+        Gradien::Radial { .. } => {
+            let pusat = Point::from_xy(
+                rect.x() + rect.width() / 2.0,
+                rect.y() + rect.height() / 2.0,
+            );
+            let jari = rect.width().max(rect.height()) / 2.0;
+            RadialGradient::new(
+                pusat,
+                pusat,
+                jari,
+                stop,
+                SpreadMode::Pad,
+                Transform::identity(),
+            )
+        }
+    }
+}
+
+/// Titik awal dan akhir gradien linear pada satu kotak.
+///
+/// Sudut CSS 0 derajat berarti "ke atas", jadi vektornya `(sin, -cos)`. Panjang
+/// garis diambil dari proyeksi kotak pada arah itu supaya seluruh kotak
+/// tercakup, bukan cuma separuh.
+fn titik_linear(derajat: f32, rect: Rect) -> (f32, f32, f32, f32) {
+    let rad = derajat.to_radians();
+    let (dx, dy) = (rad.sin(), -rad.cos());
+    let cx = rect.x() + rect.width() / 2.0;
+    let cy = rect.y() + rect.height() / 2.0;
+    let setengah = (rect.width() * dx.abs() + rect.height() * dy.abs()) / 2.0;
+    (
+        cx - dx * setengah,
+        cy - dy * setengah,
+        cx + dx * setengah,
+        cy + dy * setengah,
+    )
+}
+
+/// Jalur kotak, dengan sudut membulat kalau `radius` positif.
+///
+/// Jari-jari dipotong ke setengah sisi terpendek, sama seperti CSS: radius yang
+/// lebih besar dari kotaknya tidak boleh membuat jalur terbalik.
+fn jalur_kotak(rect: Rect, radius: f32) -> Path {
+    let r = radius.min(rect.width().min(rect.height()) / 2.0).max(0.0);
+    if r <= 0.0 {
+        return PathBuilder::from_rect(rect);
+    }
+    let (x, y, w, h) = (rect.x(), rect.y(), rect.width(), rect.height());
+    // Konstanta busur lingkaran: 4/3 * (sqrt(2) - 1). Nilai ini yang membuat
+    // cubic mendekati seperempat lingkaran, bukan kurva yang lebih gepeng.
+    let k = 0.552_284_8 * r;
+    let mut b = PathBuilder::new();
+    b.move_to(x + r, y);
+    b.line_to(x + w - r, y);
+    b.cubic_to(x + w - r + k, y, x + w, y + r - k, x + w, y + r);
+    b.line_to(x + w, y + h - r);
+    b.cubic_to(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h);
+    b.line_to(x + r, y + h);
+    b.cubic_to(x + r - k, y + h, x, y + h - r + k, x, y + h - r);
+    b.line_to(x, y + r);
+    b.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    b.close();
+    // Satu subpath dengan lima ruas tidak mungkin kosong; kalau `finish`
+    // mengembalikan `None`, kotaknya nol dan pemanggil tidak melukis apa pun.
+    b.finish().unwrap_or_else(|| PathBuilder::from_rect(rect))
+}
+
+/// `border-radius` dari deklarasi pemenang, dalam px.
+///
+/// Bentuk empat nilai (`10px 10px 0 0`) dan bentuk garis miring
+/// (`10px / 20px`) belum dipetakan: yang dipakai nilai pertama, dan sisanya
+/// bukan tebakan.
+fn sudut_radius(deklarasi: &[(String, String)]) -> f32 {
+    deklarasi
+        .iter()
+        .find(|(k, _)| k == "border-radius")
+        .and_then(|(_, v)| v.split_whitespace().next().and_then(panjang_px))
+        .unwrap_or(0.0)
+        .max(0.0)
+}
+
+/// Gaya garis tepi yang dikenali. `solid` satu-satunya yang dilukis; sisanya
+/// dilaporkan, bukan diganti garis penuh.
+const GAYA_TEPI: &[&str] = &[
+    "solid", "dashed", "dotted", "double", "none", "hidden", "groove", "ridge", "inset", "outset",
+];
+
+/// Panjang CSS sederhana dalam px. `None` untuk nilai yang bukan panjang.
+fn panjang_px(nilai: &str) -> Option<f32> {
+    let v = nilai.trim();
+    let angka = v.strip_suffix("px").map(str::trim).unwrap_or(v);
+    angka.parse::<f32>().ok().map(|n| n.max(0.0))
+}
+
+/// Garis tepi yang harus dilukis untuk satu kotak: `(tebal, warna)`.
+///
+/// `None` berarti tidak ada garis yang dilukis, dan alasannya sudah masuk
+/// [`Raster::diabaikan`] kalau bentuknya dikenali tapi tidak didukung.
+fn tepi(
+    deklarasi: &[(String, String)],
+    diabaikan: &mut Vec<String>,
+    node: NodeId,
+) -> Option<(f32, Color)> {
+    let ambil = |nama: &str| {
+        deklarasi
+            .iter()
+            .find(|(k, _)| k == nama)
+            .map(|(_, v)| v.trim())
+    };
+    let mut tebal: Option<f32> = None;
+    let mut gaya: Option<String> = None;
+    let mut warna: Option<Color> = None;
+    if let Some(v) = ambil("border") {
+        for bagian in v.split_whitespace() {
+            if let Some(px) = panjang_px(bagian) {
+                tebal = Some(px);
+            } else if GAYA_TEPI.contains(&bagian) {
+                gaya = Some(bagian.to_owned());
+            } else if let Some(c) = urai_warna(bagian) {
+                warna = Some(c);
+            }
+        }
+    }
+    if tebal.is_none() {
+        tebal = ambil("border-width").and_then(panjang_px);
+    }
+    if gaya.is_none() {
+        gaya = ambil("border-style").map(str::to_owned);
+    }
+    if warna.is_none() {
+        warna = ambil("border-color").and_then(urai_warna);
+    }
+    let tebal = tebal?;
+    let gaya = gaya.unwrap_or_else(|| "none".to_owned());
+    if tebal <= 0.0 || gaya == "none" || gaya == "hidden" {
+        return None;
+    }
+    if gaya != "solid" {
+        diabaikan.push(format!(
+            "node {node}: `border-style: {gaya}` tidak didukung"
+        ));
+        return None;
+    }
+    let warna = warna?;
+    if warna.alpha() == 0.0 {
+        return None;
+    }
+    Some((tebal, warna))
+}
+
+/// Gambar yang sudah didekode, RGBA *straight* (bukan premultiplied).
+struct GambarDekode {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// Mendekode PNG atau JPEG dari byte berkas, menurut magic bytes-nya.
+///
+/// Format lain menghasilkan `None` supaya pemanggil melaporkannya. Menebak
+/// format dari ekstensi `src` akan salah untuk URL tanpa ekstensi.
+fn dekode_gambar(bytes: &[u8]) -> Option<GambarDekode> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return dekode_png(bytes);
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return dekode_jpeg(bytes);
+    }
+    None
+}
+
+fn dekode_png(bytes: &[u8]) -> Option<GambarDekode> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // Semua kedalaman bit dan tipe warna dinormalkan ke 8 bit per kanal dulu,
+    // supaya jalur di bawah hanya menangani satu bentuk.
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    buf.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => rgb_ke_rgba(&buf),
+        png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|c| [c[0], c[0], c[0], c[1]])
+            .collect(),
+        // Palet seharusnya sudah dinormalkan oleh transformasi di atas; kalau
+        // masih sampai di sini, PLTE-nya tidak terbaca dan itu bukan gambar
+        // yang bisa dilukis dengan benar.
+        png::ColorType::Indexed => return None,
+    };
+    let (width, height) = (info.width, info.height);
+    if rgba.len() != (width as usize) * (height as usize) * 4 {
+        return None;
+    }
+    Some(GambarDekode {
+        rgba,
+        width,
+        height,
+    })
+}
+
+fn dekode_jpeg(bytes: &[u8]) -> Option<GambarDekode> {
+    let mut decoder =
+        zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(bytes));
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    let jumlah = (width as usize) * (height as usize);
+    if jumlah == 0 {
+        return None;
+    }
+    // Dekoder bisa mengeluarkan RGB atau RGBA menurut warna sumbernya; yang
+    // menentukan adalah panjang buffer, bukan asumsi.
+    let rgba = match pixels.len() / jumlah {
+        3 => rgb_ke_rgba(&pixels),
+        4 => pixels,
+        _ => return None,
+    };
+    if rgba.len() != jumlah * 4 {
+        return None;
+    }
+    Some(GambarDekode {
+        rgba,
+        width,
+        height,
+    })
+}
+
+fn rgb_ke_rgba(rgb: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
+    for p in rgb.as_chunks::<3>().0 {
+        out.extend_from_slice(&[p[0], p[1], p[2], 255]);
+    }
+    out
+}
+
+/// `tiny-skia` menyimpan warna premultiplied; dekoder mengeluarkan straight.
+fn premultiply(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len());
+    for p in rgba.as_chunks::<4>().0 {
+        let a = u32::from(p[3]);
+        out.push((u32::from(p[0]) * a / 255) as u8);
+        out.push((u32::from(p[1]) * a / 255) as u8);
+        out.push((u32::from(p[2]) * a / 255) as u8);
+        out.push(p[3]);
+    }
+    out
+}
+
+/// Melukis satu gambar ke dalam kotaknya, diskalakan mengikuti ukuran kotak.
+///
+/// `object-fit` bawaan CSS untuk `<img>` adalah `fill`: gambar meregang mengisi
+/// kotak tanpa menjaga rasio. Itu yang dilakukan di sini, bukan `contain`.
+fn lukis_gambar(
+    pixmap: &mut Pixmap,
+    gambar: &GambarDekode,
+    rect: Rect,
+    radius: f32,
+    transform: Transform,
+) {
+    let Some(size) = tiny_skia::IntSize::from_wh(gambar.width, gambar.height) else {
+        return;
+    };
+    let Some(sumber) = Pixmap::from_vec(premultiply(&gambar.rgba), size) else {
+        return;
+    };
+    let sx = rect.width() / gambar.width as f32;
+    let sy = rect.height() / gambar.height as f32;
+    let t = transform
+        .pre_translate(rect.x(), rect.y())
+        .pre_scale(sx, sy);
+    let mask = if radius > 0.0 {
+        let mut mask = match Mask::new(pixmap.width(), pixmap.height()) {
+            Some(m) => m,
+            None => return,
+        };
+        mask.fill_path(
+            &jalur_kotak(rect, radius),
+            FillRule::Winding,
+            true,
+            transform,
+        );
+        Some(mask)
+    } else {
+        None
+    };
+    let paint = PixmapPaint {
+        quality: FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    pixmap.draw_pixmap(0, 0, sumber.as_ref(), &paint, t, mask.as_ref());
+}
+
+/// Mask kotak untuk memotong glyph ke batas elemennya.
+fn mask_kotak(pixmap: &Pixmap, kotak: &Kotak, transform: Transform) -> Option<Mask> {
+    let rect = Rect::from_xywh(kotak.x, kotak.y, kotak.width, kotak.height)?;
+    let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
+    mask.fill_path(&jalur_kotak(rect, 0.0), FillRule::Winding, true, transform);
+    Some(mask)
+}
+
+/// Apakah teks node ini harus dipotong ke kotaknya.
+///
+/// Diputuskan dari `overflow` elemen pemilik teks dan leluhurnya, karena
+/// `overflow: hidden` pada wadah memotong isi anaknya juga. `visible` (bawaan
+/// CSS) berarti glyph boleh keluar kotak, dan itu yang terjadi sebelumnya.
+fn potong_teks(doc: &Document, laporan: &layout::LaporanLayout, node: NodeId) -> bool {
+    let mut kini = Some(node);
+    let mut kedalaman = 0;
+    while let Some(id) = kini {
+        if let Some(deklarasi) = laporan.gaya.get(&id)
+            && let Some((_, nilai)) = deklarasi.iter().find(|(k, _)| k == "overflow")
+        {
+            let v = nilai.trim();
+            if v.starts_with("hidden")
+                || v.starts_with("clip")
+                || v.starts_with("scroll")
+                || v.starts_with("auto")
+            {
+                return true;
+            }
+        }
+        kini = doc.node(id).and_then(|n| n.parent);
+        kedalaman += 1;
+        // Batas kedalaman menjaga siklus parent yang rusak (kalau ada) tidak
+        // berubah jadi loop tak berujung di jalur lukis.
+        if kedalaman > 64 {
+            break;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -934,6 +1602,265 @@ mod tests {
         assert!(
             kolom_paling_kanan < 100,
             "glyph tidak boleh melewati kotak 80px, dapat kolom {kolom_paling_kanan}"
+        );
+    }
+
+    /// Kolom paling kanan yang memuat piksel gelap di seluruh kanvas.
+    fn kolom_gelap_maks(raster: &Raster) -> u32 {
+        (0..raster.width)
+            .rev()
+            .find(|&x| piksel_gelap_di(raster, x, 0, 1, raster.height) > 0)
+            .unwrap_or(0)
+    }
+
+    /// PNG kecil satu warna, dibuat di tes supaya tidak ada berkas biner yang
+    /// harus ikut masuk repo.
+    fn png_satu_warna(w: u32, h: u32, warna: [u8; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("header PNG");
+            let data: Vec<u8> = (0..w * h).flat_map(|_| warna).collect();
+            writer.write_image_data(&data).expect("data PNG");
+        }
+        out
+    }
+
+    fn jpeg_satu_warna(w: u16, h: u16, warna: [u8; 3]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let enc = jpeg_encoder::Encoder::new(&mut out, 90);
+        let data: Vec<u8> = (0..w as usize * h as usize).flat_map(|_| warna).collect();
+        enc.encode(&data, w, h, jpeg_encoder::ColorType::Rgb)
+            .expect("data JPEG");
+        out
+    }
+
+    /// `linear-gradient(180deg, ...)` harus berjalan dari atas ke bawah: dua
+    /// ujung kotak berwarna berbeda, bukan satu warna datar.
+    #[test]
+    fn gradien_linear_melukis_dua_ujung() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:40px;height:40px;\
+             background:linear-gradient(180deg,#ff0000,#0000ff)\"></div></body>",
+        )
+        .unwrap();
+        let raster = lukis(&doc, Viewport::new(60.0, 60.0), None).unwrap();
+        assert_eq!(
+            raster.kotak_dilukis, 1,
+            "gradien harus dilukis sebagai latar"
+        );
+        let atas = raster.piksel(20, 2).unwrap();
+        let bawah = raster.piksel(20, 37).unwrap();
+        assert!(
+            atas[0] > 150 && atas[2] < 100,
+            "ujung atas harus merah, dapat {atas:?}"
+        );
+        assert!(
+            bawah[2] > 150 && bawah[0] < 100,
+            "ujung bawah harus biru, dapat {bawah:?}"
+        );
+    }
+
+    /// `radial-gradient` memusatkan stop pertama di tengah kotak: tengah
+    /// berbeda dari sudut, dan arahnya tidak boleh tertukar.
+    #[test]
+    fn gradien_radial_memusat_di_tengah() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:60px;height:60px;\
+             background:radial-gradient(#ff0000,#0000ff)\"></div></body>",
+        )
+        .unwrap();
+        let raster = lukis(&doc, Viewport::new(80.0, 80.0), None).unwrap();
+        let tengah = raster.piksel(30, 30).unwrap();
+        let sudut = raster.piksel(2, 2).unwrap();
+        assert!(
+            tengah[0] > 150 && tengah[2] < 100,
+            "pusat harus memakai stop pertama, dapat {tengah:?}"
+        );
+        assert!(
+            sudut[2] > 150 && sudut[0] < 100,
+            "sudut harus memakai stop terakhir, dapat {sudut:?}"
+        );
+    }
+
+    /// `border: 4px solid` dilukis di dalam kotak, jadi piksel di tepi berwarna
+    /// garis dan piksel di tengah tetap warna latar.
+    #[test]
+    fn border_dilukis_di_dalam_kotak() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:40px;height:40px;background:#ffffff;\
+             border:4px solid #00ff00\"></div></body>",
+        )
+        .unwrap();
+        let raster = lukis(&doc, Viewport::new(60.0, 60.0), None).unwrap();
+        let tepi = raster.piksel(1, 20).unwrap();
+        let tengah = raster.piksel(20, 20).unwrap();
+        assert!(
+            tepi[1] > 150 && tepi[0] < 100 && tepi[2] < 100,
+            "piksel tepi harus hijau, dapat {tepi:?}"
+        );
+        assert_eq!(tengah, [255, 255, 255, 255], "tengah tetap latar putih");
+    }
+
+    /// `border-radius` memotong sudut latar: pojok kotak kembali putih.
+    #[test]
+    fn border_radius_memotong_sudut() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:40px;height:40px;background:#ff0000;\
+             border-radius:20px\"></div></body>",
+        )
+        .unwrap();
+        let raster = lukis(&doc, Viewport::new(60.0, 60.0), None).unwrap();
+        assert_eq!(
+            raster.piksel(0, 0),
+            Some([255, 255, 255, 255]),
+            "sudut membulat harus tembus ke latar kanvas"
+        );
+        assert_eq!(
+            raster.piksel(20, 20),
+            Some([255, 0, 0, 255]),
+            "tengah kotak tetap terlukis"
+        );
+    }
+
+    /// `font-weight: 700` menebalkan glyph secara sintetis: piksel gelap harus
+    /// bertambah, bukan sama dengan bobot normal.
+    #[test]
+    fn tebal_sintetis_menambah_piksel_gelap() {
+        let lukis_tebal = |berat: u16| {
+            let html = format!("<body><p style=\"font-weight:{berat}\">Tebal</p></body>");
+            let doc = Document::parse_html(&html).unwrap();
+            let raster = lukis(&doc, Viewport::new(200.0, 80.0), None).unwrap();
+            assert_eq!(raster.glyph_dilukis, 5, "lima huruf harus jadi glyph");
+            jumlah_piksel_gelap(&raster)
+        };
+        let normal = lukis_tebal(400);
+        let tebal = lukis_tebal(700);
+        assert!(normal > 0, "bobot normal tetap harus terlukis");
+        assert!(
+            tebal > normal,
+            "bobot 700 harus menutup lebih banyak piksel: {tebal} vs {normal}"
+        );
+    }
+
+    /// `text-align: justify` meregangkan spasi sampai tepi kanan kotak, bukan
+    /// berhenti seperti rata kiri.
+    #[test]
+    fn justify_meregangkan_sampai_tepi_kanan() {
+        let lukis_perataan = |perataan: &str| {
+            let html = format!(
+                "<body><p style=\"width:100px;text-align:{perataan}\">\
+                 kata kata kata kata kata kata</p></body>"
+            );
+            let doc = Document::parse_html(&html).unwrap();
+            let raster = lukis(&doc, Viewport::new(160.0, 120.0), None).unwrap();
+            assert!(raster.baris_dilukis > 1, "teks harus dibungkus");
+            kolom_gelap_maks(&raster)
+        };
+        let kiri = lukis_perataan("left");
+        let justify = lukis_perataan("justify");
+        assert!(
+            justify >= 95,
+            "justify harus mendekati tepi kanan 100px, dapat {justify}"
+        );
+        assert!(kiri < 95, "rata kiri tidak meregangkan spasi, dapat {kiri}");
+    }
+
+    /// `overflow: hidden` memotong glyph ke kotak elemen; tanpa itu baris yang
+    /// lebih lebar tetap tergambar penuh seperti di CSS `visible`.
+    #[test]
+    fn overflow_hidden_memotong_glyph() {
+        let lukis_dengan_overflow = |tambahan: &str| {
+            let html = format!("<body><p style=\"width:30px;{tambahan}\">WWWWWWWWWWWW</p></body>");
+            let doc = Document::parse_html(&html).unwrap();
+            let raster = lukis(&doc, Viewport::new(200.0, 80.0), None).unwrap();
+            kolom_gelap_maks(&raster)
+        };
+        let terbuka = lukis_dengan_overflow("");
+        let terpotong = lukis_dengan_overflow("overflow:hidden;");
+        assert!(
+            terbuka > 50,
+            "tanpa overflow, kata panjang harus meluber, dapat {terbuka}"
+        );
+        assert!(
+            terpotong <= 31,
+            "overflow:hidden harus memotong di batas 30px, dapat {terpotong}"
+        );
+    }
+
+    /// `<img>` dilukis dari byte PNG yang diserahkan pemanggil, bukan dari
+    /// jaringan: yang diuji adalah dekode dan penempatan pikselnya.
+    #[test]
+    fn gambar_png_dilukis_dari_byte() {
+        let doc = Document::parse_html(
+            "<body><img src=\"a.png\" style=\"width:20px;height:20px\"></body>",
+        )
+        .unwrap();
+        let mut gambar = HashMap::new();
+        gambar.insert("a.png".to_owned(), png_satu_warna(4, 4, [255, 0, 0, 255]));
+        let raster = lukis_dengan_sumber(
+            &doc,
+            Viewport::new(60.0, 60.0),
+            None,
+            Format::Png { cepat: false },
+            &[],
+            &gambar,
+        )
+        .unwrap();
+        assert_eq!(raster.gambar_dilukis, 1, "satu <img> harus terlukis");
+        assert_eq!(
+            raster.piksel(5, 5),
+            Some([255, 0, 0, 255]),
+            "isi gambar harus mendarat di dalam kotaknya"
+        );
+    }
+
+    /// JPEG didekode lewat jalur yang berbeda dari PNG; kalau jalur itu tidak
+    /// ada, `<img src="x.jpg">` akan tampil kosong tanpa laporan.
+    #[test]
+    fn gambar_jpeg_dilukis_dari_byte() {
+        let doc = Document::parse_html(
+            "<body><img src=\"b.jpg\" style=\"width:24px;height:24px\"></body>",
+        )
+        .unwrap();
+        let mut gambar = HashMap::new();
+        gambar.insert("b.jpg".to_owned(), jpeg_satu_warna(8, 8, [0, 0, 255]));
+        let raster = lukis_dengan_sumber(
+            &doc,
+            Viewport::new(60.0, 60.0),
+            None,
+            Format::Png { cepat: false },
+            &[],
+            &gambar,
+        )
+        .unwrap();
+        assert_eq!(raster.gambar_dilukis, 1, "JPEG harus ikut terlukis");
+        let p = raster.piksel(6, 6).unwrap();
+        assert!(
+            p[2] > 150 && p[0] < 100 && p[1] < 100,
+            "piksel harus biru dari JPEG, dapat {p:?}"
+        );
+    }
+
+    /// `src` tanpa byte tidak dilukis dan dilaporkan, bukan diganti kotak
+    /// abu-abu yang terlihat seperti gambar rusak.
+    #[test]
+    fn gambar_tanpa_byte_dilaporkan() {
+        let doc = Document::parse_html(
+            "<body><img src=\"hilang.png\" style=\"width:20px;height:20px\"></body>",
+        )
+        .unwrap();
+        let raster = lukis(&doc, Viewport::new(60.0, 60.0), None).unwrap();
+        assert_eq!(raster.gambar_dilukis, 0);
+        assert!(
+            raster
+                .diabaikan
+                .iter()
+                .any(|s| s.contains("hilang.png") && s.contains("tidak diserahkan")),
+            "src yang tidak diserahkan harus dilaporkan: {:?}",
+            raster.diabaikan
         );
     }
 

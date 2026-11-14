@@ -72,14 +72,14 @@ pub const CELAH: &[&str] = &[
      `document.activeElement` tidak bergerak. Fase tangkap, `once`/`passive`, \
      dan `composedPath` belum ada, jadi `addEventListener(tipe, fn, true)` \
      diperlakukan sama dengan `false`",
-    "raster melukis latar kotak dan glyph teks, tapi belum melukis gambar, \
-     gradien, bayangan, garis (`border`), maupun `border-radius`. Teks dilukis \
-     dengan face yang sama seperti pengukuran, jadi tidak ada tebal sintetis: \
-     `font-weight` tidak mengubah bentuk glyph, hanya `font-size` dan warna \
-     yang berpengaruh. `text-align: justify` diperlakukan seperti rata kiri \
-     karena peregangan spasi belum ada, dan glyph tidak dipotong ke kotaknya \
-     (`overflow` belum ada), jadi baris yang lebih lebar dari kotak tetap \
-     tergambar penuh",
+    "raster melukis latar kotak dan glyph teks, termasuk gradien \
+     (`linear`/`radial`), garis `border: solid` dengan `border-radius`, isi \
+     `<img>` PNG/JPEG dari byte yang diserahkan pemanggil, tebal sintetis untuk \
+     `font-weight` 600 ke atas, peregangan spasi `justify`, dan pemotongan \
+     glyph pada `overflow: hidden`. Yang belum: `box-shadow`/`text-shadow`, \
+     `border-style` selain `solid` (dilaporkan, tidak dilukis), `border` per \
+     sisi (`border-left` dan sejenisnya), `object-fit` selain `fill`, dan tebal \
+     sungguhan dari face bold (yang ada hanya tebal sintetis dari satu face)",
     "`Page.captureScreenshot` mengeluarkan `png` dan `jpeg` saja: `webp` (dan \
      format lain di luar dua itu) belum punya encoder di mesin ini, jadi \
      permintaannya ditolak dengan nama formatnya. Yang sudah dihormati: \

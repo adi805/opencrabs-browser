@@ -35,6 +35,10 @@ nix = { version = "0.30", features = ["signal", "process", "fs"] }
 # Encoder JPEG untuk `Page.captureScreenshot` format `jpeg`. Rust murni,
 # tanpa dependensi, dan tidak memakai `unsafe` di jalur encode-nya.
 jpeg-encoder = "0.6"
+# Dekoder JPEG untuk melukis `<img>` dari byte dokumen. Rust murni, tanpa
+# `unsafe` di jalur publiknya, dan sudah ada di lock lewat `image` di pohon
+# dependensi dev; yang dipakai di sini hanya bagian JPEG-nya.
+zune-jpeg = "0.5"
 # Encoder PNG dengan pilihan level kompresi, supaya `optimizeForSpeed` punya
 # arti konkret alih-alih diterima lalu diabaikan. Versi ini sudah ada di lock
 # lewat `tiny-skia`, jadi tidak ada crate baru yang masuk.
