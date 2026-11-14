@@ -20,7 +20,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 /// Versi skema yang dipahami biner ini.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Retensi baris, dalam detik. Dokumen 02 §6 menetapkannya dalam hari.
 pub const RETENSI_CAPTCHA_SECS: i64 = 90 * 24 * 60 * 60;
@@ -237,9 +237,27 @@ pub fn migrate(conn: &Connection, path: &Path) -> Result<(), SchemaError> {
     if versi < 2 {
         conn.execute_batch(MIGRASI_V2)?;
     }
+    if versi < 3 {
+        conn.execute_batch(MIGRASI_V3)?;
+    }
 
     Ok(())
 }
+
+/// Skema versi 3: lembar gaya eksternal milik tab dingin.
+///
+/// Tab yang disingkirkan membawa CSS yang sudah diambil untuknya. Tanpa kolom
+/// ini, tab yang dihidupkan kembali kehilangan gayanya padahal HTML-nya sama,
+/// dan hasil ukur serta tangkapan layarnya berubah setelah sekadar LRU.
+///
+/// Kolomnya `BLOB` dan disegel dengan kunci store seperti `html_enc`: teks CSS
+/// bisa memuat token yang ditempel server ke dalam stylesheet.
+const MIGRASI_V3: &str = r"
+    BEGIN;
+    ALTER TABLE tab_snapshot ADD COLUMN sheets_enc BLOB;
+    PRAGMA user_version = 3;
+    COMMIT;
+";
 
 /// Membuang baris yang melewati masa retensi. Dijalankan saat boot, bukan cron
 /// terpisah, supaya tidak ada proses yang harus diawasi.
@@ -295,6 +313,16 @@ mod tests {
             .expect("kumpulkan")
     }
 
+    fn nama_kolom(conn: &Connection, tabel: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({tabel})"))
+            .expect("siap");
+        stmt.query_map([], |baris| baris.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("kumpulkan")
+    }
+
     #[test]
     fn store_baru_membuat_semua_tabel() {
         let dir = TempDir::new("skema");
@@ -316,12 +344,13 @@ mod tests {
         }
     }
 
-    /// Database versi 1 yang sudah berisi data harus NAIK ke versi 2, bukan
-    /// dilewati. Ini yang gampang salah: `CREATE TABLE IF NOT EXISTS` pada
-    /// semua tabel sekaligus tidak menaikkan `user_version`, jadi daemon baru
-    /// akan terus menulis ke skema lama.
+    /// Database versi 1 yang sudah berisi data harus NAIK ke versi terkini,
+    /// bukan dilewati. Ini yang gampang salah: `CREATE TABLE IF NOT EXISTS`
+    /// pada semua tabel sekaligus tidak menaikkan `user_version`, jadi daemon
+    /// baru akan terus menulis ke skema lama. Rantainya diuji utuh, bukan cuma
+    /// satu lompatan: v1 harus melewati v2 DAN v3 dalam satu kali buka.
     #[test]
-    fn database_versi_1_naik_ke_versi_2_tanpa_kehilangan_data() {
+    fn database_versi_1_naik_ke_versi_terkini_tanpa_kehilangan_data() {
         let dir = TempDir::new("naik");
         let path = dir.path().join("store.db");
         {
@@ -337,14 +366,20 @@ mod tests {
             .expect("sisip v1");
         }
 
-        let conn = open(&path).expect("migrasi ke v2");
+        let conn = open(&path).expect("migrasi ke versi terkini");
         let versi: i64 = conn
             .pragma_query_value(None, "user_version", |b| b.get(0))
             .expect("versi");
-        assert_eq!(versi, 2, "versi harus naik");
+        assert_eq!(versi, SCHEMA_VERSION, "versi harus naik sampai terkini");
         assert!(
             nama_tabel(&conn).iter().any(|t| t == "tab_snapshot"),
             "tabel tab_snapshot tidak dibuat saat naik dari v1"
+        );
+        assert!(
+            nama_kolom(&conn, "tab_snapshot")
+                .iter()
+                .any(|k| k == "sheets_enc"),
+            "kolom sheets_enc tidak ditambahkan saat naik dari v1"
         );
         let nama: String = conn
             .query_row("SELECT name FROM profile WHERE id='p1'", [], |b| b.get(0))

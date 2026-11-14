@@ -33,7 +33,7 @@ pub use crypto::{KeyError, StoreKey};
 pub use profile::{Profile, ProfileError, ProfileMeta};
 pub use schema::{SchemaError, SweepReport};
 pub use session::SessionError;
-pub use tab::{TabError, TabSnapshot};
+pub use tab::{TabError, TabSheet, TabSnapshot};
 
 /// Kegagalan membuka store.
 #[derive(Debug, thiserror::Error)]

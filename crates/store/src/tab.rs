@@ -21,6 +21,16 @@ use rusqlite::{OptionalExtension, params};
 use crate::Store;
 use crate::crypto::KeyError;
 
+/// Satu lembar gaya eksternal milik tab: `href` apa adanya dan teks CSS-nya.
+///
+/// `href` disimpan bersama teksnya karena kaskade mencocokkan lembar ke node
+/// `<link>` lewat atribut itu, bukan lewat URL hasil penyelesaian.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TabSheet {
+    pub href: String,
+    pub css: String,
+}
+
 /// Satu tab yang disingkirkan dari RAM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabSnapshot {
@@ -33,6 +43,10 @@ pub struct TabSnapshot {
     pub node_count: usize,
     /// Unix epoch milidetik saat tab disingkirkan.
     pub evicted_at: i64,
+    /// Lembar gaya eksternal yang sudah diambil untuk dokumen ini.
+    ///
+    /// Kosong untuk tab yang dokumennya tidak punya `<link rel=stylesheet>`.
+    pub sheets: Vec<TabSheet>,
 }
 
 /// Kegagalan menyimpan atau memuat tab dingin.
@@ -43,6 +57,9 @@ pub enum TabError {
 
     #[error("kunci store gagal dipakai: {0}")]
     Key(#[from] KeyError),
+
+    #[error("lembar gaya tab tidak bisa disandikan: {0}")]
+    Sheets(String),
 }
 
 impl Store {
@@ -54,16 +71,27 @@ impl Store {
         snapshot: &TabSnapshot,
     ) -> Result<(), TabError> {
         let html_enc = self.key().seal(snapshot.html.as_bytes())?;
+        // Lembar disegel juga: teks CSS bisa memuat token yang ditempel server
+        // ke dalam stylesheet. Yang disegel adalah JSON utuh, bukan per lembar,
+        // supaya jumlah lembar tidak perlu kolom sendiri.
+        let sheets_enc = if snapshot.sheets.is_empty() {
+            None
+        } else {
+            let json = serde_json::to_vec(&snapshot.sheets)
+                .map_err(|e| TabError::Sheets(e.to_string()))?;
+            Some(self.key().seal(&json)?)
+        };
         self.conn().execute(
             "INSERT INTO tab_snapshot
-               (session_id, tab_id, url, title, html_enc, node_count, evicted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+               (session_id, tab_id, url, title, html_enc, node_count, evicted_at, sheets_enc)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(session_id, tab_id) DO UPDATE SET
                url = excluded.url,
                title = excluded.title,
                html_enc = excluded.html_enc,
                node_count = excluded.node_count,
-               evicted_at = excluded.evicted_at",
+               evicted_at = excluded.evicted_at,
+               sheets_enc = excluded.sheets_enc",
             params![
                 session_id,
                 snapshot.tab_id,
@@ -72,6 +100,7 @@ impl Store {
                 html_enc,
                 snapshot.node_count as i64,
                 snapshot.evicted_at,
+                sheets_enc,
             ],
         )?;
         Ok(())
@@ -87,7 +116,7 @@ impl Store {
         let baris = self
             .conn()
             .query_row(
-                "SELECT url, title, html_enc, node_count, evicted_at
+                "SELECT url, title, html_enc, node_count, evicted_at, sheets_enc
                    FROM tab_snapshot WHERE session_id = ?1 AND tab_id = ?2",
                 params![session_id, tab_id],
                 |b| {
@@ -97,16 +126,24 @@ impl Store {
                         b.get::<_, Vec<u8>>(2)?,
                         b.get::<_, i64>(3)?,
                         b.get::<_, i64>(4)?,
+                        b.get::<_, Option<Vec<u8>>>(5)?,
                     ))
                 },
             )
             .optional()?;
 
-        let Some((url, title, html_enc, node_count, evicted_at)) = baris else {
+        let Some((url, title, html_enc, node_count, evicted_at, sheets_enc)) = baris else {
             return Ok(None);
         };
 
         let html = self.key().open(&html_enc)?;
+        let sheets = match sheets_enc {
+            None => Vec::new(),
+            Some(enc) => {
+                let json = self.key().open(&enc)?;
+                serde_json::from_slice(&json).map_err(|e| TabError::Sheets(e.to_string()))?
+            }
+        };
         Ok(Some(TabSnapshot {
             tab_id,
             url,
@@ -114,6 +151,7 @@ impl Store {
             html: String::from_utf8_lossy(&html).into_owned(),
             node_count: node_count.max(0) as usize,
             evicted_at,
+            sheets,
         }))
     }
 
@@ -166,6 +204,10 @@ mod tests {
             html: "<html><body><p>rahasia-token-abc</p></body></html>".to_owned(),
             node_count: 4,
             evicted_at: 1_700_000_000_000,
+            sheets: vec![TabSheet {
+                href: "gaya.css".to_owned(),
+                css: "#a{width:10px}".to_owned(),
+            }],
         }
     }
 
@@ -250,6 +292,48 @@ mod tests {
 
         assert!(store.load_tab_snapshot("s1", 7).expect("muat").is_none());
         assert_eq!(store.count_tab_snapshots("s1").expect("hitung"), 0);
+    }
+
+    /// CSS juga tidak boleh ada di disk sebagai plaintext: stylesheet bisa
+    /// memuat token yang ditempel server.
+    #[test]
+    fn lembar_gaya_tidak_tersimpan_plaintext() {
+        let dir = TempDir::new("tab-css-geser");
+        let store = store(&dir);
+        sesi(&store);
+        let mut snap = snapshot();
+        snap.sheets = vec![TabSheet {
+            href: "rahasia.css".to_owned(),
+            css: ".token{content:\"rahasia-css-xyz\"}".to_owned(),
+        }];
+        store.save_tab_snapshot("s1", &snap).expect("simpan");
+
+        let mentah = std::fs::read(dir.path().join("store.db")).expect("baca db");
+        for jarum in [b"rahasia-css-xyz".as_slice(), b"rahasia.css".as_slice()] {
+            assert!(
+                !mentah.windows(jarum.len()).any(|w| w == jarum),
+                "lembar gaya bocor sebagai plaintext di berkas database"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_tanpa_lembar_tetap_utuh() {
+        let dir = TempDir::new("tab-tanpa-css");
+        let store = store(&dir);
+        sesi(&store);
+        let mut snap = snapshot();
+        snap.sheets = Vec::new();
+        store.save_tab_snapshot("s1", &snap).expect("simpan");
+        let kembali = store
+            .load_tab_snapshot("s1", 7)
+            .expect("muat")
+            .expect("ada");
+        assert!(
+            kembali.sheets.is_empty(),
+            "lembar kosong harus tetap kosong"
+        );
+        assert_eq!(kembali.html, snap.html);
     }
 
     #[test]

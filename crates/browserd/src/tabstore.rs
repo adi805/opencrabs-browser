@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use engine::native::LembarLuar;
 use engine::native::tab_pool::{ColdStore, Snapshot, TabId};
-use store::{Store, StoreKey, TabSnapshot};
+use store::{Store, StoreKey, TabSheet, TabSnapshot};
 
 /// Penyimpanan dingin yang ditopang SQLite.
 ///
@@ -181,6 +182,16 @@ impl ColdStore for StoreColdStore {
             html: snapshot.html.clone(),
             node_count: snapshot.jumlah_node,
             evicted_at: i64::try_from(snapshot.disingkirkan_pada).unwrap_or(i64::MAX),
+            // Lembar gaya ikut disimpan: tab yang dihidupkan kembali tanpa
+            // CSS-nya akan terukur dan terlukis berbeda padahal HTML-nya sama.
+            sheets: snapshot
+                .lembar
+                .iter()
+                .map(|l| TabSheet {
+                    href: l.href.clone(),
+                    css: l.teks.clone(),
+                })
+                .collect(),
         };
         self.koneksi()?
             .save_tab_snapshot(&self.session_id, &baris)
@@ -201,6 +212,11 @@ impl ColdStore for StoreColdStore {
             html: b.html,
             jumlah_node: b.node_count,
             disingkirkan_pada: u64::try_from(b.evicted_at).unwrap_or(0),
+            lembar: b
+                .sheets
+                .into_iter()
+                .map(|s| LembarLuar::baru(s.href, s.css))
+                .collect(),
         }))
     }
 
@@ -334,6 +350,38 @@ mod tests {
         );
     }
 
+    /// Lembar gaya harus ikut pulang dari tab dingin. Kalau kolom `sheets_enc`
+    /// lupa dibaca, tab yang dihidupkan kembali punya HTML yang sama persis
+    /// tapi terukur dan terlukis berbeda, dan itu tidak kelihatan sampai ada
+    /// tes yang membandingkan isinya.
+    #[test]
+    fn lembar_gaya_ikut_pulang_dari_tab_dingin() {
+        let dir = Sementara::new("lembar");
+        let lembar = vec![
+            LembarLuar::baru("/a.css", "div { height: 11px }"),
+            LembarLuar::baru("/b.css", "p { color: #00ff00 }"),
+        ];
+        {
+            let mut a = StoreColdStore::new(buka(&dir), "s1");
+            a.simpan(&Snapshot {
+                id: TabId(7),
+                url: "https://a.test".into(),
+                judul: Some("a".into()),
+                html: halaman("x"),
+                jumlah_node: 5,
+                disingkirkan_pada: 9,
+                lembar: lembar.clone(),
+            })
+            .expect("simpan");
+        }
+
+        // Koneksi baru: lembar harus datang dari SQLite, bukan dari objek
+        // adapter yang kebetulan masih hidup di memori.
+        let b = StoreColdStore::new(buka(&dir), "s1");
+        let snap = b.muat(TabId(7)).expect("muat").expect("baris ada");
+        assert_eq!(snap.lembar, lembar, "lembar tidak utuh setelah bolak-balik");
+    }
+
     #[test]
     fn sesi_lain_tidak_bisa_memuat_tab_ini() {
         let dir = Sementara::new("sesi-lain");
@@ -352,6 +400,7 @@ mod tests {
             judul: None,
             html: halaman("x"),
             jumlah_node: 5,
+            lembar: Vec::new(),
             disingkirkan_pada: 1,
         })
         .expect("simpan");
@@ -385,6 +434,7 @@ mod tests {
                 judul: None,
                 html: halaman("x"),
                 jumlah_node: 5,
+                lembar: Vec::new(),
                 disingkirkan_pada: 1,
             })
             .expect_err("kunci hilang harus jadi galat, bukan tab yang dikira aman");
