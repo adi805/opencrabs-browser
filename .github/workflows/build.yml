@@ -168,12 +168,22 @@ jobs:
           #     varian itu hanya dipilih lewat CPUID: src/aead/aes_gcm.rs:92
           #     memasang DynKey::AesHwClMulAvxMovbe lewat gcm::clmulavxmovbe::Key.
           #     Sandy Bridge tidak punya movbe, jadi jatuh ke AesHwClMul biasa.
+          #   __bn_postx4x_internal (4 instruksi)
+          #     hanya dipanggil bn_powerx5 (x86_64-mont5-elf.S:2264-2272), dan
+          #     bn_powerx5 dipanggil di mont.rs:266 di dalam
+          #     if maybe_adx_bmi1_bmi2.is_some() — jalur nohw dipakai kalau tidak.
+          #   fiat_mulx_u64 (3 instruksi)
+          #     didefinisikan third_party/fiat/curve25519_64_adx.h, hanya
+          #     di-include crypto/curve25519/curve25519_64_adx.c yang mengisi
+          #     x25519_scalar_mult_adx; pemanggilnya dijaga
+          #     x25519.rs:127 if ops::has_fe25519_adx(cpu_features), dan fungsi
+          #     itu sendiri matches!(cpu.get_feature(), Some((Adx, Bmi1, Bmi2))).
           #
           # Nama simbol memuat versi crate, jadi upgrade ring otomatis
           # menggugurkan daftar ini dan gate gagal sampai jalur barunya
           # diaudit. Simbol yang tidak dikenal SELALU dihitung pelanggaran:
           # gate ini gagal-tertutup.
-          IZIN="ring_core_0_17_14__x25519_scalar_mult_adx ring_core_0_17_14__fiat_curve25519_adx_mul ring_core_0_17_14__fiat_curve25519_adx_square ring_core_0_17_14__ecp_nistz256_ord_mul_mont_adx ring_core_0_17_14__ecp_nistz256_ord_sqr_mont_adx __ecp_nistz256_mul_montx __ecp_nistz256_sqr_montx ring_core_0_17_14__bn_mulx4x_mont mulx4x_internal ring_core_0_17_14__bn_sqrx8x_internal ring_core_0_17_14__chacha20_poly1305_seal_avx2 ring_core_0_17_14__chacha20_poly1305_open_avx2 ring_core_0_17_14__aesni_ctr32_ghash_6x ring_core_0_17_14__aesni_ctr32_6x ring_core_0_17_14__aesni_gcm_decrypt ring_core_0_17_14__aesni_gcm_encrypt _aesni_ctr32_ghash_6x _aesni_ctr32_6x aesni_gcm_decrypt aesni_gcm_encrypt"
+          IZIN="ring_core_0_17_14__x25519_scalar_mult_adx ring_core_0_17_14__fiat_curve25519_adx_mul ring_core_0_17_14__fiat_curve25519_adx_square ring_core_0_17_14__ecp_nistz256_ord_mul_mont_adx ring_core_0_17_14__ecp_nistz256_ord_sqr_mont_adx __ecp_nistz256_mul_montx __ecp_nistz256_sqr_montx ring_core_0_17_14__bn_mulx4x_mont mulx4x_internal ring_core_0_17_14__bn_sqrx8x_internal ring_core_0_17_14__chacha20_poly1305_seal_avx2 ring_core_0_17_14__chacha20_poly1305_open_avx2 ring_core_0_17_14__aesni_ctr32_ghash_6x ring_core_0_17_14__aesni_ctr32_6x ring_core_0_17_14__aesni_gcm_decrypt ring_core_0_17_14__aesni_gcm_encrypt _aesni_ctr32_ghash_6x _aesni_ctr32_6x aesni_gcm_decrypt aesni_gcm_encrypt __bn_postx4x_internal ring_core_0_17_14__bn_postx4x_internal fiat_mulx_u64"
 
           # Daftar opcode di bawah adalah instruksi yang TIDAK ada di baseline
           # x86-64 (Sandy Bridge ke bawah) dan tidak dikodekan ulang CPU lama.
@@ -186,23 +196,23 @@ jobs:
             | sed -E 's/^ *([0-9a-f]+):.*/\1/' > /tmp/hits.txt || true
           TOTAL=$(wc -l < /tmp/hits.txt)
           if [ "$TOTAL" -eq 0 ]; then
-            echo "BMI2 total: 0 (tidak ada sama sekali)"
+            echo "ISA non-baseline total: 0 (tidak ada sama sekali)"
             exit 0
           fi
           addr2line -f -e "$BIN" $(sed 's/^/0x/' /tmp/hits.txt) \
             | awk 'NR % 2 == 1' > /tmp/syms.txt
-          echo "BMI2 total: ${TOTAL}"
+          echo "ISA non-baseline total: ${TOTAL}"
           echo "--- sebaran per simbol ---"
           sort /tmp/syms.txt | uniq -c | sort -rn | head -20
           for s in $IZIN; do echo "$s"; done > /tmp/izin.txt
           ILEGAL=$(grep -vxF -f /tmp/izin.txt /tmp/syms.txt | wc -l || true)
-          echo "BMI2 di luar daftar putih: ${ILEGAL}"
+          echo "ISA non-baseline di luar daftar putih: ${ILEGAL}"
           if [ "${ILEGAL}" -ne 0 ]; then
-            echo "artefak tidak portabel: ${ILEGAL} instruksi BMI2 di simbol yang tidak diaudit" >&2
+            echo "artefak tidak portabel: ${ILEGAL} instruksi non-baseline di simbol yang tidak diaudit" >&2
             grep -vxF -f /tmp/izin.txt /tmp/syms.txt | sort | uniq -c | sort -rn >&2
             exit 1
           fi
-          echo "semua BMI2 ada di jalur ring yang dipilih lewat CPUID, baseline aman"
+          echo "semua opcode non-baseline ada di jalur ring yang dipilih lewat CPUID, baseline aman"
 
       - name: Ukuran target sebelum dibersihkan
         if: always()
