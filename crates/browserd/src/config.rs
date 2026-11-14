@@ -26,6 +26,42 @@ pub struct FileConfig {
     /// anggaran dimatikan; angkanya tidak dikarang.
     #[serde(default)]
     pub budget: Option<BudgetSection>,
+    /// Gerbang jaringan untuk `fetch()` di dalam isolat mesin native.
+    /// Tidak adanya bagian ini berarti **semua** `fetch` ditolak.
+    #[serde(default)]
+    pub fetch: Option<FetchSection>,
+}
+
+/// `[fetch]` di berkas config.
+///
+/// Daftar izin yang kosong berarti menolak semua. Itu bukan kelalaian: daemon
+/// yang tidak dikonfigurasi tidak boleh menjadi proxy terbuka, dan penolakan
+/// yang eksplisit (dengan alasan yang dikirim ke halaman) lebih mudah dilacak
+/// daripada izin yang tidak pernah diminta.
+#[derive(Debug, Default, Deserialize)]
+pub struct FetchSection {
+    /// Pola host yang boleh dihubungi skrip halaman. Aturannya sama dengan
+    /// `[policy.rules]`: sama persis, atau subdomain darinya.
+    #[serde(default)]
+    pub izin_host: Vec<String>,
+    /// Pola host yang selalu ditolak, menang atas [`Self::izin_host`].
+    #[serde(default)]
+    pub tolak_host: Vec<String>,
+    /// Metode yang diizinkan. Kosong berarti `GET`, `HEAD`, `POST`.
+    #[serde(default)]
+    pub metode: Vec<String>,
+}
+
+impl FetchSection {
+    /// Kebijakan jaringan yang dipakai mesin native.
+    #[must_use]
+    pub fn kebijakan(&self) -> cdp::native_wire::KebijakanJaringan {
+        cdp::native_wire::KebijakanJaringan::baru(
+            self.izin_host.clone(),
+            self.tolak_host.clone(),
+            self.metode.clone(),
+        )
+    }
 }
 
 /// `[budget]` di berkas config.

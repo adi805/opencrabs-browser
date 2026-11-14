@@ -24,6 +24,7 @@
 //! [`tab_pool::TabPool`] adalah `cdp::native_wire`, dan yang menyalakannya
 //! sebagai mesin adalah `cdp::native_wire::NativeEngine`.
 
+pub mod ambil;
 pub mod axtree;
 pub mod css;
 pub mod dom;
@@ -89,9 +90,13 @@ pub const CELAH: &[&str] = &[
      satu permukaan)",
     "pohon aksesibilitas belum menghitung `aria-labelledby` berantai, status \
      *focusable*/*selected*/*expanded*, dan konten di dalam `<iframe>`",
-    "`fetch()` di dalam isolat JavaScript belum ada: dokumen `http`/`https` \
-     sudah bisa dimuat lewat `Page.navigate` (`cdp::native_wire::jaringan`), \
-     tapi skrip halaman belum punya jalur keluar ke jaringan",
+    "`fetch()` di dalam isolat hanya bisa lewat jalur yang dipasang pemanggil \
+     (`native::ambil::Pengambil`); tanpa hook ia menolak semua. Jawabannya \
+     objek biasa, bukan `Promise`: `await fetch(...)` dan `await r.text()` \
+     jalan karena await pada nilai non-thenable mengembalikan nilai itu \
+     sendiri, tapi `fetch(...).then(...)`, `Promise.all` dan `AbortController` \
+     tidak. Badan diangkut sebagai teks UTF-8 lossy, jadi `arrayBuffer()`, \
+     stream, dan cookie tidak ada",
     "nilai balik `Runtime.evaluate` membawa tipe JS (boolean, number, string, \
      object) dan objek dikirim *by value*, tapi belum ada `objectId`, \
      `Runtime.callFunctionOn`, maupun `awaitPromise`: klien yang menyimpan \

@@ -17,9 +17,12 @@
 //! Dokumen `http`/`https` diambil lewat [`jaringan`] **sebelum** kunci state
 //! dipegang: satu navigasi yang lambat tidak boleh membekukan tab lain.
 
+pub mod ambil;
 pub mod gaya;
 pub mod jaringan;
 pub mod state;
+
+pub use ambil::{KebijakanJaringan, Keputusan, PengambilJaringan};
 
 pub use state::{
     ColdStoreObj, DokumenAwal, Galat, LembarJaringan, MAKS_TAB, NativeState, PabrikDingin, Sidik,
@@ -35,6 +38,7 @@ use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
+use engine::native::ambil::Pengambil;
 use engine::{Engine, EngineError, EngineInfo, LaunchSpec, Penggerak};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -82,13 +86,21 @@ impl NativeEngine {
     /// aktif karena servernya hidup di dalam proses daemon. Dipanggil dari
     /// `spawn_blocking`, `Handle::current()` tetap tersedia.
     pub fn start(spec: LaunchSpec) -> Result<Self, EngineError> {
-        Self::start_dengan(spec, pabrik_memori())
+        Self::start_dengan(spec, pabrik_memori(), None)
     }
 
-    /// Sama dengan [`Self::start`], tapi penyimpanan dinginnya dipilih
-    /// pemanggil. Daemon memakai ini supaya tab yang disingkirkan mendarat di
-    /// SQLite, bukan hilang saat proses berhenti.
-    pub fn start_dengan(spec: LaunchSpec, pabrik: PabrikDingin) -> Result<Self, EngineError> {
+    /// Sama dengan [`Self::start`], tapi penyimpanan dingin dan gerbang
+    /// jaringannya dipilih pemanggil.
+    ///
+    /// Daemon memakai ini supaya tab yang disingkirkan mendarat di SQLite dan
+    /// `fetch()` di dalam isolat lewat kebijakannya. Tanpa `pengambil`, setiap
+    /// tab memakai [`engine::native::ambil::PengambilTolak`]: `fetch` menolak
+    /// semua dengan alasan, bukan diam-diam mengizinkan.
+    pub fn start_dengan(
+        spec: LaunchSpec,
+        pabrik: PabrikDingin,
+        pengambil: Option<Arc<dyn Pengambil>>,
+    ) -> Result<Self, EngineError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             EngineError::Io(std::io::Error::other(
                 "mesin native butuh runtime tokio: server CDP-nya hidup di dalam proses daemon",
@@ -102,7 +114,10 @@ impl NativeEngine {
         let http = format!("http://{authority}");
         let ws = format!("ws://{authority}/devtools/browser");
 
-        let state = NativeState::dengan_dingin(pabrik);
+        let state = match pengambil {
+            Some(pengambil) => NativeState::dengan_ambil(pabrik, pengambil),
+            None => NativeState::dengan_dingin(pabrik),
+        };
         let app = router(App {
             state: state.clone(),
             ws_browser: ws.clone(),
@@ -219,6 +234,7 @@ impl NativeEngine {
 #[derive(Clone)]
 pub struct PenggerakNative {
     dingin: PabrikDingin,
+    pengambil: Option<Arc<dyn Pengambil>>,
 }
 
 impl Default for PenggerakNative {
@@ -228,9 +244,26 @@ impl Default for PenggerakNative {
 }
 
 impl PenggerakNative {
+    /// Penggerak tanpa gerbang jaringan: `fetch()` menolak semua.
+    ///
+    /// Dipakai tes dan daemon yang tidak mengonfigurasi `[fetch]`. Menolak,
+    /// bukan mengizinkan, karena daemon yang lupa dikonfigurasi tidak boleh
+    /// menjadi proxy terbuka.
     #[must_use]
     pub fn baru(dingin: PabrikDingin) -> Self {
-        Self { dingin }
+        Self {
+            dingin,
+            pengambil: None,
+        }
+    }
+
+    /// Penggerak dengan gerbang jaringan untuk `fetch()` di dalam isolat.
+    #[must_use]
+    pub fn dengan_ambil(dingin: PabrikDingin, pengambil: Arc<dyn Pengambil>) -> Self {
+        Self {
+            dingin,
+            pengambil: Some(pengambil),
+        }
     }
 }
 
@@ -249,8 +282,12 @@ impl Penggerak for PenggerakNative {
         // `spec.binary` diabaikan dengan sengaja: tidak ada biner yang
         // dieksekusi. Kolom itu tetap ada karena kontrak `LaunchSpec` dipakai
         // bersama semua mesin.
-        NativeEngine::start_dengan(spec.clone(), Arc::clone(&self.dingin))
-            .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
+        NativeEngine::start_dengan(
+            spec.clone(),
+            Arc::clone(&self.dingin),
+            self.pengambil.as_ref().map(Arc::clone),
+        )
+        .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
     }
 }
 

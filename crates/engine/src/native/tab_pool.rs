@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use super::NativeError;
+use super::ambil::{Pengambil, PengambilTolak};
 use super::css::LembarLuar;
 use super::dom::Document;
 use super::js::{Isolat, PaguIsolat};
@@ -169,7 +170,8 @@ pub struct TabPanas {
 
 impl TabPanas {
     /// Membaca pohon. Pinjaman dilepas saat nilai ini jatuh.
-    #[must_use]
+    ///
+    /// `MutexGuard` sudah `#[must_use]`, jadi atributnya tidak diulang di sini.
     pub fn dokumen(&self) -> MutexGuard<'_, Document> {
         kunci(&self.dokumen)
     }
@@ -216,6 +218,12 @@ pub struct TabPool<C: ColdStore> {
     maks_panas: usize,
     maks_total: usize,
     pagu_isolat: PaguIsolat,
+    /// Jalur jaringan yang dipakai `fetch()` di setiap tab.
+    ///
+    /// Bawaannya [`PengambilTolak`]: pool yang dibuat tanpa kebijakan menolak
+    /// semua, bukan mengizinkan semua. Kebijakan yang sebenarnya dipegang
+    /// pemanggil (daemon), karena crate ini tidak boleh tahu aturan izin.
+    pengambil: Arc<dyn Pengambil>,
     berikutnya: u64,
     pub jumlah_singkir: usize,
 }
@@ -230,6 +238,7 @@ impl<C: ColdStore> TabPool<C> {
             maks_panas: tab_panas_maksimum(BASELINE_MB),
             maks_total,
             pagu_isolat: PaguIsolat::default(),
+            pengambil: Arc::new(PengambilTolak),
             berikutnya: 1,
             jumlah_singkir: 0,
         }
@@ -238,6 +247,17 @@ impl<C: ColdStore> TabPool<C> {
     #[must_use]
     pub fn dengan_maks_panas(mut self, maks_panas: usize) -> Self {
         self.maks_panas = maks_panas;
+        self
+    }
+
+    /// Memasang jalur jaringan untuk tab yang dibuka setelah ini.
+    ///
+    /// Tab yang sudah terbuka memakai kebijakan yang dipasang saat ia dibangun;
+    /// mengganti kebijakan tidak menyusup ke isolat yang sedang hidup, dan itu
+    /// disengaja: satu tab tidak boleh berubah aturan di tengah jalan.
+    #[must_use]
+    pub fn dengan_pengambil(mut self, pengambil: Arc<dyn Pengambil>) -> Self {
+        self.pengambil = pengambil;
         self
     }
 
@@ -314,7 +334,11 @@ impl<C: ColdStore> TabPool<C> {
         // sama. `Isolat::new` sengaja tidak dipakai di sini, karena isolat
         // tanpa pohon tidak bisa menjawab `document.getElementById`.
         let dokumen = Arc::new(Mutex::new(Document::parse_html(html)?));
-        let isolat = Isolat::dengan_dokumen(self.pagu_isolat, Arc::clone(&dokumen))?;
+        let isolat = Isolat::dengan_dokumen_dan_ambil(
+            self.pagu_isolat,
+            Arc::clone(&dokumen),
+            Arc::clone(&self.pengambil),
+        )?;
         // Judul dibaca di blok sendiri supaya kuncinya jatuh sebelum
         // `pasang_judul` menjalankan skrip: jembatan mengunci pohon yang sama.
         let judul = {

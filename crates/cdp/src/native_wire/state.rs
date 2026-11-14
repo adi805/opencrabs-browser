@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use engine::native::ambil::Pengambil;
 use engine::native::layout::{self, Viewport};
 use engine::native::{
     ColdStore, Document, LembarLuar, MemoryColdStore, NativeError, NilaiJs, NodeId, NodeKind,
@@ -250,9 +251,27 @@ impl NativeState {
     /// disingkirkan selamat dari restart. Tes memakai [`Self::baru`].
     #[must_use]
     pub fn dengan_dingin(pabrik: PabrikDingin) -> Self {
+        Self::bangun(pabrik, None)
+    }
+
+    /// State yang `fetch()`-nya lewat `pengambil`.
+    ///
+    /// Daemon memakai ini supaya skrip halaman tidak punya jalur jaringan
+    /// sendiri: satu-satunya jalan keluarnya adalah kebijakan yang dipegang
+    /// pemanggil.
+    #[must_use]
+    pub fn dengan_ambil(pabrik: PabrikDingin, pengambil: Arc<dyn Pengambil>) -> Self {
+        Self::bangun(pabrik, Some(pengambil))
+    }
+
+    fn bangun(pabrik: PabrikDingin, pengambil: Option<Arc<dyn Pengambil>>) -> Self {
+        let mut pool = TabPool::new(pabrik(), MAKS_TAB);
+        if let Some(pengambil) = pengambil {
+            pool = pool.dengan_pengambil(pengambil);
+        }
         Self {
             dalam: Arc::new(Mutex::new(Dalam {
-                pool: TabPool::new(pabrik(), MAKS_TAB),
+                pool,
                 tabs: BTreeMap::new(),
                 sesi: BTreeMap::new(),
                 berikut_sesi: 1,

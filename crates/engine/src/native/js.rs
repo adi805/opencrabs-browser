@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use rquickjs::{Context, Function, Runtime};
 
 use super::NativeError;
+use super::ambil::{JawabanAmbil, Pengambil, PengambilTolak, PermintaanAmbil};
 use super::dom::{Document, NodeId, NodeKind};
 
 /// Pagu keras untuk satu isolat.
@@ -554,6 +555,83 @@ const JEMBATAN_DOM: &str = r##"
 })();
 "##;
 
+/// Lapisan `fetch()` di atas satu fungsi jembatan Rust.
+///
+/// Mesin ini tidak membuka soket sendiri: `__ambil` memanggil
+/// [`Pengambil`] milik pemanggil, yang memegang kebijakan jaringan daemon.
+/// Tanpa hook, panggilan berakhir dengan galat yang menyebut sebabnya, bukan
+/// jawaban kosong yang terlihat seperti halaman tanpa isi.
+///
+/// Yang dikembalikan **objek biasa, bukan `Promise`**, dan itu disengaja:
+/// `await fetch(...)` dan `await jawaban.text()` tetap bekerja karena `await`
+/// pada nilai yang bukan thenable mengembalikan nilai itu sendiri, sementara
+/// menjalankan mesin promise di dalam isolat berarti satu state mesin lagi
+/// yang harus diuji terhadap batas waktu. Batasnya disebut di [`super::CELAH`].
+const JEMBATAN_AMBIL: &str = r##"
+(function () {
+  var ambil = globalThis.__ambil;
+  delete globalThis.__ambil;
+  if (typeof ambil !== "function") return;
+
+  function jawaban(data) {
+    var teks = typeof data.badan === "string" ? data.badan : "";
+    var isi = {
+      ok: data.ok === true,
+      status: data.status,
+      statusText: "",
+      url: data.url,
+      redirected: false,
+      type: "basic",
+      bodyUsed: false,
+      headers: {
+        get: function (nama) {
+          var n = String(nama).toLowerCase();
+          if (n === "content-type") return data.contentType || null;
+          return null;
+        },
+        has: function (nama) {
+          return this.get(nama) !== null;
+        },
+      },
+      text: function () {
+        return teks;
+      },
+      json: function () {
+        return JSON.parse(teks);
+      },
+    };
+    return isi;
+  }
+
+  // Galat dilempar sinkron, bukan lewat promise yang ditolak. Bagi skrip yang
+  // memakai `await` di dalam `try`, keduanya sama; bagi skrip yang memakai
+  // `.catch()`, keduanya sama-sama tidak bekerja, dan itu tercatat di CELAH
+  // alih-alih disamarkan.
+  function fetch(url, init) {
+    var metode = init && init.method ? String(init.method) : "GET";
+    var badan = "";
+    if (init && init.body !== undefined && init.body !== null) {
+      badan = String(init.body);
+    }
+    var data = JSON.parse(ambil(metode, String(url), badan));
+    if (data && typeof data.__galat === "string") {
+      throw new TypeError(data.__galat);
+    }
+    return jawaban(data);
+  }
+
+  // `fetch` di browser sungguhan adalah properti milik `window`, dan
+  // enumerable. Dibuat sama di sini supaya pemeriksa sidik jari tidak melihat
+  // perbedaan yang tidak perlu.
+  Object.defineProperty(globalThis, "fetch", {
+    value: fetch,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+})();
+"##;
+
 /// Satu pintu untuk semua operasi pohon yang datang dari skrip halaman.
 ///
 /// Protokolnya sengaja teks: `op`, tiga argumen string, balasan JSON. Satu
@@ -828,7 +906,24 @@ pub struct Isolat {
 }
 
 impl Isolat {
+    /// Isolat tanpa jalur jaringan: `fetch()` menolak semua.
+    ///
+    /// Yang dipakai tes mesin dan isolat yang tidak butuh jaringan. Menolak,
+    /// bukan mengizinkan: isolat yang lupa dipasangi kebijakan tidak boleh
+    /// berubah jadi jalan keluar bebas ke jaringan.
     pub fn new(pagu: PaguIsolat) -> Result<Self, NativeError> {
+        Self::dengan_ambil(pagu, Arc::new(PengambilTolak))
+    }
+
+    /// Isolat yang `fetch()`-nya lewat `pengambil`.
+    ///
+    /// `pengambil` adalah satu-satunya jalan skrip halaman menyentuh jaringan,
+    /// dan implementasinya memegang kebijakan. Crate ini tidak tahu apa itu
+    /// daftar izin; kalau ia tahu, aturannya akan bercabang dua.
+    pub fn dengan_ambil(
+        pagu: PaguIsolat,
+        pengambil: Arc<dyn Pengambil>,
+    ) -> Result<Self, NativeError> {
         let runtime = Runtime::new().map_err(NativeError::runtime)?;
         runtime.set_memory_limit(pagu.memori_bytes);
         runtime.set_max_stack_size(pagu.stack_bytes);
@@ -861,6 +956,7 @@ impl Isolat {
             batas_waktu: pagu.batas_waktu,
         };
         isolat.eval(PEMBUKA)?;
+        isolat.pasang_ambil(pengambil)?;
         Ok(isolat)
     }
 
@@ -874,7 +970,20 @@ impl Isolat {
         pagu: PaguIsolat,
         dokumen: Arc<Mutex<Document>>,
     ) -> Result<Self, NativeError> {
-        let mut isolat = Self::new(pagu)?;
+        Self::dengan_dokumen_dan_ambil(pagu, dokumen, Arc::new(PengambilTolak))
+    }
+
+    /// Sama dengan [`Self::dengan_dokumen`], tapi `fetch()` lewat `pengambil`.
+    ///
+    /// Inilah bentuk yang dipakai [`super::tab_pool::TabPool`]: satu tab butuh
+    /// pohon sekaligus jalur jaringan, dan keduanya harus dipasang sebelum
+    /// skrip halaman pertama berjalan.
+    pub fn dengan_dokumen_dan_ambil(
+        pagu: PaguIsolat,
+        dokumen: Arc<Mutex<Document>>,
+        pengambil: Arc<dyn Pengambil>,
+    ) -> Result<Self, NativeError> {
+        let mut isolat = Self::dengan_ambil(pagu, pengambil)?;
         isolat.dokumen = Some(dokumen);
         isolat.pasang_jembatan()?;
         Ok(isolat)
@@ -917,6 +1026,36 @@ impl Isolat {
                 .map_err(NativeError::script)
         })?;
         self.eval(JEMBATAN_DOM)?;
+        Ok(())
+    }
+
+    /// Memasang jalur jaringan: satu fungsi Rust `__ambil(metode, url, badan)`,
+    /// lalu lapisan `fetch()` di atasnya, lalu **nama itu dihapus**.
+    ///
+    /// Penghapusan global sama alasannya dengan [`Self::pasang_jembatan`]:
+    /// global yang bisa ditemukan skrip halaman adalah sidik jari otomasi.
+    fn pasang_ambil(&self, pengambil: Arc<dyn Pengambil>) -> Result<(), NativeError> {
+        self.context.with(|ctx| {
+            let fungsi = Function::new(
+                ctx.clone(),
+                move |metode: String, url: String, badan: String| -> String {
+                    let permintaan = PermintaanAmbil {
+                        metode: metode.to_ascii_uppercase(),
+                        url,
+                        badan: (!badan.is_empty()).then_some(badan),
+                    };
+                    match pengambil.ambil(&permintaan) {
+                        Ok(jawaban) => jawaban_ke_json(&jawaban),
+                        Err(pesan) => serde_json::json!({ "__galat": pesan }).to_string(),
+                    }
+                },
+            )
+            .map_err(NativeError::script)?;
+            ctx.globals()
+                .set("__ambil", fungsi)
+                .map_err(NativeError::script)
+        })?;
+        self.eval(JEMBATAN_AMBIL)?;
         Ok(())
     }
 
@@ -1112,9 +1251,205 @@ fn teks_dari<'js>(ctx: &rquickjs::Ctx<'js>, nilai: &rquickjs::Value<'js>) -> Str
         .unwrap_or_else(|_| "[nilai tidak bisa diubah ke teks]".to_owned())
 }
 
+/// Bentuk JSON satu jawaban untuk lapisan `fetch()`.
+///
+/// `ok` mengikuti definisi `Response.ok` di browser: status 2xx. Dihitung di
+/// sini, bukan di JavaScript, supaya satu definisi saja yang dipakai.
+fn jawaban_ke_json(jawaban: &JawabanAmbil) -> String {
+    serde_json::json!({
+        "ok": (200..300).contains(&jawaban.status),
+        "status": jawaban.status,
+        "url": jawaban.url,
+        "contentType": jawaban.content_type,
+        "badan": jawaban.badan,
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gerbang jaringan palsu: mencatat setiap permintaan, mengizinkan hanya
+    /// host yang disebut, dan menolak sisanya dengan alasan yang menyebut
+    /// host-nya.
+    ///
+    /// Pencatatan itu bagian dari kontrak, bukan kemudahan tes: keputusan
+    /// "boleh atau tidak" harus bisa dibaca ulang, dan satu-satunya tempat yang
+    /// pasti melihatnya adalah gerbangnya sendiri.
+    struct GerbangUji {
+        izin: Vec<String>,
+        dicatat: Arc<Mutex<Vec<PermintaanAmbil>>>,
+    }
+
+    impl GerbangUji {
+        fn baru(izin: &[&str]) -> (Arc<Self>, Arc<Mutex<Vec<PermintaanAmbil>>>) {
+            let dicatat = Arc::new(Mutex::new(Vec::new()));
+            let gerbang = Arc::new(Self {
+                izin: izin.iter().map(|h| (*h).to_owned()).collect(),
+                dicatat: Arc::clone(&dicatat),
+            });
+            (gerbang, dicatat)
+        }
+    }
+
+    impl Pengambil for GerbangUji {
+        fn ambil(&self, permintaan: &PermintaanAmbil) -> Result<JawabanAmbil, String> {
+            self.dicatat
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(permintaan.clone());
+            let host = permintaan
+                .url
+                .split("://")
+                .nth(1)
+                .and_then(|sisa| sisa.split('/').next())
+                .unwrap_or("");
+            if self.izin.iter().any(|izin| izin == host) {
+                Ok(JawabanAmbil {
+                    status: 200,
+                    url: permintaan.url.clone(),
+                    content_type: Some("text/plain".to_owned()),
+                    badan: format!("badan dari {host}"),
+                })
+            } else {
+                Err(format!(
+                    "host '{host}' tidak ada di daftar izin gerbang jaringan"
+                ))
+            }
+        }
+    }
+
+    #[test]
+    fn fetch_menolak_tanpa_jalur_jaringan() {
+        // Isolat tanpa hook tidak boleh berubah jadi jalan keluar bebas.
+        let isolat = Isolat::new(PaguIsolat::default()).unwrap();
+        let pesan = isolat
+            .eval(
+                "try { fetch('https://contoh.test/'); 'tidak menolak' } \
+                 catch (e) { e.name + ': ' + e.message }",
+            )
+            .unwrap();
+        assert!(
+            pesan.starts_with("TypeError: "),
+            "penolakan harus berupa galat yang bisa ditangkap: {pesan}"
+        );
+        assert!(
+            pesan.contains("tidak ada jalur jaringan"),
+            "alasan penolakan harus menyebut sebabnya: {pesan}"
+        );
+    }
+
+    #[test]
+    fn fetch_yang_diizinkan_mengembalikan_badan() {
+        let (gerbang, dicatat) = GerbangUji::baru(&["contoh.test"]);
+        let isolat =
+            Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        assert_eq!(
+            isolat
+                .eval("fetch('https://contoh.test/a').text()")
+                .unwrap(),
+            "badan dari contoh.test"
+        );
+        assert_eq!(
+            isolat
+                .eval("fetch('https://contoh.test/a').status")
+                .unwrap(),
+            "200"
+        );
+        assert_eq!(
+            isolat.eval("fetch('https://contoh.test/a').ok").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            isolat
+                .eval("fetch('https://contoh.test/a').headers.get('Content-Type')")
+                .unwrap(),
+            "text/plain"
+        );
+        let tercatat = dicatat.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(tercatat.len(), 4, "setiap panggilan harus lewat gerbang");
+        assert_eq!(tercatat[0].url, "https://contoh.test/a");
+        assert_eq!(tercatat[0].metode, "GET");
+        assert_eq!(tercatat[0].badan, None);
+    }
+
+    #[test]
+    fn fetch_yang_ditolak_menyebut_alasan_gerbang() {
+        let (gerbang, dicatat) = GerbangUji::baru(&["contoh.test"]);
+        let isolat =
+            Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        let pesan = isolat
+            .eval(
+                "try { fetch('https://terlarang.test/'); 'tidak menolak' } \
+                 catch (e) { e.message }",
+            )
+            .unwrap();
+        assert!(
+            pesan.contains("terlarang.test"),
+            "penolakan harus menyebut host yang ditolak: {pesan}"
+        );
+        let tercatat = dicatat.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(tercatat.len(), 1, "penolakan tetap tercatat di gerbang");
+    }
+
+    #[test]
+    fn fetch_meneruskan_metode_dan_badan() {
+        let (gerbang, dicatat) = GerbangUji::baru(&["contoh.test"]);
+        let isolat =
+            Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        isolat
+            .eval("fetch('https://contoh.test/kirim', {method: 'post', body: 'a=1'}).text()")
+            .unwrap();
+        let tercatat = dicatat.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            tercatat[0].metode, "POST",
+            "metode dinormalkan ke huruf besar"
+        );
+        assert_eq!(tercatat[0].badan.as_deref(), Some("a=1"));
+    }
+
+    #[test]
+    fn fetch_tidak_meninggalkan_global_tambahan() {
+        // Nama jembatan dihapus sebelum skrip halaman mana pun berjalan; yang
+        // tersisa hanya `fetch` sendiri.
+        let (gerbang, _) = GerbangUji::baru(&["contoh.test"]);
+        let isolat =
+            Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        assert_eq!(
+            isolat.eval("typeof globalThis.__ambil").unwrap(),
+            "undefined"
+        );
+        assert_eq!(isolat.eval("typeof fetch").unwrap(), "function");
+        assert_eq!(
+            isolat
+                .eval("Object.keys(globalThis).includes('fetch')")
+                .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn fetch_json_mengurai_badan() {
+        struct Json;
+        impl Pengambil for Json {
+            fn ambil(&self, permintaan: &PermintaanAmbil) -> Result<JawabanAmbil, String> {
+                Ok(JawabanAmbil {
+                    status: 201,
+                    url: permintaan.url.clone(),
+                    content_type: Some("application/json".to_owned()),
+                    badan: "{\"nilai\": 7}".to_owned(),
+                })
+            }
+        }
+        let isolat = Isolat::dengan_ambil(PaguIsolat::default(), Arc::new(Json)).unwrap();
+        assert_eq!(
+            isolat
+                .eval("fetch('https://contoh.test/j').json().nilai")
+                .unwrap(),
+            "7"
+        );
+    }
 
     #[test]
     fn mengevaluasi_ekspresi() {

@@ -65,7 +65,36 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
     // native saling menimpa baris `tab_snapshot`.
     let dingin = tabstore::SumberDingin::new(file.store_db(), file.store_key());
 
-    let engines = launch_all(&resolved.machines, args.ready_timeout_ms, Some(&dingin)).await?;
+    // Gerbang jaringan untuk `fetch()` di dalam isolat mesin native. Dibangun
+    // di sini, sekali, lalu dipegang setiap tab: skrip halaman tidak punya
+    // jalur jaringan sendiri, dan satu-satunya jalan keluarnya adalah kebijakan
+    // ini. Daftar izin kosong berarti menolak semua, dan itu dilaporkan supaya
+    // operator yang lupa mengisi `[fetch]` melihat sebabnya di log, bukan
+    // menebaknya dari halaman yang diam.
+    let kebijakan_fetch = file.fetch.as_ref().map_or_else(
+        cdp::native_wire::KebijakanJaringan::default,
+        config::FetchSection::kebijakan,
+    );
+    if kebijakan_fetch.mengizinkan_sesuatu() {
+        tracing::info!(
+            izin_host = ?kebijakan_fetch.izin(),
+            "gerbang jaringan fetch siap"
+        );
+    } else {
+        tracing::info!(
+            "bagian [fetch] kosong: fetch() dari halaman akan ditolak semua dengan alasan"
+        );
+    }
+    let ambil: Arc<dyn engine::native::ambil::Pengambil> =
+        Arc::new(cdp::native_wire::PengambilJaringan::baru(kebijakan_fetch));
+
+    let engines = launch_all(
+        &resolved.machines,
+        args.ready_timeout_ms,
+        Some(&dingin),
+        Some(Arc::clone(&ambil)),
+    )
+    .await?;
     let pool = EnginePool::new(resolved.default_id.clone(), engines)
         .map_err(|err| anyhow::anyhow!("konfigurasi mesin tidak sah: {err}"))?
         .dengan_batas_tab(batas_tab(&resolved.machines));
@@ -404,6 +433,7 @@ async fn nyalakan(
     mesin: &Mesin,
     timeout_ms: u64,
     dingin: Option<&tabstore::SumberDingin>,
+    ambil: Option<Arc<dyn engine::native::ambil::Pengambil>>,
 ) -> Result<Arc<dyn Engine>> {
     let spec = engine::LaunchSpec::new(mesin.binary.clone(), mesin.user_data_dir.clone())
         .with_port(mesin.port)
@@ -424,7 +454,7 @@ async fn nyalakan(
     // Sesi penyimpanan dingin memakai id mesin: dua mesin native tidak boleh
     // berbagi ruang tab.
     let pabrik = dingin.map(|sumber| sumber.pabrik(mesin.id.clone()));
-    let penggerak = penggerak_kind_dengan(&mesin.kind, pabrik).with_context(|| {
+    let penggerak = penggerak_kind_dengan(&mesin.kind, pabrik, ambil).with_context(|| {
         format!(
             "mesin '{}': jenis '{}' belum punya adapter",
             mesin.id, mesin.kind
@@ -448,10 +478,11 @@ async fn launch_all(
     machines: &[Mesin],
     timeout_ms: u64,
     dingin: Option<&tabstore::SumberDingin>,
+    ambil: Option<Arc<dyn engine::native::ambil::Pengambil>>,
 ) -> Result<BTreeMap<String, Arc<dyn Engine>>> {
     let mut engines: BTreeMap<String, Arc<dyn Engine>> = BTreeMap::new();
     for mesin in machines {
-        match nyalakan(mesin, timeout_ms, dingin).await {
+        match nyalakan(mesin, timeout_ms, dingin, ambil.clone()).await {
             Ok(engine) => {
                 engines.insert(mesin.id.clone(), engine);
             }
@@ -1045,7 +1076,7 @@ fn wajib_absolut(path: &Path, apa: &str) -> Result<()> {
 /// sebaliknya, `cdp` yang memakai `engine`). Karena itu penggabungan dua daftar
 /// ini hidup di daemon, satu-satunya tempat yang melihat keduanya.
 fn penggerak_kind(kind: &str) -> Option<Arc<dyn Penggerak>> {
-    penggerak_kind_dengan(kind, None)
+    penggerak_kind_dengan(kind, None, None)
 }
 
 /// Sama dengan [`penggerak_kind`], tapi mesin native diberi penyimpanan dingin
@@ -1057,11 +1088,13 @@ fn penggerak_kind(kind: &str) -> Option<Arc<dyn Penggerak>> {
 fn penggerak_kind_dengan(
     kind: &str,
     dingin: Option<cdp::native_wire::PabrikDingin>,
+    ambil: Option<Arc<dyn engine::native::ambil::Pengambil>>,
 ) -> Option<Arc<dyn Penggerak>> {
     if kind == NATIVE_KIND {
-        let penggerak = match dingin {
-            Some(pabrik) => PenggerakNative::baru(pabrik),
-            None => PenggerakNative::default(),
+        let penggerak = match (dingin, ambil) {
+            (Some(pabrik), Some(ambil)) => PenggerakNative::dengan_ambil(pabrik, ambil),
+            (Some(pabrik), None) => PenggerakNative::baru(pabrik),
+            (None, _) => PenggerakNative::default(),
         };
         return Some(Arc::new(penggerak));
     }

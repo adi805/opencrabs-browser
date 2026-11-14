@@ -12,6 +12,7 @@ encoding_rs.workspace = true
 engine.workspace = true
 futures-util.workspace = true
 lifecycle.workspace = true
+policy.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
