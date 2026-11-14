@@ -1,4 +1,5 @@
-//! Pengukuran teks dari satu face TrueType yang ditanam di dalam biner.
+//! Pengukuran dan pembentukan (shaping) teks dari face TrueType yang ditanam
+//! di dalam biner.
 //!
 //! Kenapa ditanam, bukan dibaca dari sistem: angka layout dan PNG harus sama
 //! di laptop, di runner CI, dan di container. Font sistem berbeda di tiap
@@ -6,11 +7,26 @@
 //! tanpa satu baris kode berubah. Berkas dan lisensinya:
 //! `crates/engine/assets/README.md`.
 //!
-//! Yang dibaca dari face hanya yang dibutuhkan pengukuran: `units_per_em`,
-//! `ascender`/`descender`/`line_gap`, lebar glyph (`hmtx`), dan pemetaan
-//! code point ke glyph (`cmap`). Tidak ada shaping, kerning, ligatur, atau
-//! font fallback; aksara di luar cakupan face diukur selebar `.notdef`, dan
-//! batas itu disebut di [`super::CELAH`], bukan ditutupi.
+//! Yang dibaca dari satu face: `units_per_em`, `ascender`/`descender`/
+//! `line_gap`, lebar glyph (`hmtx`), pemetaan code point ke glyph (`cmap`),
+//! dan tabel layout (`GSUB`/`GPOS`) lewat `rustybuzz`.
+//!
+//! Dua hal yang membedakan modul ini dari sekadar penjumlahan lebar karakter:
+//!
+//! - **Rantai face.** Satu face tidak punya semua aksara. Setiap code point
+//!   dicari di face pertama yang benar-benar memetakannya, dan teks dipecah
+//!   jadi rentetan se-face sebelum dibentuk. Tanpa rantai ini, aksara di luar
+//!   DejaVu Sans jatuh ke `.notdef` dan lebarnya jadi lebar kotak kosong.
+//! - **Shaping.** Aksara Arab bersambung dan aksara Indic menukar urutan
+//!   glyph: matra `i` digambar **sebelum** konsonan yang dibubuhinya. Satu
+//!   glyph per code point tidak bisa menyatakan itu, jadi rentetan dibentuk
+//!   dengan HarfBuzz (port Rust) dan hasilnya yang dipakai, bukan tebakan
+//!   per karakter.
+//!
+//! Batas yang masih ada, dan disebut di [`super::CELAH`] alih-alih ditutupi:
+//! tidak ada `@font-face` (jadi `font-family` diabaikan), tidak ada pemilihan
+//! face per bobot (satu face per aksara), dan `white-space: pre` belum
+//! dihormati.
 //!
 //! Perataan spasi mengikuti `white-space: normal`: rentetan spasi, tab, dan
 //! baris baru diruntuhkan jadi satu spasi, lalu dipangkas di kedua ujung.
@@ -19,19 +35,54 @@
 
 use std::sync::OnceLock;
 
-/// Face yang ditanam. Isinya diperiksa oleh `font_tanam_bisa_dibaca`.
-const FONT: &[u8] = include_bytes!("../../assets/DejaVuSans.ttf");
-
-/// Face yang dipakai seluruh mesin, diurai sekali.
+/// Face yang ditanam, urut prioritas: face pertama yang memetakan sebuah code
+/// point yang dipakai untuk code point itu.
 ///
-/// `None` hanya mungkin kalau berkas yang ditanam rusak, dan itu berarti
-/// build-nya salah, bukan input pengguna. Pemanggil yang menerima `None`
-/// melaporkannya sebagai catatan, bukan menebak lebar karakter.
+/// Urutannya sengaja "yang paling luas dulu": DejaVu Sans memegang Latin,
+/// Yunani, Kiril, Arab, dan Ibrani, jadi teks campuran tetap didominasi satu
+/// face dan shaping-nya tidak terpecah tanpa perlu.
+const TERTANAM: &[(&str, &[u8])] = &[
+    ("DejaVu Sans", include_bytes!("../../assets/DejaVuSans.ttf")),
+    (
+        "Noto Sans Devanagari",
+        include_bytes!("../../assets/NotoSansDevanagari-Regular.ttf"),
+    ),
+];
+
+/// Satu face yang berhasil diurai, beserta byte asalnya.
+///
+/// Byte-nya disimpan karena `rustybuzz` mengurai ulang tabel layout dari slice
+/// yang sama: memakai dua salinan akan membuka kemungkinan metrik dan bentuk
+/// glyph berasal dari berkas yang berbeda.
+struct Tanam {
+    nama: &'static str,
+    byte: &'static [u8],
+    face: ttf_parser::Face<'static>,
+}
+
+/// Seluruh face yang ditanam, diurai sekali.
+///
+/// Face yang gagal diurai dilewati, bukan menggagalkan seluruh modul: satu
+/// berkas rusak tidak boleh membuat teks hilang sama sekali. Face pertama
+/// yang gagal tetap terlihat lewat [`tersedia`] yang jadi `false`, dan itu
+/// kegagalan build yang ditangkap tes, bukan kondisi runtime.
+fn semua() -> &'static [Tanam] {
+    static SEMUA: OnceLock<Vec<Tanam>> = OnceLock::new();
+    SEMUA.get_or_init(|| {
+        TERTANAM
+            .iter()
+            .filter_map(|(nama, byte)| {
+                let face = ttf_parser::Face::parse(byte, 0).ok()?;
+                Some(Tanam { nama, byte, face })
+            })
+            .collect()
+    })
+}
+
+/// Face utama: yang dipakai untuk metrik baris dan sebagai jalan terakhir
+/// ketika tidak ada face yang memetakan sebuah code point.
 fn metrik() -> Option<&'static ttf_parser::Face<'static>> {
-    static METRIK: OnceLock<Option<ttf_parser::Face<'static>>> = OnceLock::new();
-    METRIK
-        .get_or_init(|| ttf_parser::Face::parse(FONT, 0).ok())
-        .as_ref()
+    semua().first().map(|t| &t.face)
 }
 
 /// Apakah metrik font bisa dipakai. Dipakai tes dan laporan layout.
@@ -40,10 +91,10 @@ pub fn tersedia() -> bool {
     metrik().is_some()
 }
 
-/// Face yang dipakai mesin, untuk lapisan lukis yang butuh outline glyph.
+/// Face utama, untuk pemanggil yang butuh outline tanpa lewat [`bentuk`].
 ///
-/// Yang dikembalikan adalah face yang **sama** dengan yang dipakai mengukur,
-/// jadi lebar yang dihitung layout dan glyph yang dilukis tidak bisa berbeda
+/// Yang dikembalikan adalah face yang **sama** dengan yang dipakai mengukur
+/// baris, jadi tinggi baris dan glyph yang dilukis tidak bisa berbeda
 /// pendapat. `None` berarti berkas yang ditanam rusak, dan itu kesalahan
 /// build, bukan input pengguna.
 #[must_use]
@@ -51,13 +102,150 @@ pub fn face() -> Option<&'static ttf_parser::Face<'static>> {
     metrik()
 }
 
-/// Skala dari unit font ke piksel untuk satu `font-size`.
+/// Daftar face yang benar-benar terpakai: nama dan `units_per_em`-nya.
 ///
-/// Dipakai lapisan lukis supaya outline glyph dan lebar hasil ukur memakai
-/// pembagi `units_per_em` yang sama.
+/// Dipakai tes dan laporan supaya "rantai face" bisa diperiksa dari luar tanpa
+/// membuka isi biner. Face kedua yang hilang akan terlihat di sini sebelum
+/// terlihat sebagai teks yang salah.
+#[must_use]
+pub fn rantai() -> Vec<(&'static str, u16)> {
+    semua()
+        .iter()
+        .map(|t| (t.nama, t.face.units_per_em()))
+        .collect()
+}
+
+/// Face pertama yang memetakan `c`, atau face utama kalau tidak ada.
+fn pilih(c: char) -> &'static Tanam {
+    semua()
+        .iter()
+        .find(|t| t.face.glyph_index(c).is_some())
+        .unwrap_or_else(|| &semua()[0])
+}
+
+/// Skala dari unit font satu face ke piksel.
+///
+/// Dihitung per face, bukan sekali untuk seluruh rantai: `units_per_em` tiap
+/// face berbeda (DejaVu 2048, Noto Sans Devanagari 1000), dan memakai pembagi
+/// face pertama untuk semua face membuat aksara dari face kedua 2x terlalu
+/// besar.
+fn skala_face(face: &ttf_parser::Face<'_>, ukuran_font: f32) -> f32 {
+    ukuran_font / f32::from(face.units_per_em())
+}
+
+/// Satu glyph hasil pembentukan, sudah dalam piksel.
+#[derive(Debug, Clone, Copy)]
+pub struct Glyph {
+    /// Face asal glyph ini. Lapisan lukis mengambil outline dari sini.
+    pub face: &'static ttf_parser::Face<'static>,
+    /// Indeks glyph di dalam face-nya.
+    pub id: ttf_parser::GlyphId,
+    /// Maju pena setelah glyph ini, dalam piksel.
+    pub x_advance: f32,
+    /// Geseran glyph terhadap pena, dalam piksel. Mark dan matra memakainya.
+    pub x_offset: f32,
+    /// Geseran vertikal terhadap baseline, dalam piksel.
+    pub y_offset: f32,
+    /// Offset byte glyph ini di dalam teks masukan.
+    ///
+    /// Dipakai pemanggil untuk tahu glyph mana yang berasal dari spasi saat
+    /// meregangkan baris `text-align: justify`. Urutannya **tidak** menaik
+    /// pada aksara yang menukar posisi (matra Indic mendahului konsonannya),
+    /// jadi jangan dipakai sebagai indeks urut.
+    pub cluster: usize,
+}
+
+/// Membentuk `teks` jadi glyph yang siap dilukis, dalam piksel.
+///
+/// Teks dipecah per face lebih dulu (lihat [`pilih`]), lalu tiap rentetan
+/// dibentuk dengan HarfBuzz. Pemecahan memotong kerning dan ligatur yang
+/// melintasi batas face; itu konsekuensi wajar dari rantai face dan tidak
+/// mengubah lebar yang dilaporkan, karena rentetan yang sama dipakai untuk
+/// mengukur dan melukis.
+#[must_use]
+pub fn bentuk(teks: &str, ukuran_font: f32) -> Vec<Glyph> {
+    let daftar = semua();
+    if daftar.is_empty() || ukuran_font <= 0.0 || teks.is_empty() {
+        return Vec::new();
+    }
+    let mut hasil = Vec::new();
+    let mut mulai = 0usize;
+    let mut face_kini: Option<&'static Tanam> = None;
+    for (i, c) in teks.char_indices() {
+        let face = pilih(c);
+        match face_kini {
+            None => face_kini = Some(face),
+            Some(kini) if !std::ptr::eq(kini, face) => {
+                bentuk_satu(&teks[mulai..i], mulai, kini, ukuran_font, &mut hasil);
+                mulai = i;
+                face_kini = Some(face);
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(kini) = face_kini {
+        bentuk_satu(&teks[mulai..], mulai, kini, ukuran_font, &mut hasil);
+    }
+    hasil
+}
+
+/// Membentuk satu rentetan yang seluruhnya milik `tanam`.
+fn bentuk_satu(
+    rentetan: &str,
+    offset_byte: usize,
+    tanam: &'static Tanam,
+    ukuran_font: f32,
+    keluar: &mut Vec<Glyph>,
+) {
+    let skala = skala_face(&tanam.face, ukuran_font);
+    // `rustybuzz` mengurai ulang tabel dari byte yang sama dengan `ttf-parser`.
+    // Kalau itu gagal, glyph tetap bisa diambil per karakter: hasilnya lebih
+    // buruk (tanpa sambungan dan tanpa penukaran matra) tapi tidak kosong, dan
+    // lebar yang dilaporkan tetap konsisten dengan yang dilukis.
+    let Some(rb) = rustybuzz::Face::from_slice(tanam.byte, 0) else {
+        for (i, c) in rentetan.char_indices() {
+            let id = tanam.face.glyph_index(c).unwrap_or(ttf_parser::GlyphId(0));
+            let maju = tanam
+                .face
+                .glyph_hor_advance(id)
+                .map_or(0.0, |a| f32::from(a) * skala);
+            keluar.push(Glyph {
+                face: &tanam.face,
+                id,
+                x_advance: maju,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                cluster: offset_byte + i,
+            });
+        }
+        return;
+    };
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(rentetan);
+    // Skrip dan arah ditebak dari isi rentetan. Tanpa ini aksara Arab dibentuk
+    // sebagai huruf terpisah dalam urutan kiri-ke-kanan.
+    buffer.guess_segment_properties();
+    let hasil = rustybuzz::shape(&rb, &[], buffer);
+    for (info, pos) in hasil.glyph_infos().iter().zip(hasil.glyph_positions()) {
+        keluar.push(Glyph {
+            face: &tanam.face,
+            id: ttf_parser::GlyphId(u16::try_from(info.glyph_id).unwrap_or(0)),
+            x_advance: pos.x_advance as f32 * skala,
+            x_offset: pos.x_offset as f32 * skala,
+            y_offset: pos.y_offset as f32 * skala,
+            cluster: offset_byte + info.cluster as usize,
+        });
+    }
+}
+
+/// Skala dari unit font face utama ke piksel untuk satu `font-size`.
+///
+/// Dipakai lapisan lukis untuk tinggi baris, yang selalu dihitung dari face
+/// utama: satu baris tidak punya satu face, jadi metrik baris tidak bisa
+/// diambil dari face mana pun yang kebetulan muncul di dalamnya.
 #[must_use]
 pub fn skala(ukuran_font: f32) -> f32 {
-    metrik().map_or(0.0, |f| ukuran_font / f32::from(f.units_per_em()))
+    metrik().map_or(0.0, |f| skala_face(f, ukuran_font))
 }
 
 /// Jarak dari tepi atas baris ke garis dasar (baseline), dalam piksel.
@@ -72,22 +260,13 @@ pub fn jarak_baseline(ukuran_font: f32) -> f32 {
     })
 }
 
-/// Lebar satu karakter pada ukuran font tertentu, termasuk fallback `.notdef`.
-///
-/// Lapisan lukis memakainya untuk memajukan pena antar glyph, sehingga posisi
-/// glyph sama dengan posisi yang dipakai [`lebar`] saat mengukur.
-#[must_use]
-pub fn lebar_karakter(c: char, ukuran_font: f32) -> f32 {
-    metrik().map_or(0.0, |face| lebar_char(face, c, skala(ukuran_font)))
-}
-
-/// `units_per_em` face yang ditanam. Dipakai tes untuk mengunci identitas font.
+/// `units_per_em` face utama. Dipakai tes untuk mengunci identitas font.
 #[must_use]
 pub fn units_per_em() -> Option<u16> {
     metrik().map(ttf_parser::Face::units_per_em)
 }
 
-/// Tinggi satu baris menurut metrik font, dalam piksel.
+/// Tinggi satu baris menurut metrik font utama, dalam piksel.
 ///
 /// Rumusnya `(ascender - descender + line_gap) / units_per_em * ukuran_font`.
 /// Ini nilai `line-height: normal` yang sebenarnya, bukan 1.2 x font-size yang
@@ -103,26 +282,19 @@ pub fn tinggi_baris_normal(ukuran_font: f32) -> f32 {
     (naik - turun + celah) / f32::from(face.units_per_em()) * ukuran_font
 }
 
-/// Lebar satu karakter dalam piksel, termasuk fallback `.notdef`.
-fn lebar_char(face: &ttf_parser::Face<'_>, c: char, skala: f32) -> f32 {
-    let glyph = face.glyph_index(c).unwrap_or(ttf_parser::GlyphId(0));
-    face.glyph_hor_advance(glyph)
-        .map_or(0.0, |advance| f32::from(advance) * skala)
+/// Lebar `teks` apa adanya, tanpa meruntuhkan spasinya.
+fn lebar_mentah(teks: &str, ukuran_font: f32) -> f32 {
+    bentuk(teks, ukuran_font).iter().map(|g| g.x_advance).sum()
 }
 
 /// Lebar satu baris teks dalam piksel, tanpa membungkus.
 ///
 /// Teks diruntuhkan spasinya lebih dulu, jadi `"a   b"` selebar `"a b"`.
+/// Angkanya berasal dari hasil shaping yang sama dengan yang dilukis, bukan
+/// penjumlahan lebar per karakter: pada aksara bersambung keduanya berbeda.
 #[must_use]
 pub fn lebar(teks: &str, ukuran_font: f32) -> f32 {
-    let Some(face) = metrik() else {
-        return 0.0;
-    };
-    let skala = ukuran_font / f32::from(face.units_per_em());
-    rapikan(teks)
-        .chars()
-        .map(|c| lebar_char(face, c, skala))
-        .sum()
+    lebar_mentah(&rapikan(teks), ukuran_font)
 }
 
 /// Rentetan spasi, tab, dan baris baru jadi satu spasi, lalu dipangkas.
@@ -165,21 +337,17 @@ pub fn bungkus(teks: &str, ukuran_font: f32, lebar_maks: f32) -> Vec<String> {
     if rapi.is_empty() {
         return Vec::new();
     }
-    let Some(face) = metrik() else {
-        return vec![rapi];
-    };
-    if lebar_maks <= 0.0 {
+    if metrik().is_none() || lebar_maks <= 0.0 {
         return vec![rapi];
     }
-    let skala = ukuran_font / f32::from(face.units_per_em());
-    let lebar_spasi = lebar_char(face, ' ', skala);
+    let lebar_spasi = lebar_mentah(" ", ukuran_font);
 
     let mut baris: Vec<String> = Vec::new();
     let mut sekarang = String::new();
     let mut lebar_sekarang = 0.0_f32;
 
     for kata in rapi.split(' ') {
-        let lebar_kata = lebar_kata(face, kata, skala);
+        let lebar_kata = lebar_mentah(kata, ukuran_font);
         if sekarang.is_empty() {
             sekarang.push_str(kata);
             lebar_sekarang = lebar_kata;
@@ -197,10 +365,6 @@ pub fn bungkus(teks: &str, ukuran_font: f32, lebar_maks: f32) -> Vec<String> {
         baris.push(sekarang);
     }
     baris
-}
-
-fn lebar_kata(face: &ttf_parser::Face<'_>, kata: &str, skala: f32) -> f32 {
-    kata.chars().map(|c| lebar_char(face, c, skala)).sum()
 }
 
 /// Hasil pengukuran satu blok teks setelah dibungkus.
@@ -260,9 +424,21 @@ mod tests {
     }
 
     #[test]
+    fn rantai_face_berisi_dua_berkas_dengan_upem_berbeda() {
+        // Dua face dengan `units_per_em` berbeda itu sengaja: kalau skalanya
+        // dihitung sekali dari face pertama, aksara dari face kedua akan
+        // tergambar 2x terlalu besar dan tes lebar di bawah menangkapnya.
+        assert_eq!(
+            rantai(),
+            vec![("DejaVu Sans", 2048), ("Noto Sans Devanagari", 1000)]
+        );
+    }
+
+    #[test]
     fn teks_kosong_tanpa_lebar() {
         assert_eq!(lebar("", 16.0), 0.0);
         assert!(bungkus("", 16.0, 100.0).is_empty());
+        assert!(bentuk("", 16.0).is_empty());
         let ukuran = ukuran("", 16.0, 18.0, Some(100.0));
         assert_eq!(
             ukuran,
@@ -357,14 +533,105 @@ mod tests {
     }
 
     #[test]
-    fn karakter_di_luar_face_diukur_selebar_notdef() {
-        // Dua aksara CJK, dua-duanya di luar cakupan DejaVu Sans: harus
-        // jatuh ke `.notdef` yang sama, bukan 0 dan bukan lebar karangan.
-        // (U+FFFD tidak dipakai sebagai pembanding: face ini memang punya
-        // glyph untuknya.)
-        let ni = lebar("\u{4f60}", 16.0);
-        let hao = lebar("\u{597d}", 16.0);
-        assert!(ni > 0.0, "harus punya lebar .notdef, bukan 0");
-        assert!((ni - hao).abs() < 0.01, "dua aksara asing selebar .notdef");
+    fn aksara_latin_memakai_face_pertama() {
+        let glyph = bentuk("a", 16.0);
+        assert_eq!(glyph.len(), 1);
+        assert_eq!(
+            glyph[0].face.units_per_em(),
+            2048,
+            "Latin harus tetap di DejaVu Sans, bukan jatuh ke face kedua"
+        );
+        assert_ne!(glyph[0].id, ttf_parser::GlyphId(0));
+    }
+
+    #[test]
+    fn aksara_devanagari_memakai_face_kedua() {
+        // DejaVu Sans tidak punya aksara Devanagari. Kalau rantai face tidak
+        // dipakai, glyph ini jatuh ke `.notdef` face pertama dan lebarnya
+        // 1229/2048*16 = 9.602 px. Dengan face kedua, `क` maju 762/1000*16 =
+        // 12.192 px: angka itu yang membuktikan face-nya benar-benar berganti,
+        // bukan cuma "tidak nol".
+        let ka = bentuk("\u{0915}", 16.0);
+        assert_eq!(ka.len(), 1);
+        assert_eq!(ka[0].face.units_per_em(), 1000, "Noto Sans Devanagari");
+        assert_ne!(ka[0].id, ttf_parser::GlyphId(0), "bukan .notdef");
+        assert!(
+            (ka[0].x_advance - 12.192).abs() < 0.01,
+            "lebar `क` dari face kedua, dapat {}",
+            ka[0].x_advance
+        );
+
+        let notdef = bentuk("\u{4f60}", 16.0);
+        assert_eq!(notdef.len(), 1);
+        assert_eq!(
+            notdef[0].id,
+            ttf_parser::GlyphId(0),
+            "CJK di luar semua face harus .notdef, bukan glyph karangan"
+        );
+        assert!(
+            (notdef[0].x_advance - 9.602).abs() < 0.01,
+            "lebar .notdef face pertama, dapat {}",
+            notdef[0].x_advance
+        );
+        assert!(
+            (ka[0].x_advance - notdef[0].x_advance).abs() > 0.01,
+            "aksara dari face kedua tidak boleh selebar .notdef"
+        );
+    }
+
+    #[test]
+    fn shaping_menukar_urutan_matra() {
+        // `कि` = konsonan `क` (U+0915) lalu matra `i` (U+093F) di teks
+        // masukan. HarfBuzz mengeluarkan matra **sebelum** konsonannya, jadi
+        // glyph pertama adalah matra yang sempit dan glyph kedua konsonan yang
+        // lebar. Tanpa shaping urutannya persis urutan masukan, dan teksnya
+        // tergambar dengan matra di sisi yang salah.
+        //
+        // Bukti yang dipakai bukan `cluster`: HarfBuzz menyatukan cluster
+        // matra ke konsonannya (keduanya 0) karena keduanya satu gugus, jadi
+        // `cluster` tidak bisa membedakan dua urutan ini. Yang membedakan
+        // adalah maju glyph, dan id matra yang sudah digantikan GSUB.
+        let glyph = bentuk("\u{0915}\u{093F}", 16.0);
+        assert_eq!(glyph.len(), 2, "satu konsonan dan satu matra: {glyph:?}");
+        assert!(
+            (glyph[0].x_advance - 4.144).abs() < 0.01,
+            "glyph pertama harus matra sempit, dapat {}",
+            glyph[0].x_advance
+        );
+        assert!(
+            (glyph[1].x_advance - 12.192).abs() < 0.01,
+            "glyph kedua harus konsonan lebar, dapat {}",
+            glyph[1].x_advance
+        );
+        let face = glyph[0].face;
+        let konsonan = face
+            .glyph_index('\u{0915}')
+            .expect("`क` di face Devanagari");
+        let matra = face
+            .glyph_index('\u{093F}')
+            .expect("matra `i` di face Devanagari");
+        assert_eq!(glyph[1].id, konsonan, "konsonan tetap glyph aslinya");
+        assert_ne!(
+            glyph[0].id, matra,
+            "matra harus bentuk hasil GSUB, bukan glyph cmap mentah"
+        );
+    }
+
+    #[test]
+    fn lebar_memakai_hasil_shaping() {
+        // Lebar satu baris harus sama dengan jumlah maju glyph yang dilukis,
+        // bukan penjumlahan lebar per karakter: pada aksara bersambung kedua
+        // angka itu berbeda, dan yang benar adalah yang dilukis.
+        for teks in [
+            "Hello",
+            "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}",
+            "\u{0915}\u{093F}",
+        ] {
+            let jumlah: f32 = bentuk(teks, 16.0).iter().map(|g| g.x_advance).sum();
+            assert!(
+                (lebar(teks, 16.0) - jumlah).abs() < 0.001,
+                "lebar `{teks}` harus sama dengan jumlah maju glyph"
+            );
+        }
     }
 }

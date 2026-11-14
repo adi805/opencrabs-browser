@@ -11,9 +11,10 @@
 //! merasterkan kotak menjadi PNG lewat `tiny-skia`, dan [`js::Isolat`]
 //! menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
-//! [`teks::UkuranTeks`] mengukur lebar teks dari face TrueType yang ditanam
-//! di dalam biner (`crates/engine/assets/DejaVuSans.ttf`), dan node teks
-//! menghasilkan kotak layout yang dibungkus pada lebar induknya.
+//! [`teks::UkuranTeks`] mengukur lebar teks dari rantai face TrueType yang
+//! ditanam di dalam biner (`crates/engine/assets/`), memilih face per code
+//! point dan membentuk glyph dengan `rustybuzz`, dan node teks menghasilkan
+//! kotak layout yang dibungkus pada lebar induknya.
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan.
 //! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
@@ -57,11 +58,15 @@ pub const CELAH: &[&str] = &[
      `@media` tampil tanpa aturan itu, dan `@font-face` tidak diunduh sehingga \
      webfont jatuh ke face yang ditanam. `@import` sendiri sudah diselesaikan \
      lapisan pengambil (`cdp::native_wire::gaya`) sampai kedalaman 3",
-    "pengukuran teks hanya satu face (`DejaVuSans.ttf` yang ditanam di \
-     `crates/engine/assets/`): tidak ada webfont (`@font-face` tidak diambil), \
-     tidak ada font fallback per aksara (aksara di luar face diukur selebar \
-     `.notdef`), dan tidak ada shaping/kerning/ligatur, jadi teks Arab, \
-     Devanagari, atau emoji diukur bukan selebar bentuk aslinya",
+    "teks diukur dan dibentuk dari rantai dua face yang ditanam di \
+     `crates/engine/assets/` (`DejaVuSans.ttf` untuk Latin, Yunani, Kiril, \
+     Arab, dan Ibrani; `NotoSansDevanagari-Regular.ttf` untuk Devanagari), \
+     dengan pemilihan face per code point dan shaping HarfBuzz lewat \
+     `rustybuzz`, jadi teks Arab bersambung dan matra Indic tergambar di \
+     posisi yang benar. Yang belum: `@font-face` tidak diunduh sehingga \
+     `font-family` diabaikan, satu face per aksara sehingga `font-weight` dan \
+     `font-style` tidak memilih berkas lain, dan aksara di luar kedua face \
+     (CJK, Thai, emoji berwarna) tetap diukur selebar `.notdef`",
     "peristiwa pointer (`mousedown`, `mouseup`, `click`, `mousemove`) dan \
      pendengar halaman untuk `click`/`input`/`change`/`focus`/`blur`/`keydown` \
      sudah ada, tapi peristiwa **papan ketik dan sentuh** belum: \

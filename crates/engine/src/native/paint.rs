@@ -494,17 +494,13 @@ fn lukis_teks(
     transform: Transform,
     potong: bool,
 ) -> (usize, usize) {
-    let Some(face) = super::teks::face() else {
+    if !super::teks::tersedia() || warna.alpha() == 0.0 || kotak.width <= 0.0 {
         return (0, 0);
-    };
-    if warna.alpha() == 0.0 || kotak.width <= 0.0 || gaya.ukuran_font <= 0.0 {
+    }
+    if gaya.ukuran_font <= 0.0 {
         return (0, 0);
     }
     let baris = super::teks::bungkus(isi, gaya.ukuran_font, kotak.width);
-    let skala = super::teks::skala(gaya.ukuran_font);
-    if skala <= 0.0 {
-        return (0, 0);
-    }
     let baseline_baris = super::teks::jarak_baseline(gaya.ukuran_font);
     let mut paint = Paint::default();
     paint.set_color(warna);
@@ -533,7 +529,11 @@ fn lukis_teks(
     let mut dilukis_baris = 0usize;
     let mut dilukis_glyph = 0usize;
     for (i, isi_baris) in baris.iter().enumerate() {
-        let lebar_baris = super::teks::lebar(isi_baris, gaya.ukuran_font);
+        // Lebar baris dari hasil bentuk yang sama dengan yang dilukis. Kalau
+        // angka ini dihitung dengan cara lain (mis. menjumlah lebar per
+        // karakter), baris bersambung akan meleset dari perataan yang diminta.
+        let glyph_baris = super::teks::bentuk(isi_baris, gaya.ukuran_font);
+        let lebar_baris: f32 = glyph_baris.iter().map(|g| g.x_advance).sum();
         // Baris terakhir `justify` tetap rata kiri: CSS tidak meregangkan baris
         // penutup, dan meregangkannya akan membuat satu kata tampak terpecah.
         let (x_awal, tambahan_spasi) = if rata_justify && i + 1 < jumlah_baris {
@@ -550,30 +550,40 @@ fn lukis_teks(
         let baseline = kotak.y + baseline_baris + i as f32 * gaya.tinggi_baris;
         let mut pena = x_awal;
         let mut ada_glyph = false;
-        for c in isi_baris.chars() {
-            let glyph = face.glyph_index(c).unwrap_or(ttf_parser::GlyphId(0));
+        for glyph in &glyph_baris {
+            // Skala per glyph, bukan satu skala untuk seluruh baris: tiap face
+            // punya `units_per_em` sendiri, dan satu baris boleh memuat lebih
+            // dari satu face.
+            let skala_glyph = gaya.ukuran_font / f32::from(glyph.face.units_per_em());
             let mut pembangun = PembangunGlyph::default();
-            if face.outline_glyph(glyph, &mut pembangun).is_some()
+            if glyph.face.outline_glyph(glyph.id, &mut pembangun).is_some()
                 && let Some(jalur) = pembangun.jalur.finish()
             {
                 // Sumbu Y font ke atas, kanvas ke bawah: skala negatif pada Y.
-                // Pena dan baseline masih satuan CSS; `transform` sudah membawa
-                // kerapatan dan geseran klip.
+                // `y_offset` HarfBuzz juga ke atas, jadi ia mengurangi
+                // baseline. Pena dan baseline masih satuan CSS; `transform`
+                // sudah membawa kerapatan dan geseran klip.
                 let t = transform
-                    .pre_translate(pena, baseline)
-                    .pre_scale(skala, -skala);
+                    .pre_translate(pena + glyph.x_offset, baseline - glyph.y_offset)
+                    .pre_scale(skala_glyph, -skala_glyph);
                 pixmap.fill_path(&jalur, &paint, FillRule::Winding, t, mask.as_ref());
                 if tebal_sintetis > 0.0 {
                     let t2 = transform
-                        .pre_translate(pena + tebal_sintetis, baseline)
-                        .pre_scale(skala, -skala);
+                        .pre_translate(
+                            pena + glyph.x_offset + tebal_sintetis,
+                            baseline - glyph.y_offset,
+                        )
+                        .pre_scale(skala_glyph, -skala_glyph);
                     pixmap.fill_path(&jalur, &paint, FillRule::Winding, t2, mask.as_ref());
                 }
                 dilukis_glyph += 1;
                 ada_glyph = true;
             }
-            pena += super::teks::lebar_karakter(c, gaya.ukuran_font);
-            if c == ' ' {
+            pena += glyph.x_advance;
+            // Spasi dikenali dari offset byte-nya di teks asli, bukan dari
+            // indeks urut: pada aksara yang menukar posisi, urutan glyph tidak
+            // sama dengan urutan karakter.
+            if isi_baris.as_bytes().get(glyph.cluster) == Some(&b' ') {
                 pena += tambahan_spasi;
             }
         }
@@ -1493,6 +1503,45 @@ mod tests {
         assert!(
             piksel_gelap_di(&raster, 0, 0, 200, 80) > 10,
             "glyph hitam harus meninggalkan piksel gelap"
+        );
+    }
+
+    #[test]
+    fn aksara_dari_face_kedua_dilukis_bukan_notdef() {
+        // Rantai face harus sampai ke raster, bukan cuma ke pengukuran: kalau
+        // `paint.rs` masih mengambil outline dari face pertama, aksara
+        // Devanagari keluar sebagai `.notdef` dan kanvasnya jadi IDENTIK
+        // dengan kanvas tiga karakter CJK yang juga `.notdef`.
+        //
+        // Tiga aksara, bukan satu: satu `क` dan satu `.notdef` kebetulan
+        // sama-sama tipis (46 lawan 47 piksel gelap), jadi jumlah piksel saja
+        // tidak membedakan keduanya. Tiga glyph mengakumulasi selisih maju
+        // (12.192 px lawan 9.602 px per glyph), dan bitmap yang identik hanya
+        // mungkin kalau outline-nya memang sama.
+        let deva = Document::parse_html("<body><p>\u{0915}\u{0916}\u{0917}</p></body>").unwrap();
+        let notdef = Document::parse_html("<body><p>\u{4f60}\u{597d}\u{4f60}</p></body>").unwrap();
+        let r_deva = lukis(&deva, Viewport::new(160.0, 60.0), None).unwrap();
+        let r_notdef = lukis(&notdef, Viewport::new(160.0, 60.0), None).unwrap();
+        assert_eq!(r_deva.glyph_dilukis, 3, "tiga glyph Devanagari");
+        assert_eq!(r_notdef.glyph_dilukis, 3, "tiga glyph .notdef");
+        let bitmap = |r: &Raster| -> Vec<[u8; 4]> {
+            (0..60u32)
+                .flat_map(|y| (0..160u32).map(move |x| (x, y)))
+                .filter_map(|(x, y)| r.piksel(x, y))
+                .collect()
+        };
+        assert_ne!(
+            bitmap(&r_deva),
+            bitmap(&r_notdef),
+            "aksara Devanagari tidak boleh dilukis dengan outline .notdef"
+        );
+        let kanan = |r: &Raster| kolom_gelap_maks(r);
+        assert!(
+            kanan(&r_deva) > kanan(&r_notdef),
+            "tiga glyph dari face kedua lebih lebar (12.192 px/glyph) dari \
+             .notdef face pertama (9.602 px/glyph): {} lawan {}",
+            kanan(&r_deva),
+            kanan(&r_notdef)
         );
     }
 

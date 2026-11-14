@@ -122,6 +122,11 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // dari face yang ditanam dan node teks menghasilkan kotak layout
     // (diuji di `native::layout`); yang menggantikannya adalah batas yang
     // lebih sempit: satu face, tanpa webfont, tanpa shaping.
+    // "pengukuran teks hanya satu face" dicabut setelah `native::teks`
+    // memakai rantai dua face dengan pemilihan per code point dan shaping
+    // `rustybuzz` (diuji di modul itu: aksara Devanagari berganti face dan
+    // matra `i` mendahului konsonannya); yang menggantikannya adalah batas
+    // yang lebih sempit: tanpa `@font-face`, tanpa face per bobot.
     // "raster tidak melukis teks" juga dicabut setelah `native::paint`
     // melukis glyph dari outline TrueType, lalu klausa "tanpa gambar/gradien/
     // border, tanpa tebal sintetis, `justify` rata kiri, tidak ada pemotongan"
@@ -141,7 +146,11 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // `@font-face` masih dicatat lalu tidak dijalankan.
     // Yang tersisa di daftar adalah celah yang masih benar-benar terbuka.
     for wajib in [
-        "pengukuran teks hanya satu face",
+        // Batas teks yang masih terbuka. Kalau baris ini hilang, daftar
+        // mengklaim webfont sudah diunduh padahal `@font-face` masih dicatat
+        // lalu dilewati, dan halaman yang bergantung pada `font-family` akan
+        // dilaporkan tampil sesuai desainnya.
+        "`@font-face` tidak diunduh",
         "raster melukis latar kotak dan glyph teks",
         "`fetch()` di dalam isolat",
         // Batas peristiwa CDP yang masih terbuka. Kalau baris ini hilang,
@@ -206,6 +215,11 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // kembali, pembaca mengira halaman bergambar masih keluar sebagai kotak
     // kosong.
     for usang in [
+        // Kalimat lama sebelum rantai face dan shaping: kalau salah satunya
+        // kembali, pembaca mengira teks Arab dan Devanagari masih diukur
+        // selebar `.notdef`.
+        "pengukuran teks hanya satu face",
+        "tidak ada shaping",
         "belum melukis gambar",
         "belum melukis gradien",
         "justify` diperlakukan seperti rata kiri",

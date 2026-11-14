@@ -58,6 +58,12 @@ tiny-skia = { version = "0.11", features = ["png-format"] }
 # apple-layout, variable-fonts, glyph-names) tidak dipakai: yang dibaca hanya
 # `head`, `hhea`, `hmtx`, dan `cmap`, jadi tree tetap kecil.
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+# Shaping HarfBuzz untuk teks yang bentuk glyph-nya bergantung konteks:
+# aksara Arab bersambung, dan aksara Indic yang menukar urutan glyph
+# (matra `i` mendahului konsonan). `ttf-parser` hanya memberi satu glyph per
+# code point, jadi tanpa crate ini teks tersebut tergambar sebagai bentuk
+# terpisah dalam urutan yang salah.
+rustybuzz = { version = "0.20", default-features = false }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

@@ -57,3 +57,23 @@ without prior written authorization from the Gnome Foundation or Bitstream
 Inc., respectively. For further information, contact: fonts at gnome dot
 org.
 ```
+
+## `NotoSansDevanagari-Regular.ttf`
+
+Face kedua di rantai `native::teks`, dipakai untuk aksara Devanagari. DejaVu
+Sans tidak memetakan blok U+0900 sampai U+097F sama sekali, jadi tanpa face
+ini seluruh teks Hindi jatuh ke `.notdef`.
+
+- Berkas: `NotoSansDevanagari-Regular.ttf`, 229 336 byte, `unitsPerEm` 1000.
+  `units_per_em`-nya sengaja berbeda dari DejaVu (2048) supaya skala yang
+  dihitung dari face yang salah langsung terlihat sebagai teks 2x terlalu
+  besar, bukan sebagai selisih kecil.
+- Sumber: <https://github.com/notofonts/devanagari>, paket Debian
+  `fonts-noto-core`.
+- Lisensi: SIL Open Font License 1.1. Teks lisensinya ikut serta di
+  `OFL-1.1.txt`, disalin apa adanya dari `fonts-noto-core` versi Debian.
+
+Rantai face diurutkan "yang paling luas dulu": DejaVu memegang Latin, Yunani,
+Kiril, Arab, dan Ibrani, jadi teks campuran tetap didominasi satu face dan
+shaping-nya tidak terpecah tanpa perlu. Face baru ditambahkan ke
+`TERTANAM` di `native/teks.rs` beserta lisensinya di folder ini.
