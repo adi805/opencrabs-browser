@@ -146,6 +146,12 @@ pub struct KonteksTeks {
     pub ukuran_font: f32,
     /// `line-height` terhitung, dalam piksel.
     pub tinggi_baris: f32,
+    /// `font-family` terhitung, urut prioritas.
+    pub keluarga: Vec<String>,
+    /// Face runtime dari `@font-face`, dibagi lewat `Arc` supaya setiap daun
+    /// teks tidak menyalin seluruh byte webfont. `Arc` juga yang membuat
+    /// konteks ini tetap `Clone` dan `'static` di dalam pohon `taffy`.
+    pub font: std::sync::Arc<super::teks::KumpulanFont>,
 }
 
 impl KonteksTeks {
@@ -160,8 +166,14 @@ impl KonteksTeks {
             AvailableSpace::Definite(w) => Some(w),
             AvailableSpace::MaxContent | AvailableSpace::MinContent => None,
         });
-        let hasil =
-            super::teks::ukuran(&self.teks, self.ukuran_font, self.tinggi_baris, lebar_maks);
+        let hasil = super::teks::ukuran_dengan(
+            &self.teks,
+            self.ukuran_font,
+            self.tinggi_baris,
+            lebar_maks,
+            &self.keluarga,
+            &self.font,
+        );
         Size {
             width: dikenal.width.unwrap_or(hasil.lebar),
             height: dikenal.height.unwrap_or(hasil.tinggi),
@@ -199,6 +211,34 @@ pub fn hitung_dengan(
     viewport: Viewport,
     eksternal: &[LembarLuar],
 ) -> Result<LaporanLayout, NativeError> {
+    hitung_penuh(
+        doc,
+        viewport,
+        eksternal,
+        std::sync::Arc::new(super::teks::KumpulanFont::baru()),
+    )
+}
+
+/// Menghitung layout dengan face `@font-face` yang sudah dipasang.
+///
+/// Face runtime harus ikut ke sini, bukan hanya ke lapisan lukis: kotak teks
+/// yang diukur dengan face tertanam lalu dilukis dengan webfont akan meluap
+/// atau menyisakan celah, dan tidak ada galat yang menandainya.
+pub fn hitung_dengan_font(
+    doc: &Document,
+    viewport: Viewport,
+    eksternal: &[LembarLuar],
+    font: std::sync::Arc<super::teks::KumpulanFont>,
+) -> Result<LaporanLayout, NativeError> {
+    hitung_penuh(doc, viewport, eksternal, font)
+}
+
+fn hitung_penuh(
+    doc: &Document,
+    viewport: Viewport,
+    eksternal: &[LembarLuar],
+    font: std::sync::Arc<super::teks::KumpulanFont>,
+) -> Result<LaporanLayout, NativeError> {
     let mut taffy: TaffyTree<KonteksTeks> = TaffyTree::new();
     let mut peta: HashMap<NodeId, taffy::NodeId> = HashMap::new();
     let mut laporan = LaporanLayout::default();
@@ -220,7 +260,15 @@ pub fn hitung_dengan(
         .map(|n| n.children.clone())
         .unwrap_or_default()
     {
-        if let Some(id) = tempatkan(&mut taffy, doc, &pohon, anak, &mut peta, &mut laporan)? {
+        if let Some(id) = tempatkan(
+            &mut taffy,
+            &font,
+            doc,
+            &pohon,
+            anak,
+            &mut peta,
+            &mut laporan,
+        )? {
             anak_teratas.push(id);
         }
     }
@@ -281,6 +329,7 @@ pub fn hitung_dengan(
 
 fn tempatkan(
     taffy: &mut TaffyTree<KonteksTeks>,
+    font: &std::sync::Arc<super::teks::KumpulanFont>,
     doc: &Document,
     pohon: &PohonGaya,
     id: NodeId,
@@ -318,6 +367,8 @@ fn tempatkan(
             teks: rapi.clone(),
             ukuran_font: gaya.ukuran_font,
             tinggi_baris: gaya.tinggi_baris,
+            keluarga: gaya.keluarga_font.clone(),
+            font: std::sync::Arc::clone(font),
         };
         if konteks.teks.is_empty() {
             return Ok(None);
@@ -354,7 +405,7 @@ fn tempatkan(
     peta.insert(id, daun);
 
     for anak in node.children.clone() {
-        if let Some(c) = tempatkan(taffy, doc, pohon, anak, peta, laporan)? {
+        if let Some(c) = tempatkan(taffy, font, doc, pohon, anak, peta, laporan)? {
             taffy.add_child(daun, c).map_err(NativeError::layout)?;
         }
     }

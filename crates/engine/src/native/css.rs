@@ -127,6 +127,48 @@ pub fn tautan_eksternal(doc: &Document) -> (Vec<Tautan>, Vec<String>) {
     (ambil, lewati)
 }
 
+/// Satu blok `@font-face` yang sudah diurai.
+///
+/// `sumber` berisi URL `src` **apa adanya**, bukan URL absolut, dengan alasan
+/// yang sama seperti [`LembarLuar::href`]: resolusi relatif butuh URL dokumen
+/// dan `<base href>`, dan itu pengetahuan lapisan jaringan. Entri `local(...)`
+/// dibuang, karena face yang dipasang di mesin pengguna bukan webfont yang
+/// boleh dipakai halaman; `format()` dan `tech()` diabaikan tanpa menebak.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFace {
+    /// `font-family` apa adanya, tanpa tanda kutip pembungkus.
+    pub keluarga: String,
+    /// URL `src` urut kemunculan, hanya yang berbentuk `url(...)`.
+    pub sumber: Vec<String>,
+    /// `font-weight`, angka tunggal. Rentang (`100 900`) memakai ujung
+    /// terdekatnya, bukan dirata-rata, karena tebal 500 dan 800 bukan 650.
+    pub tebal: u16,
+    /// `font-style`: `normal`, `italic`, atau `oblique`.
+    pub gaya: String,
+}
+
+impl FontFace {
+    /// Blok tanpa `font-family` atau tanpa satu pun `url()` tidak bisa dipakai:
+    /// tidak ada nama untuk dipanggil dan tidak ada byte untuk dilukis.
+    #[must_use]
+    pub fn berguna(&self) -> bool {
+        !self.keluarga.is_empty() && !self.sumber.is_empty()
+    }
+}
+
+/// Mengumpulkan seluruh `@font-face` dokumen tanpa menjalankan aturan lain.
+///
+/// Dipisah dari [`Kaskade`] karena pengunduh webfont bekerja SEBELUM layout:
+/// ia butuh daftar face untuk diambil dari jaringan, sementara kaskade baru
+/// dibangun saat kotak dihitung. Yang dipakai tetap pengurai yang sama, jadi
+/// blok `@font-face` rusak dilaporkan di tempat yang sama pula.
+#[must_use]
+pub fn font_face_dokumen(doc: &Document, eksternal: &[LembarLuar]) -> Vec<FontFace> {
+    Kaskade::kumpulkan_dengan(doc, eksternal)
+        .font_face()
+        .to_vec()
+}
+
 /// Satu deklarasi `nama: nilai` di dalam blok aturan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deklarasi {
@@ -159,6 +201,9 @@ pub struct Lembar {
 #[derive(Debug, Clone, Default)]
 pub struct Kaskade {
     lembar: Vec<Lembar>,
+    /// Blok `@font-face` dari seluruh lembar, urut kemunculan. Urutan penting:
+    /// deklarasi terakhir untuk keluarga yang sama menang, sama seperti CSS.
+    font_face: Vec<FontFace>,
     /// Dinaikkan tiap lembar baru supaya urutan tetap naik lintas lembar.
     urutan_berikut: usize,
     diabaikan: Vec<String>,
@@ -226,7 +271,7 @@ impl Kaskade {
     /// stylesheet eksternal.
     pub fn tambah_lembar(&mut self, teks: &str, asal: &str) {
         let mut lembar = Lembar::default();
-        lembar.aturan = urai_lembar(teks, &mut lembar.diabaikan);
+        lembar.aturan = urai_lembar(teks, &mut lembar.diabaikan, &mut self.font_face);
         for aturan in &mut lembar.aturan {
             aturan.urutan += self.urutan_berikut;
         }
@@ -234,6 +279,16 @@ impl Kaskade {
         self.diabaikan
             .extend(lembar.diabaikan.iter().map(|d| format!("{asal}: {d}")));
         self.lembar.push(lembar);
+    }
+
+    /// Blok `@font-face` dari seluruh lembar, urut kemunculan.
+    ///
+    /// Lapisan jaringan memakai ini untuk tahu byte apa yang harus diambil;
+    /// kaskade sendiri tidak pernah memasang face, karena memasang face butuh
+    /// soket dan mesin ini tidak membuka soket di dalam lapisan gaya.
+    #[must_use]
+    pub fn font_face(&self) -> &[FontFace] {
+        &self.font_face
     }
 
     /// Deklarasi yang menang per properti untuk satu elemen, sudah termasuk
@@ -318,11 +373,105 @@ fn teks_di_dalam(doc: &Document, id: NodeId) -> String {
     out
 }
 
+/// Mengurai satu blok `@font-face` menjadi [`FontFace`].
+///
+/// Mengembalikan `None` kalau bloknya tidak menyebut `font-family` atau tidak
+/// punya satu pun `url()`: blok seperti itu tidak bisa dipanggil maupun
+/// dilukis, jadi mencatatnya sebagai face hanya akan menyesatkan lapisan
+/// berikutnya.
+fn urai_font_face(isi: &str, diabaikan: &mut Vec<String>) -> Option<FontFace> {
+    let mut keluarga = String::new();
+    let mut sumber = Vec::new();
+    let mut tebal = 400u16;
+    let mut gaya = "normal".to_string();
+    for d in urai_deklarasi(isi, diabaikan) {
+        match d.nama.as_str() {
+            "font-family" => keluarga = tanpa_kutip(&d.nilai),
+            "src" => sumber = url_di_src(&d.nilai),
+            "font-weight" => tebal = bobot_pertama(&d.nilai).unwrap_or(400),
+            "font-style" => {
+                let v = d.nilai.trim().to_ascii_lowercase();
+                if matches!(v.as_str(), "normal" | "italic" | "oblique") {
+                    gaya = v;
+                }
+            }
+            _ => {}
+        }
+    }
+    let face = FontFace {
+        keluarga,
+        sumber,
+        tebal,
+        gaya,
+    };
+    face.berguna().then_some(face)
+}
+
+/// Membuang tanda kutip pembungkus nama keluarga, tanpa mengubah isinya.
+fn tanpa_kutip(nilai: &str) -> String {
+    let t = nilai.trim();
+    let t = t
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(t);
+    t.trim().to_string()
+}
+
+/// Mengambil setiap `url(...)` dari nilai `src`, urut kemunculan.
+///
+/// `local(...)` sengaja dibuang: face yang terpasang di mesin pengguna bukan
+/// aset yang dikirim halaman, dan memakainya berarti hasil lukis bergantung
+/// pada apa yang kebetulan terpasang di host itu. `format(...)` diabaikan
+/// karena byte-nya tetap diperiksa sendiri saat dipasang.
+fn url_di_src(nilai: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let rendah = nilai.to_ascii_lowercase();
+    let bytes = rendah.as_bytes();
+    let mut i = 0usize;
+    while let Some(p) = rendah[i..].find("url(") {
+        let mulai = i + p + 4;
+        let Some(tutup) = rendah[mulai..].find(')') else {
+            break;
+        };
+        let mentah = nilai[mulai..mulai + tutup].trim();
+        let bersih = tanpa_kutip(mentah);
+        if !bersih.is_empty() {
+            out.push(bersih);
+        }
+        i = mulai + tutup + 1;
+        if i >= bytes.len() {
+            break;
+        }
+    }
+    out
+}
+
+/// Angka pertama pada nilai `font-weight`.
+///
+/// Rentang seperti `100 900` memakai angka pertamanya, bukan titik tengah:
+/// mesin ini memilih face per nama, dan memilih ujung rentang lebih jujur
+/// daripada mengarang bobot yang tidak dideklarasikan.
+fn bobot_pertama(nilai: &str) -> Option<u16> {
+    let v = nilai.trim();
+    match v.to_ascii_lowercase().as_str() {
+        "normal" => return Some(400),
+        "bold" => return Some(700),
+        _ => {}
+    }
+    let angka: String = v.chars().take_while(char::is_ascii_digit).collect();
+    angka.parse().ok()
+}
+
 /// Mengurai teks CSS menjadi aturan. Kesalahan sintaks tidak menggagalkan
 /// seluruh lembar: bagian yang tidak bisa diurai dicatat di `diabaikan` dan
 /// penguraian lanjut, karena satu aturan rusak di halaman nyata tidak boleh
 /// membatalkan sisa stylesheet.
-pub fn urai_lembar(teks: &str, diabaikan: &mut Vec<String>) -> Vec<Aturan> {
+pub fn urai_lembar(
+    teks: &str,
+    diabaikan: &mut Vec<String>,
+    font: &mut Vec<FontFace>,
+) -> Vec<Aturan> {
     let chars: Vec<char> = teks.chars().collect();
     let n = chars.len();
     let mut i = 0usize;
@@ -351,14 +500,26 @@ pub fn urai_lembar(teks: &str, diabaikan: &mut Vec<String>) -> Vec<Aturan> {
             // At-rule berakhir di `;` (mis. `@import`) atau di blok `{}`
             // (mis. `@media`). Isinya TIDAK dijalankan: menjalankan
             // `@media` tanpa informasi media yang benar akan menerapkan
-            // aturan yang seharusnya tidak berlaku.
+            // aturan yang seharusnya tidak berlaku. Satu pengecualian:
+            // `@font-face` memang harus dibaca, karena bloknya mendeklarasikan
+            // face yang kemudian dipakai `font-family`.
             let mut kedalaman = 0i32;
+            let mut buka: Option<usize> = None;
+            let mut badan: Option<String> = None;
             while i < n {
                 match chars[i] {
-                    '{' => kedalaman += 1,
+                    '{' => {
+                        kedalaman += 1;
+                        if buka.is_none() {
+                            buka = Some(i);
+                        }
+                    }
                     '}' => {
                         kedalaman -= 1;
                         if kedalaman <= 0 {
+                            if let Some(b) = buka {
+                                badan = Some(chars[b + 1..i].iter().collect());
+                            }
                             i += 1;
                             break;
                         }
@@ -370,6 +531,17 @@ pub fn urai_lembar(teks: &str, diabaikan: &mut Vec<String>) -> Vec<Aturan> {
                     _ => {}
                 }
                 i += 1;
+            }
+            if nama.eq_ignore_ascii_case("font-face") {
+                match badan {
+                    Some(isi) => match urai_font_face(&isi, diabaikan) {
+                        Some(face) => font.push(face),
+                        None => diabaikan
+                            .push("at-rule `@font-face` tanpa `font-family`/`url()`".to_string()),
+                    },
+                    None => diabaikan.push("at-rule `@font-face` tanpa blok".to_string()),
+                }
+                continue;
             }
             diabaikan.push(format!("at-rule `@{nama}` tidak dijalankan"));
             continue;

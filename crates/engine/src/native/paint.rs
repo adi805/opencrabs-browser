@@ -194,7 +194,46 @@ pub fn lukis_dengan_sumber(
     eksternal: &[LembarLuar],
     gambar: &HashMap<String, Vec<u8>>,
 ) -> Result<Raster, NativeError> {
-    let laporan = layout::hitung_dengan(doc, viewport, eksternal)?;
+    lukis_penuh(
+        doc,
+        viewport,
+        klip,
+        format,
+        eksternal,
+        gambar,
+        std::sync::Arc::new(super::teks::KumpulanFont::baru()),
+    )
+}
+
+/// Melukis dokumen dengan webfont `@font-face` yang sudah diunduh pemanggil.
+///
+/// Face runtime masuk ke sini, bukan hanya ke pengunduh: `font-family` yang
+/// menamai face unduhan hanya berpengaruh kalau pengukuran dan pelukisan
+/// memakai `KumpulanFont` yang sama. Mengukur dengan face tertanam lalu
+/// melukis dengan webfont menghasilkan kotak yang salah tanpa galat apa pun.
+pub fn lukis_dengan_font(
+    doc: &Document,
+    viewport: Viewport,
+    klip: Option<Klip>,
+    format: Format,
+    eksternal: &[LembarLuar],
+    gambar: &HashMap<String, Vec<u8>>,
+    font: std::sync::Arc<super::teks::KumpulanFont>,
+) -> Result<Raster, NativeError> {
+    lukis_penuh(doc, viewport, klip, format, eksternal, gambar, font)
+}
+
+fn lukis_penuh(
+    doc: &Document,
+    viewport: Viewport,
+    klip: Option<Klip>,
+    format: Format,
+    eksternal: &[LembarLuar],
+    gambar: &HashMap<String, Vec<u8>>,
+    font: std::sync::Arc<super::teks::KumpulanFont>,
+) -> Result<Raster, NativeError> {
+    let laporan =
+        layout::hitung_dengan_font(doc, viewport, eksternal, std::sync::Arc::clone(&font))?;
     let kerapatan = klip.map_or(1.0, |k| k.kerapatan());
     let (lebar, tinggi, geser) = match klip {
         Some(k) => (
@@ -331,7 +370,16 @@ pub fn lukis_dengan_sumber(
         let gaya = laporan.terhitung.get(node).cloned().unwrap_or_default();
         let warna = warna_teks(&gaya, &mut diabaikan, *node);
         let potong = potong_teks(doc, &laporan, *node);
-        let (baris, glyph) = lukis_teks(&mut pixmap, isi, &gaya, &kotak, warna, transform, potong);
+        let (baris, glyph) = lukis_teks(
+            &mut pixmap,
+            isi,
+            &gaya,
+            &kotak,
+            warna,
+            transform,
+            potong,
+            &font,
+        );
         baris_dilukis += baris;
         glyph_dilukis += glyph;
     }
@@ -493,6 +541,7 @@ fn lukis_teks(
     warna: Color,
     transform: Transform,
     potong: bool,
+    font: &super::teks::KumpulanFont,
 ) -> (usize, usize) {
     if !super::teks::tersedia() || warna.alpha() == 0.0 || kotak.width <= 0.0 {
         return (0, 0);
@@ -500,7 +549,13 @@ fn lukis_teks(
     if gaya.ukuran_font <= 0.0 {
         return (0, 0);
     }
-    let baris = super::teks::bungkus(isi, gaya.ukuran_font, kotak.width);
+    let baris = super::teks::bungkus_dengan(
+        isi,
+        gaya.ukuran_font,
+        kotak.width,
+        &gaya.keluarga_font,
+        font,
+    );
     let baseline_baris = super::teks::jarak_baseline(gaya.ukuran_font);
     let mut paint = Paint::default();
     paint.set_color(warna);
@@ -532,7 +587,8 @@ fn lukis_teks(
         // Lebar baris dari hasil bentuk yang sama dengan yang dilukis. Kalau
         // angka ini dihitung dengan cara lain (mis. menjumlah lebar per
         // karakter), baris bersambung akan meleset dari perataan yang diminta.
-        let glyph_baris = super::teks::bentuk(isi_baris, gaya.ukuran_font);
+        let glyph_baris =
+            super::teks::bentuk_dengan(isi_baris, gaya.ukuran_font, &gaya.keluarga_font, font);
         let lebar_baris: f32 = glyph_baris.iter().map(|g| g.x_advance).sum();
         // Baris terakhir `justify` tetap rata kiri: CSS tidak meregangkan baris
         // penutup, dan meregangkannya akan membuat satu kata tampak terpecah.

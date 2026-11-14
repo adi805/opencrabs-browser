@@ -166,6 +166,13 @@ pub struct TabPanas {
     /// hanya bisa didapat dari jaringan: menghitung ulang berarti mengambil
     /// ulang setiap tangkapan layar.
     pub lembar: Vec<LembarLuar>,
+    /// Face webfont `@font-face` milik dokumen ini.
+    ///
+    /// Ikut tab karena alasan yang sama dengan `lembar`: byte-nya hanya bisa
+    /// didapat dari jaringan, dan pengukuran maupun pelukisan harus memakai
+    /// kumpulan yang sama supaya kotak teks tidak meleset dari glyph-nya.
+    /// Dibagi lewat [`Arc`] supaya setiap lukisan tidak menyalin byte font.
+    pub font: std::sync::Arc<super::teks::KumpulanFont>,
 }
 
 impl TabPanas {
@@ -174,6 +181,12 @@ impl TabPanas {
     /// `MutexGuard` sudah `#[must_use]`, jadi atributnya tidak diulang di sini.
     pub fn dokumen(&self) -> MutexGuard<'_, Document> {
         kunci(&self.dokumen)
+    }
+
+    /// Salinan [`Arc`] kumpulan font, untuk diserahkan ke pengukur dan pelukis.
+    #[must_use]
+    pub fn font(&self) -> std::sync::Arc<super::teks::KumpulanFont> {
+        std::sync::Arc::clone(&self.font)
     }
 
     /// Salinan [`Arc`] pohon, untuk diserahkan ke isolat baru.
@@ -295,7 +308,12 @@ impl<C: ColdStore> TabPool<C> {
     /// Membuka tab baru. Kalau anggaran tab panas penuh, tab paling lama tidak
     /// dipakai disingkirkan lebih dulu, bukan tab baru ditolak.
     pub fn buka(&mut self, url: &str, html: &str) -> Result<TabId, PoolError> {
-        self.buka_dengan(url, html, Vec::new())
+        self.buka_dengan(
+            url,
+            html,
+            Vec::new(),
+            std::sync::Arc::new(super::teks::KumpulanFont::baru()),
+        )
     }
 
     /// Sama dengan [`Self::buka`], tapi dengan lembar gaya eksternal yang
@@ -305,6 +323,7 @@ impl<C: ColdStore> TabPool<C> {
         url: &str,
         html: &str,
         lembar: Vec<LembarLuar>,
+        font: std::sync::Arc<super::teks::KumpulanFont>,
     ) -> Result<TabId, PoolError> {
         if self.jumlah_dialamat() >= self.maks_total {
             return Err(PoolError::KapasitasPenuh {
@@ -317,7 +336,7 @@ impl<C: ColdStore> TabPool<C> {
 
         let id = TabId(self.berikutnya);
         self.berikutnya += 1;
-        let panas = self.bangun(id, url, html, lembar)?;
+        let panas = self.bangun(id, url, html, lembar, font)?;
         self.panas.push(panas);
         Ok(id)
     }
@@ -328,6 +347,7 @@ impl<C: ColdStore> TabPool<C> {
         url: &str,
         html: &str,
         lembar: Vec<LembarLuar>,
+        font: std::sync::Arc<super::teks::KumpulanFont>,
     ) -> Result<TabPanas, PoolError> {
         // Layout sengaja tidak dihitung di sini: lihat catatan di `TabPanas`.
         // Satu pohon, dua pemakai: isolat dan `TabPanas` memegang `Arc` yang
@@ -355,6 +375,7 @@ impl<C: ColdStore> TabPool<C> {
             isolat,
             terakhir_dipakai: Instant::now(),
             lembar,
+            font,
         })
     }
 
@@ -412,11 +433,17 @@ impl<C: ColdStore> TabPool<C> {
             self.singkirkan_lru(AlasanSingkir::Anggaran)?;
         }
 
+        // Webfont tidak ikut tab dingin: `Snapshot` menyimpan HTML dan teks
+        // CSS, sementara byte font bisa puluhan megabyte dan tidak disimpan di
+        // penyimpanan dingin. Tab yang dihidupkan kembali memakai face tertanam
+        // sampai navigasi berikutnya mengunduh ulang `@font-face`. Perbedaan ini
+        // dinyatakan di `CELAH`, bukan disembunyikan.
         let panas = self.bangun(
             snapshot.id,
             &snapshot.url,
             &snapshot.html,
             snapshot.lembar.clone(),
+            std::sync::Arc::new(super::teks::KumpulanFont::baru()),
         )?;
         self.dingin
             .hapus(id)
@@ -446,7 +473,13 @@ impl<C: ColdStore> TabPool<C> {
     /// `url` disimpan apa adanya. Fungsi ini tidak mengambil apa pun dari
     /// jaringan; pemanggil yang menyediakan HTML-nya.
     pub fn ganti_dokumen(&mut self, id: TabId, url: &str, html: &str) -> Result<(), PoolError> {
-        self.ganti_dokumen_dengan(id, url, html, Vec::new())
+        self.ganti_dokumen_dengan(
+            id,
+            url,
+            html,
+            Vec::new(),
+            std::sync::Arc::new(super::teks::KumpulanFont::baru()),
+        )
     }
 
     /// Sama dengan [`Self::ganti_dokumen`], tapi dengan lembar gaya eksternal
@@ -459,11 +492,12 @@ impl<C: ColdStore> TabPool<C> {
         url: &str,
         html: &str,
         lembar: Vec<LembarLuar>,
+        font: std::sync::Arc<super::teks::KumpulanFont>,
     ) -> Result<(), PoolError> {
         if !self.panas.iter().any(|t| t.id == id) {
             self.hidupkan(id)?;
         }
-        let baru = self.bangun(id, url, html, lembar)?;
+        let baru = self.bangun(id, url, html, lembar, font)?;
         match self.panas.iter_mut().find(|t| t.id == id) {
             Some(t) => {
                 *t = baru;
@@ -677,6 +711,7 @@ mod tests {
                 "https://a.test",
                 &halaman(1),
                 lembar("/lama.css", "div { height: 11px }"),
+                std::sync::Arc::new(crate::native::teks::KumpulanFont::baru()),
             )
             .unwrap();
         assert_eq!(p.tab(a).unwrap().lembar.len(), 1, "lembar awal tersimpan");
@@ -686,6 +721,7 @@ mod tests {
             "https://a.test/kedua",
             &halaman(1),
             lembar("/baru.css", "div { height: 33px }"),
+            std::sync::Arc::new(crate::native::teks::KumpulanFont::baru()),
         )
         .unwrap();
 
@@ -706,6 +742,7 @@ mod tests {
                 "https://a.test",
                 &halaman(1),
                 lembar("/a.css", "p { color: red }"),
+                std::sync::Arc::new(crate::native::teks::KumpulanFont::baru()),
             )
             .unwrap();
 
@@ -727,6 +764,7 @@ mod tests {
                 "https://a.test",
                 &halaman(2),
                 lembar("/a.css", "div { color: #ff0000 }"),
+                std::sync::Arc::new(crate::native::teks::KumpulanFont::baru()),
             )
             .unwrap();
         let _b = p.buka("https://b.test", &halaman(1)).unwrap();

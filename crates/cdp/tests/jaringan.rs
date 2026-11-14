@@ -407,6 +407,7 @@ async fn gaya_jaringan_ikut_sampai_ke_layar() {
                 LembarJaringan {
                     lembar,
                     catatan: hasil.catatan.clone(),
+                    font: std::sync::Arc::new(engine::native::teks::KumpulanFont::baru()),
                 },
             )
             .expect("balasan navigasi");
@@ -537,5 +538,105 @@ async fn impor_berkondisi_media_dicatat_tidak_dijalankan() {
         hasil.lembar[0].teks.trim(),
         "p{height:5px}",
         "isi impor berkondisi tidak boleh disisipkan"
+    );
+}
+
+// --- @font-face -----------------------------------------------------------
+
+/// Byte font Devanagari yang tertanam di crate engine, dipakai sebagai isi
+/// berkas webfont di server lokal tes ini.
+fn byte_font() -> Vec<u8> {
+    let jalur = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../engine/assets/NotoSansDevanagari-Regular.ttf"
+    );
+    std::fs::read(jalur).expect("fixture NotoSansDevanagari-Regular.ttf")
+}
+
+fn font_ok(badan: Vec<u8>) -> Vec<u8> {
+    respons("200 OK", &[("content-type", "font/ttf")], badan.as_slice())
+}
+
+#[tokio::test]
+async fn font_face_diunduh_dan_bisa_dipasang() {
+    let byte = byte_font();
+    let panjang = byte.len();
+    let alamat = server(1, move |jalur| match jalur {
+        "/web.ttf" => font_ok(byte.clone()),
+        _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
+    });
+
+    let dokumen = r#"<html><head><style>
+        @font-face { font-family: "WebDeva"; src: url(web.ttf) format("truetype"); }
+        p { font-family: "WebDeva"; }
+    </style></head><body><p>x</p></body></html>"#;
+    let doc = engine::native::Document::parse_html(dokumen).expect("dokumen");
+    let face = engine::native::css::font_face_dokumen(&doc, &[]);
+    assert_eq!(face.len(), 1, "satu blok @font-face: {face:?}");
+    assert_eq!(face[0].keluarga, "WebDeva", "nama keluarga tanpa kutip");
+    assert_eq!(face[0].sumber, vec!["web.ttf".to_string()]);
+
+    let hasil = gaya::ambil_font(&format!("http://{alamat}/"), &face).await;
+    assert!(
+        hasil.catatan.is_empty(),
+        "tidak ada face yang dilewati: {:?}",
+        hasil.catatan
+    );
+    assert_eq!(hasil.face.len(), 1, "satu face terunduh");
+    assert_eq!(
+        hasil.face[0].1.len(),
+        panjang,
+        "byte yang sampai harus utuh, bukan terpotong"
+    );
+
+    // Yang menentukan face itu benar-benar bisa dipakai adalah `ttf_parser`,
+    // bukan status HTTP. Pemasangan diuji di sini supaya tes ini gagal kalau
+    // unduhannya sukses tapi byte-nya tidak bisa diurai.
+    let mut kumpulan = engine::native::teks::KumpulanFont::baru();
+    assert!(
+        kumpulan.pasang(&hasil.face[0].0, hasil.face[0].1.clone()),
+        "byte yang diunduh harus terpasang sebagai face"
+    );
+    assert_eq!(kumpulan.byte(), panjang, "anggaran byte terhitung");
+}
+
+#[tokio::test]
+async fn font_face_yang_menjawab_html_dilewati_dengan_alasan() {
+    // Server yang menyajikan halaman galat di URL `.woff2` mengirim HTML, bukan
+    // font. Memasangnya berarti `font-family` yang menyebut face itu
+    // menghasilkan teks kosong, dan pesan "font rusak" menutupi masalah
+    // sebenarnya.
+    let alamat = server(1, |_| {
+        respons(
+            "200 OK",
+            &[("content-type", "text/html; charset=utf-8")],
+            b"<html>404</html>",
+        )
+    });
+    let dokumen = r#"<html><head><style>
+        @font-face { font-family: "Salah"; src: url(galat.woff2); }
+    </style></head><body></body></html>"#;
+    let doc = engine::native::Document::parse_html(dokumen).expect("dokumen");
+    let face = engine::native::css::font_face_dokumen(&doc, &[]);
+    let hasil = gaya::ambil_font(&format!("http://{alamat}/"), &face).await;
+    assert!(hasil.face.is_empty(), "HTML tidak boleh jadi face");
+    let catatan = hasil.catatan.join(" | ");
+    assert!(
+        catatan.contains("text/html") && catatan.contains("Salah"),
+        "alasan harus menyebut mime dan nama face: {catatan}"
+    );
+}
+
+#[tokio::test]
+async fn font_face_tanpa_url_tidak_diunduh() {
+    // `local("DejaVu Sans")` bukan aset yang dikirim halaman: memakainya
+    // membuat hasil lukis bergantung pada apa yang kebetulan terpasang di host.
+    let dokumen = r#"<html><head><style>
+        @font-face { font-family: "Lokal"; src: local("DejaVu Sans"); }
+    </style></head><body></body></html>"#;
+    let doc = engine::native::Document::parse_html(dokumen).expect("dokumen");
+    assert!(
+        engine::native::css::font_face_dokumen(&doc, &[]).is_empty(),
+        "blok tanpa url() tidak jadi face"
     );
 }

@@ -560,7 +560,7 @@ impl Dalam {
         let dok = dokumen_awal(url, ambilan, gaya)?;
         let id = self
             .pool
-            .buka_dengan(&dok.url, &dok.html, dok.lembar)
+            .buka_dengan(&dok.url, &dok.html, dok.lembar, dok.font)
             .map_err(pool_galat)?;
         let judul = self.pool.tab(id).and_then(|t| t.dokumen().judul());
         self.tabs.insert(
@@ -691,7 +691,7 @@ impl Dalam {
         let dok = dokumen_awal(&url, ambilan, gaya)?;
         let sebelum = self.sidik(tab)?;
         self.pool
-            .ganti_dokumen_dengan(tab, &dok.url, &dok.html, dok.lembar)
+            .ganti_dokumen_dengan(tab, &dok.url, &dok.html, dok.lembar, dok.font)
             .map_err(pool_galat)?;
         let judul = self.pool.tab(tab).and_then(|t| t.dokumen().judul());
         if let Some(meta) = self.tabs.get_mut(&tab) {
@@ -919,8 +919,19 @@ impl Dalam {
         // Lembar gaya eksternal milik tab ikut dilukis. Tanpa ini, halaman
         // yang gaya-nya datang dari `<link>` akan terlukis tanpa gaya sama
         // sekali, dan itu justru celah yang sedang ditutup.
-        let raster = paint::lukis_dengan_lembar(&t.dokumen(), viewport, klip, format, &t.lembar)
-            .map_err(|err| Galat::baru(-32000, format!("tangkapan layar gagal: {err}")))?;
+        // Face webfont ikut, bukan hanya lembar gaya: `font-family` yang
+        // menamai `@font-face` hanya berpengaruh kalau pelukis memegang byte
+        // yang sama dengan yang dipakai pengukur.
+        let raster = paint::lukis_dengan_font(
+            &t.dokumen(),
+            viewport,
+            klip,
+            format,
+            &t.lembar,
+            &std::collections::HashMap::new(),
+            t.font(),
+        )
+        .map_err(|err| Galat::baru(-32000, format!("tangkapan layar gagal: {err}")))?;
         diabaikan_param.extend(raster.diabaikan.iter().cloned());
         Ok(json!({
             "data": crate::base64::kodekan(&raster.data),
@@ -1075,7 +1086,7 @@ impl Dalam {
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
         let dok = t.dokumen();
         let viewport = Viewport::new(VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1);
-        let laporan = layout::hitung_dengan(&dok, viewport, &t.lembar)
+        let laporan = layout::hitung_dengan_font(&dok, viewport, &t.lembar, t.font())
             .map_err(|err| Galat::baru(-32000, format!("layout untuk hit-test gagal: {err}")))?;
         let Some(kotak) = laporan.kotak_di(x, y) else {
             return Ok(None);
@@ -1511,6 +1522,10 @@ pub struct DokumenAwal {
     pub lembar: Vec<LembarLuar>,
     /// Tautan yang dilewati atau gagal diambil, beserta alasannya.
     pub catatan_gaya: Vec<String>,
+    /// Face webfont `@font-face` dokumen ini, sudah dipasang dan siap dipakai
+    /// pengukur maupun pelukis. Kosong kalau halaman tidak mendeklarasikan
+    /// `@font-face`.
+    pub font: std::sync::Arc<engine::native::teks::KumpulanFont>,
 }
 
 /// Lembar gaya eksternal yang sudah diambil pemanggil async, sebelum kunci
@@ -1522,6 +1537,11 @@ pub struct DokumenAwal {
 #[derive(Debug, Clone, Default)]
 pub struct LembarJaringan {
     pub lembar: Vec<LembarLuar>,
+    /// Face webfont yang byte-nya sudah diunduh bersama stylesheet.
+    ///
+    /// Ikut di sini, bukan diambil saat melukis: pengambilan font butuh
+    /// jaringan, dan melukis berjalan sambil memegang kunci state.
+    pub font: std::sync::Arc<engine::native::teks::KumpulanFont>,
     pub catatan: Vec<String>,
 }
 
@@ -1543,6 +1563,7 @@ pub fn dokumen_awal(
             jaringan: None,
             lembar: Vec::new(),
             catatan_gaya: Vec::new(),
+            font: std::sync::Arc::new(engine::native::teks::KumpulanFont::baru()),
         });
     }
     if let Some(sisa) = url.strip_prefix("data:") {
@@ -1561,6 +1582,7 @@ pub fn dokumen_awal(
             jaringan: None,
             lembar: Vec::new(),
             catatan_gaya: Vec::new(),
+            font: std::sync::Arc::new(engine::native::teks::KumpulanFont::baru()),
         });
     }
     if super::jaringan::butuh_jaringan(url) {
@@ -1573,6 +1595,7 @@ pub fn dokumen_awal(
                     jaringan: Some(sumber),
                     lembar: gaya.lembar,
                     catatan_gaya: gaya.catatan,
+                    font: gaya.font,
                 })
             }
             Some(Err(galat)) => Err(galat),

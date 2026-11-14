@@ -55,6 +55,24 @@ pub const MAKS_LEMBAR: usize = 16;
 /// Total byte CSS terbanyak untuk satu dokumen, dijumlahkan lintas lembar.
 pub const BATAS_TOTAL_CSS: usize = 2 * 1024 * 1024;
 
+/// Batas byte satu berkas font.
+///
+/// Delapan mebibyte memuat Noto Sans CJK penuh (~16 MB tidak, tapi subset yang
+/// dipakai halaman web biasanya di bawah 2 MB). Berkas yang lebih besar
+/// **dilewati dengan alasan**: font yang dipotong di tengah `glyf` bukan font,
+/// dan `ttf_parser` akan menolaknya tanpa menjelaskan kenapa.
+pub const BATAS_BYTE_FONT: usize = 8 * 1024 * 1024;
+
+/// Batas waktu satu berkas font. Lebih longgar dari CSS karena font memang
+/// besar, tapi tetap terbatas: halaman tanpa webfont masih bisa dibaca.
+pub const BATAS_WAKTU_FONT: Duration = Duration::from_secs(8);
+
+/// Jumlah `@font-face` terbanyak yang diunduh untuk satu dokumen.
+pub const MAKS_FONT: usize = 8;
+
+/// Total byte font terbanyak untuk satu dokumen.
+pub const BATAS_TOTAL_FONT: usize = 24 * 1024 * 1024;
+
 /// Batas yang dipakai satu pengambilan. Bisa diperkecil di tes.
 #[derive(Debug, Clone, Copy)]
 pub struct Batas {
@@ -133,6 +151,19 @@ pub struct Gaya {
     pub content_type: String,
 }
 
+/// Satu berkas font yang berhasil diambil, apa adanya sebagai byte.
+///
+/// Tidak didekode di sini: yang memutuskan byte itu font yang bisa dipakai
+/// adalah `ttf_parser` di lapisan teks, dan mendekode dua kali hanya menambah
+/// tempat salahnya.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Font {
+    pub url: String,
+    pub byte: Vec<u8>,
+    pub status: u16,
+    pub content_type: String,
+}
+
 /// Apakah URL ini butuh jaringan. Pemanggil async memakai ini untuk
 /// memutuskan mengambil dokumen **sebelum** kunci state dipegang.
 #[must_use]
@@ -182,6 +213,55 @@ pub fn muat_blokir(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
         status: jawaban.status,
         byte,
         charset,
+        content_type: jawaban.content_type,
+    })
+}
+
+/// Mengambil satu berkas font di `spawn_blocking`.
+pub async fn muat_font(url: &str, batas: Batas) -> Result<Font, Galat> {
+    let url = url.to_owned();
+    let untuk_galat = url.clone();
+    tokio::task::spawn_blocking(move || muat_font_blokir(&url, batas))
+        .await
+        .map_err(|err| {
+            Galat::baru(
+                -32000,
+                format!("pengambilan font '{untuk_galat}' gagal di thread: {err}"),
+            )
+        })?
+}
+
+/// Versi blocking [`muat_font`].
+///
+/// `content-type` yang diterima: kosong, `font/*`, `application/font-*`,
+/// `application/x-font-*`, `application/vnd.ms-fontobject`, dan
+/// `application/octet-stream`. Yang **ditolak** adalah `text/html`: server yang
+/// menyajikan halaman galat di URL `.woff2` akan menghasilkan byte yang bukan
+/// font, dan memasangnya sebagai face berarti melaporkan "font rusak" untuk
+/// masalah yang sebenarnya 404.
+pub fn muat_font_blokir(url: &str, batas: Batas) -> Result<Font, Galat> {
+    let jawaban = ambil_badan(url, batas)?;
+    let mime = mime_dari(&jawaban.content_type);
+    let diterima = mime.is_empty()
+        || mime.starts_with("font/")
+        || mime.starts_with("application/font")
+        || mime.starts_with("application/x-font")
+        || mime == "application/vnd.ms-fontobject"
+        || mime == "application/octet-stream";
+    if !diterima {
+        return Err(Galat::baru(
+            -32000,
+            format!(
+                "'{}' menjawab content-type '{mime}', bukan berkas font; webfont \
+                 dilewati alih-alih dipasang sebagai face",
+                jawaban.url
+            ),
+        ));
+    }
+    Ok(Font {
+        url: jawaban.url,
+        byte: jawaban.badan,
+        status: jawaban.status,
         content_type: jawaban.content_type,
     })
 }

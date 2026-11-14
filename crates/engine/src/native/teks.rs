@@ -115,6 +115,117 @@ pub fn rantai() -> Vec<(&'static str, u16)> {
         .collect()
 }
 
+/// Batas total byte face runtime yang boleh dipasang satu proses.
+///
+/// Byte webfont tidak pernah dibebaskan: `ttf_parser::Face` meminjam slice-nya,
+/// dan mesin ini tidak memakai struktur self-referential hanya untuk itu. Batas
+/// ini yang membuat "tidak dibebaskan" berhenti jadi kebocoran: setelah 24 MB,
+/// face baru ditolak dan penolakannya dilaporkan, bukan ditelan.
+pub const BATAS_BYTE_FONT: usize = 24 * 1024 * 1024;
+
+/// Face yang dipasang saat runtime dari `@font-face`.
+///
+/// Dipisah dari [`TERTANAM`] karena isinya datang dari jaringan: nama keluarga
+/// ditentukan halaman, byte-nya tidak dikenal saat build, dan jumlahnya harus
+/// dibatasi. Yang **tidak** berubah: pencarian tetap per code point, jadi
+/// keluarga yang tidak memetakan sebuah aksara tidak menghalangi aksara itu
+/// jatuh ke rantai tertanam.
+#[derive(Default)]
+pub struct KumpulanFont {
+    face: Vec<&'static Tanam>,
+    byte: usize,
+}
+
+impl std::fmt::Debug for KumpulanFont {
+    /// Ditulis tangan karena `ttf_parser::Face` tidak `Debug`: yang berguna
+    /// saat log justru nama face dan total byte, bukan isi tabel font.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KumpulanFont")
+            .field(
+                "face",
+                &self.face.iter().map(|t| t.nama).collect::<Vec<_>>(),
+            )
+            .field("byte", &self.byte)
+            .finish()
+    }
+}
+
+impl KumpulanFont {
+    /// Kumpulan kosong, untuk pemanggil yang tidak punya webfont.
+    #[must_use]
+    pub fn baru() -> Self {
+        Self::default()
+    }
+
+    /// Kumpulan kosong yang berumur `'static`, dipakai [`bentuk`] dan kawan-kawan.
+    #[must_use]
+    pub fn kosong() -> &'static Self {
+        static KOSONG: OnceLock<KumpulanFont> = OnceLock::new();
+        KOSONG.get_or_init(KumpulanFont::default)
+    }
+
+    /// Apakah ada face runtime yang terpasang.
+    #[must_use]
+    pub fn kosong_mutlak(&self) -> bool {
+        self.face.is_empty()
+    }
+
+    /// Jumlah byte face runtime yang sudah dipasang.
+    #[must_use]
+    pub fn byte(&self) -> usize {
+        self.byte
+    }
+
+    /// Memasang `byte` sebagai face untuk `keluarga`.
+    ///
+    /// Mengembalikan `false` kalau byte-nya bukan TrueType/OpenType yang bisa
+    /// diurai, atau kalau batas [`BATAS_BYTE_FONT`] sudah lewat. Face yang gagal
+    /// diurai tidak dipasang sama sekali: face setengah jadi akan membuat
+    /// `font-family` yang menyebutnya menghasilkan teks kosong.
+    pub fn pasang(&mut self, keluarga: &str, byte: Vec<u8>) -> bool {
+        let nama = keluarga.trim();
+        if nama.is_empty() || byte.is_empty() || self.byte + byte.len() > BATAS_BYTE_FONT {
+            return false;
+        }
+        // Byte dan nama dilepas ke `'static` karena `ttf_parser::Face` meminjam
+        // slice-nya. Batas di atas yang menjaga ini tetap terbatas.
+        let bocor: &'static [u8] = Box::leak(byte.into_boxed_slice());
+        let Ok(face) = ttf_parser::Face::parse(bocor, 0) else {
+            return false;
+        };
+        let nama: &'static str = Box::leak(nama.to_lowercase().into_boxed_str());
+        self.byte += bocor.len();
+        self.face.push(Box::leak(Box::new(Tanam {
+            nama,
+            byte: bocor,
+            face,
+        })));
+        true
+    }
+
+    /// Face runtime pertama untuk `keluarga` yang memetakan `c`.
+    ///
+    /// Nama dibandingkan tanpa peduli huruf besar-kecil, sama seperti CSS.
+    /// Face tertanam ikut dicari lewat nama, supaya `font-family: "Noto Sans
+    /// Devanagari"` menunjuk face tertanam itu dan bukan jatuh ke face utama.
+    fn cari(&self, keluarga: &str, c: char) -> Option<&'static Tanam> {
+        let nama = keluarga.trim().trim_matches('"').trim_matches('\'');
+        if nama.is_empty() {
+            return None;
+        }
+        if let Some(t) = self
+            .face
+            .iter()
+            .find(|t| t.nama.eq_ignore_ascii_case(nama) && t.face.glyph_index(c).is_some())
+        {
+            return Some(*t);
+        }
+        semua()
+            .iter()
+            .find(|t| t.nama.eq_ignore_ascii_case(nama) && t.face.glyph_index(c).is_some())
+    }
+}
+
 /// Face pertama yang memetakan `c`, atau face utama kalau tidak ada.
 fn pilih(c: char) -> &'static Tanam {
     semua()
@@ -164,6 +275,23 @@ pub struct Glyph {
 /// mengukur dan melukis.
 #[must_use]
 pub fn bentuk(teks: &str, ukuran_font: f32) -> Vec<Glyph> {
+    bentuk_dengan(teks, ukuran_font, &[], KumpulanFont::kosong())
+}
+
+/// Sama dengan [`bentuk`], tapi `font-family` yang diminta ikut dipertimbangkan.
+///
+/// `keluarga` adalah daftar nama dari `font-family`, urut prioritas. Nama yang
+/// punya face terpasang dari `@font-face` dipakai lebih dulu; nama yang tidak
+/// punya face (termasuk keluarga generik seperti `serif`) dilewati, dan teks
+/// yang tidak tercakup jatuh ke rantai face tertanam. Tidak ada tebakan
+/// "mirip": keluarga yang tidak terpasang tidak dipetakan ke face lain.
+#[must_use]
+pub fn bentuk_dengan(
+    teks: &str,
+    ukuran_font: f32,
+    keluarga: &[String],
+    kumpulan: &KumpulanFont,
+) -> Vec<Glyph> {
     let daftar = semua();
     if daftar.is_empty() || ukuran_font <= 0.0 || teks.is_empty() {
         return Vec::new();
@@ -172,7 +300,7 @@ pub fn bentuk(teks: &str, ukuran_font: f32) -> Vec<Glyph> {
     let mut mulai = 0usize;
     let mut face_kini: Option<&'static Tanam> = None;
     for (i, c) in teks.char_indices() {
-        let face = pilih(c);
+        let face = pilih_dengan(c, keluarga, kumpulan);
         match face_kini {
             None => face_kini = Some(face),
             Some(kini) if !std::ptr::eq(kini, face) => {
@@ -238,6 +366,16 @@ fn bentuk_satu(
     }
 }
 
+/// Face untuk satu code point, dengan `font-family` dipertimbangkan lebih dulu.
+fn pilih_dengan(c: char, keluarga: &[String], kumpulan: &KumpulanFont) -> &'static Tanam {
+    for nama in keluarga {
+        if let Some(tanam) = kumpulan.cari(nama, c) {
+            return tanam;
+        }
+    }
+    pilih(c)
+}
+
 /// Skala dari unit font face utama ke piksel untuk satu `font-size`.
 ///
 /// Dipakai lapisan lukis untuk tinggi baris, yang selalu dihitung dari face
@@ -283,8 +421,16 @@ pub fn tinggi_baris_normal(ukuran_font: f32) -> f32 {
 }
 
 /// Lebar `teks` apa adanya, tanpa meruntuhkan spasinya.
-fn lebar_mentah(teks: &str, ukuran_font: f32) -> f32 {
-    bentuk(teks, ukuran_font).iter().map(|g| g.x_advance).sum()
+fn lebar_mentah_dengan(
+    teks: &str,
+    ukuran_font: f32,
+    keluarga: &[String],
+    kumpulan: &KumpulanFont,
+) -> f32 {
+    bentuk_dengan(teks, ukuran_font, keluarga, kumpulan)
+        .iter()
+        .map(|g| g.x_advance)
+        .sum()
 }
 
 /// Lebar satu baris teks dalam piksel, tanpa membungkus.
@@ -294,7 +440,22 @@ fn lebar_mentah(teks: &str, ukuran_font: f32) -> f32 {
 /// penjumlahan lebar per karakter: pada aksara bersambung keduanya berbeda.
 #[must_use]
 pub fn lebar(teks: &str, ukuran_font: f32) -> f32 {
-    lebar_mentah(&rapikan(teks), ukuran_font)
+    lebar_dengan(teks, ukuran_font, &[], KumpulanFont::kosong())
+}
+
+/// Sama dengan [`lebar`], tapi `font-family` ikut menentukan face.
+///
+/// Dipakai lapisan tata letak: kotak teks yang memakai webfont harus diukur
+/// dengan face yang sama dengan yang dilukis, kalau tidak barisnya meluap atau
+/// menyisakan celah tanpa satu pun galat.
+#[must_use]
+pub fn lebar_dengan(
+    teks: &str,
+    ukuran_font: f32,
+    keluarga: &[String],
+    kumpulan: &KumpulanFont,
+) -> f32 {
+    lebar_mentah_dengan(&rapikan(teks), ukuran_font, keluarga, kumpulan)
 }
 
 /// Rentetan spasi, tab, dan baris baru jadi satu spasi, lalu dipangkas.
@@ -333,6 +494,18 @@ pub fn rapikan(teks: &str) -> String {
 /// `lebar_maks <= 0.0` berarti tidak ada batas: seluruh teks jadi satu baris.
 #[must_use]
 pub fn bungkus(teks: &str, ukuran_font: f32, lebar_maks: f32) -> Vec<String> {
+    bungkus_dengan(teks, ukuran_font, lebar_maks, &[], KumpulanFont::kosong())
+}
+
+/// Sama dengan [`bungkus`], tapi pembungkusan memakai face `font-family`.
+#[must_use]
+pub fn bungkus_dengan(
+    teks: &str,
+    ukuran_font: f32,
+    lebar_maks: f32,
+    keluarga: &[String],
+    kumpulan: &KumpulanFont,
+) -> Vec<String> {
     let rapi = rapikan(teks);
     if rapi.is_empty() {
         return Vec::new();
@@ -340,14 +513,14 @@ pub fn bungkus(teks: &str, ukuran_font: f32, lebar_maks: f32) -> Vec<String> {
     if metrik().is_none() || lebar_maks <= 0.0 {
         return vec![rapi];
     }
-    let lebar_spasi = lebar_mentah(" ", ukuran_font);
+    let lebar_spasi = lebar_mentah_dengan(" ", ukuran_font, keluarga, kumpulan);
 
     let mut baris: Vec<String> = Vec::new();
     let mut sekarang = String::new();
     let mut lebar_sekarang = 0.0_f32;
 
     for kata in rapi.split(' ') {
-        let lebar_kata = lebar_mentah(kata, ukuran_font);
+        let lebar_kata = lebar_mentah_dengan(kata, ukuran_font, keluarga, kumpulan);
         if sekarang.is_empty() {
             sekarang.push_str(kata);
             lebar_sekarang = lebar_kata;
@@ -390,8 +563,28 @@ pub fn ukuran(
     tinggi_baris: f32,
     lebar_maks: Option<f32>,
 ) -> UkuranTeks {
+    ukuran_dengan(
+        teks,
+        ukuran_font,
+        tinggi_baris,
+        lebar_maks,
+        &[],
+        KumpulanFont::kosong(),
+    )
+}
+
+/// Sama dengan [`ukuran`], tapi pengukuran memakai face `font-family`.
+#[must_use]
+pub fn ukuran_dengan(
+    teks: &str,
+    ukuran_font: f32,
+    tinggi_baris: f32,
+    lebar_maks: Option<f32>,
+    keluarga: &[String],
+    kumpulan: &KumpulanFont,
+) -> UkuranTeks {
     let baris = match lebar_maks {
-        Some(maks) => bungkus(teks, ukuran_font, maks),
+        Some(maks) => bungkus_dengan(teks, ukuran_font, maks, keluarga, kumpulan),
         None => {
             let rapi = rapikan(teks);
             if rapi.is_empty() {
@@ -403,7 +596,7 @@ pub fn ukuran(
     };
     let lebar = baris
         .iter()
-        .map(|b| lebar(b, ukuran_font))
+        .map(|b| lebar_dengan(b, ukuran_font, keluarga, kumpulan))
         .fold(0.0_f32, f32::max);
     let jumlah = baris.len();
     UkuranTeks {
@@ -633,5 +826,82 @@ mod tests {
                 "lebar `{teks}` harus sama dengan jumlah maju glyph"
             );
         }
+    }
+    /// Byte face Devanagari yang ditanam, dipakai sebagai fixture webfont.
+    ///
+    /// Fixture-nya sengaja berkas yang sudah ada di repo: tes ini menguji
+    /// JALUR pemasangan face runtime (byte datang dari luar, dipasang dengan
+    /// nama keluarga yang ditentukan halaman), bukan isi berkas fontnya.
+    fn byte_webfont() -> Vec<u8> {
+        TERTANAM
+            .iter()
+            .find(|(nama, _)| nama.contains("Devanagari"))
+            .map(|(_, byte)| byte.to_vec())
+            .expect("fixture Noto Sans Devanagari tertanam")
+    }
+
+    #[test]
+    fn face_unduhan_dipakai_saat_keluarga_disebut() {
+        // `font-family: "WebDeva"` harus menang atas rantai tertanam, walau
+        // aksaranya bisa dilayani face kedua yang tertanam. Tanpa ini,
+        // `@font-face` cuma dekorasi: halaman mengunduh fontnya, menyebutnya
+        // di CSS, dan yang tergambar tetap face bawaan mesin.
+        let mut kumpulan = KumpulanFont::baru();
+        assert!(kumpulan.pasang("WebDeva", byte_webfont()), "byte dipasang");
+        assert!(kumpulan.byte() > 0, "byte terhitung di anggaran");
+
+        let tertanam = semua()
+            .iter()
+            .find(|t| t.nama.contains("Devanagari"))
+            .expect("face Devanagari tertanam");
+        let glyph = bentuk_dengan("\u{0915}", 16.0, &["WebDeva".to_string()], &kumpulan);
+        assert_eq!(glyph.len(), 1, "satu konsonan: {glyph:?}");
+        assert!(
+            !std::ptr::eq(glyph[0].face, &tertanam.face),
+            "glyph harus dari face unduhan, bukan face tertanam"
+        );
+        // Berkasnya sama, jadi majunya harus sama persis. Angka ini yang
+        // membuktikan face yang menang memang font yang sama, bukan face lain
+        // yang kebetulan punya glyph untuk aksara itu.
+        assert!(
+            (glyph[0].x_advance - 12.192).abs() < 0.01,
+            "maju `\u{0915}` dari face unduhan, dapat {}",
+            glyph[0].x_advance
+        );
+    }
+
+    #[test]
+    fn face_unduhan_diabaikan_saat_keluarga_lain() {
+        // Keluarga yang tidak dipasang tidak boleh meminjam face unduhan:
+        // `font-family: "WebLain"` yang tidak punya `@font-face` berarti
+        // mesin jatuh ke rantai tertanam, sama seperti browser yang tidak
+        // menemukan keluarga itu.
+        let mut kumpulan = KumpulanFont::baru();
+        assert!(kumpulan.pasang("WebDeva", byte_webfont()));
+
+        let tertanam = semua()
+            .iter()
+            .find(|t| t.nama.contains("Devanagari"))
+            .expect("face Devanagari tertanam");
+        let glyph = bentuk_dengan("\u{0915}", 16.0, &["WebLain".to_string()], &kumpulan);
+        assert_eq!(glyph.len(), 1, "satu konsonan: {glyph:?}");
+        assert!(
+            std::ptr::eq(glyph[0].face, &tertanam.face),
+            "keluarga yang tidak dipasang harus jatuh ke face tertanam"
+        );
+    }
+
+    #[test]
+    fn pasang_menolak_byte_yang_bukan_font() {
+        // Server yang menyajikan halaman galat di URL `.woff2` mengirim byte
+        // yang bukan font. Menerimanya berarti `font-family` yang menyebut
+        // face itu menghasilkan teks kosong tanpa satu pun galat.
+        let mut kumpulan = KumpulanFont::baru();
+        assert!(!kumpulan.pasang("Rusak", b"<html>404</html>".to_vec()));
+        assert!(
+            kumpulan.kosong_mutlak(),
+            "face rusak tidak boleh terpasang separuh"
+        );
+        assert_eq!(kumpulan.byte(), 0, "byte yang ditolak tidak masuk anggaran");
     }
 }

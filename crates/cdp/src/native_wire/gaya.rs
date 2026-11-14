@@ -20,11 +20,14 @@
 //!   salah tanpa satu pun galat
 
 use engine::native::Document;
-use engine::native::css::{LembarLuar, tautan_eksternal};
+use engine::native::css::{FontFace, LembarLuar, tautan_eksternal};
 use futures_util::future::join_all;
 use url::Url;
 
-use super::jaringan::{self, BATAS_BYTE_CSS, BATAS_TOTAL_CSS, BATAS_WAKTU_CSS, Batas, MAKS_LEMBAR};
+use super::jaringan::{
+    self, BATAS_BYTE_CSS, BATAS_BYTE_FONT, BATAS_TOTAL_CSS, BATAS_TOTAL_FONT, BATAS_WAKTU_CSS,
+    BATAS_WAKTU_FONT, Batas, MAKS_FONT, MAKS_LEMBAR,
+};
 
 /// Hasil pengambilan lembar gaya untuk satu dokumen.
 #[derive(Debug, Default)]
@@ -136,7 +139,92 @@ pub async fn ambil_dari(url_dokumen: &str, dokumen: &Document) -> Hasil {
     }
 }
 
-/// URL dasar untuk menyelesaikan `href` relatif.
+/// Hasil pengunduhan webfont untuk satu dokumen.
+#[derive(Debug, Default)]
+pub struct HasilFont {
+    /// Pasangan `(nama keluarga, byte berkas)`, urut kemunculan `@font-face`.
+    pub face: Vec<(String, Vec<u8>)>,
+    /// Face yang dilewati atau gagal diunduh, beserta alasannya.
+    pub catatan: Vec<String>,
+}
+
+/// Mengunduh byte setiap `@font-face` yang dideklarasikan `faces`.
+///
+/// Hanya `url()` **pertama** yang dipakai per face: daftar `src` adalah
+/// preferensi format, dan byte tetap diperiksa `ttf_parser` saat dipasang.
+/// Kalau `url()` pertama gagal, face itu dilewati, bukan dicoba ke `url()`
+/// berikutnya: fallback format adalah pilihan penulis halaman, bukan izin
+/// menebak berkas mana pun yang bisa diambil.
+///
+/// Tidak pernah mengembalikan galat. Satu webfont yang gagal tidak boleh
+/// menggagalkan navigasi; yang gagal masuk `catatan`.
+pub async fn ambil_font(dasar: &str, faces: &[FontFace]) -> HasilFont {
+    let mut hasil = HasilFont::default();
+    let mut sasaran = Vec::new();
+    for face in faces {
+        if sasaran.len() >= MAKS_FONT {
+            hasil.catatan.push(format!(
+                "`@font-face` `{}` tidak diunduh: batas {MAKS_FONT} face per dokumen",
+                face.keluarga
+            ));
+            continue;
+        }
+        let Some(sumber) = face.sumber.first() else {
+            continue;
+        };
+        match selesaikan(dasar, sumber) {
+            Some(url) => sasaran.push((face, url)),
+            None => hasil.catatan.push(format!(
+                "`@font-face` `{}` dilewati: `{sumber}` bukan URL http/https setelah \
+                 diselesaikan terhadap `{dasar}`",
+                face.keluarga
+            )),
+        }
+    }
+    if sasaran.is_empty() {
+        return hasil;
+    }
+
+    let batas = Batas {
+        byte: BATAS_BYTE_FONT,
+        waktu: BATAS_WAKTU_FONT,
+        ..Batas::default()
+    };
+    // Diambil bersamaan dengan alasan yang sama seperti stylesheet: delapan
+    // font berurutan pada batas waktu masing-masing bisa menahan navigasi
+    // lebih dari satu menit.
+    let jawaban = join_all(
+        sasaran
+            .iter()
+            .map(|(_, url)| jaringan::muat_font(url, batas)),
+    )
+    .await;
+
+    let mut total = 0usize;
+    for ((face, url), jawaban) in sasaran.iter().zip(jawaban) {
+        match jawaban {
+            Ok(font) => {
+                if total + font.byte.len() > BATAS_TOTAL_FONT {
+                    hasil.catatan.push(format!(
+                        "`@font-face` `{}` dilewati: total font melewati batas \
+                         {BATAS_TOTAL_FONT} byte",
+                        face.keluarga
+                    ));
+                    continue;
+                }
+                total += font.byte.len();
+                hasil.face.push((face.keluarga.clone(), font.byte));
+            }
+            Err(galat) => hasil.catatan.push(format!(
+                "`@font-face` `{}` gagal diambil dari `{url}`: {}",
+                face.keluarga, galat.pesan
+            )),
+        }
+    }
+    hasil
+}
+
+/// URL dasar untuk menyelesaikan `href` relatif./// URL dasar untuk menyelesaikan `href` relatif.
 ///
 /// `<base href>` menang atas URL dokumen, sama seperti browser. Kalau
 /// `<base href>` sendiri relatif, dia diselesaikan terhadap URL dokumen dulu.

@@ -12,9 +12,10 @@
 //! menjalankan skrip lewat `rquickjs` dengan pagu memori.
 //!
 //! [`teks::UkuranTeks`] mengukur lebar teks dari rantai face TrueType yang
-//! ditanam di dalam biner (`crates/engine/assets/`), memilih face per code
-//! point dan membentuk glyph dengan `rustybuzz`, dan node teks menghasilkan
-//! kotak layout yang dibungkus pada lebar induknya.
+//! ditanam di dalam biner (`crates/engine/assets/`) ditambah face `@font-face`
+//! yang byte-nya diserahkan pemanggil, memilih face per code point dan
+//! membentuk glyph dengan `rustybuzz`, dan node teks menghasilkan kotak layout
+//! yang dibungkus pada lebar induknya.
 //!
 //! Yang **belum** ada disebut namanya di [`CELAH`], bukan disembunyikan.
 //! Memanggil ini "mesin browser yang selesai" akan jadi klaim palsu.
@@ -36,7 +37,7 @@ pub mod selectors;
 pub mod tab_pool;
 pub mod teks;
 
-pub use css::{Kaskade, LembarLuar, Tautan};
+pub use css::{FontFace, Kaskade, LembarLuar, Tautan};
 pub use dom::{Document, Node, NodeId, NodeKind};
 pub use js::{Isolat, NilaiJs, PaguIsolat};
 pub use layout::{Kotak, LaporanLayout, Viewport};
@@ -53,20 +54,25 @@ use std::fmt;
 /// Daftar ini adalah kontrak: menambah kemampuan berarti menghapus barisnya
 /// di sini dan menambah tesnya, bukan sekadar menambah kode.
 pub const CELAH: &[&str] = &[
-    "at-rule selain `@import` belum dijalankan: `@media` dicatat lalu isinya \
-     dilewati, jadi halaman yang menaruh aturan tata letaknya di dalam \
-     `@media` tampil tanpa aturan itu, dan `@font-face` tidak diunduh sehingga \
-     webfont jatuh ke face yang ditanam. `@import` sendiri sudah diselesaikan \
-     lapisan pengambil (`cdp::native_wire::gaya`) sampai kedalaman 3",
+    "at-rule selain `@import` dan `@font-face` belum dijalankan: `@media` \
+     dicatat lalu isinya dilewati, jadi halaman yang menaruh aturan tata \
+     letaknya di dalam `@media` tampil tanpa aturan itu. `@import` \
+     diselesaikan lapisan pengambil (`cdp::native_wire::gaya`) sampai \
+     kedalaman 3, dan `@font-face` diurai lalu byte-nya diunduh lapisan yang \
+     sama",
     "teks diukur dan dibentuk dari rantai dua face yang ditanam di \
      `crates/engine/assets/` (`DejaVuSans.ttf` untuk Latin, Yunani, Kiril, \
      Arab, dan Ibrani; `NotoSansDevanagari-Regular.ttf` untuk Devanagari), \
      dengan pemilihan face per code point dan shaping HarfBuzz lewat \
      `rustybuzz`, jadi teks Arab bersambung dan matra Indic tergambar di \
-     posisi yang benar. Yang belum: `@font-face` tidak diunduh sehingga \
-     `font-family` diabaikan, satu face per aksara sehingga `font-weight` dan \
-     `font-style` tidak memilih berkas lain, dan aksara di luar kedua face \
-     (CJK, Thai, emoji berwarna) tetap diukur selebar `.notdef`",
+     posisi yang benar. `@font-face` diunduh dan dipakai: `font-family` yang \
+     menamai face unduhan menang atas rantai tertanam, byte-nya dibatasi \
+     8 MiB per berkas dan 24 MiB per dokumen. Yang belum: `font-weight` dan \
+     `font-style` tidak memilih di antara beberapa face sekeluarga (yang \
+     dipakai face pertama yang memetakan code point-nya), aksara di luar face \
+     tertanam maupun unduhan (CJK, Thai, emoji berwarna) tetap diukur selebar \
+     `.notdef`, dan byte webfont tidak ikut tab dingin sehingga tab yang \
+     dihidupkan lagi memakai face tertanam sampai navigasi berikutnya",
     "peristiwa pointer (`mousedown`, `mouseup`, `click`, `mousemove`) dan \
      pendengar halaman untuk `click`/`input`/`change`/`focus`/`blur`/`keydown` \
      sudah ada, tapi peristiwa **papan ketik dan sentuh** belum: \

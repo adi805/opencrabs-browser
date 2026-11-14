@@ -528,9 +528,12 @@ async fn ambil_dokumen(url: &str) -> JaringanDokumen {
     let gaya = match &ambilan {
         Ok(a) => {
             let hasil = gaya::ambil(&a.url, &a.html).await;
+            let mut catatan = hasil.catatan;
+            let font = unduh_font(&a.url, &a.html, &hasil.lembar, &mut catatan).await;
             LembarJaringan {
                 lembar: hasil.lembar,
-                catatan: hasil.catatan,
+                catatan,
+                font,
             }
         }
         Err(_) => LembarJaringan::default(),
@@ -538,7 +541,47 @@ async fn ambil_dokumen(url: &str) -> JaringanDokumen {
     JaringanDokumen { ambilan, gaya }
 }
 
-/// Sama dengan [`ambil_untuk_url`], tapi membaca URL dari frame JSON-RPC.
+/// Mengunduh byte setiap `@font-face` dokumen lalu memasangnya.
+///
+/// Face yang byte-nya tidak bisa diurai `ttf_parser` tetap dicatat: blok
+/// `@font-face` yang menunjuk berkas rusak adalah masalah halaman, dan
+/// melaporkannya lebih berguna daripada diam-diam memakai face tertanam.
+async fn unduh_font(
+    dasar: &str,
+    html: &str,
+    lembar: &[engine::native::css::LembarLuar],
+    catatan: &mut Vec<String>,
+) -> std::sync::Arc<engine::native::teks::KumpulanFont> {
+    // Dokumen diurai ulang di sini, bukan diserahkan pemanggil: `@font-face`
+    // boleh datang dari `<style>` sebaris, dan pohon yang dipakai kaskade belum
+    // ada saat pengunduhan ini berjalan. Penguraian ulang HTML halaman adalah
+    // satu-satunya cara melihat kedua sumber tanpa menyimpan pohon setengah
+    // jadi. Kalau HTML-nya tidak bisa diurai, tidak ada face yang bisa
+    // dipanggil, jadi kumpulan kosong.
+    let dokumen = match engine::native::Document::parse_html(html) {
+        Ok(d) => d,
+        Err(_) => return std::sync::Arc::new(engine::native::teks::KumpulanFont::baru()),
+    };
+    let face = engine::native::css::font_face_dokumen(&dokumen, lembar);
+    if face.is_empty() {
+        return std::sync::Arc::new(engine::native::teks::KumpulanFont::baru());
+    }
+    let hasil = gaya::ambil_font(dasar, &face).await;
+    catatan.extend(hasil.catatan);
+    let mut kumpulan = engine::native::teks::KumpulanFont::baru();
+    for (keluarga, byte) in hasil.face {
+        let panjang = byte.len();
+        if !kumpulan.pasang(&keluarga, byte) {
+            catatan.push(format!(
+                "`@font-face` `{keluarga}` dilewati: {panjang} byte yang diunduh bukan font \
+                 yang bisa diurai, atau anggaran font dokumen sudah habis"
+            ));
+        }
+    }
+    std::sync::Arc::new(kumpulan)
+}
+
+/// Sama dengan [`ambil_untuk_url`], tapi membaca URL dari frame JSON-RPC./// Sama dengan [`ambil_untuk_url`], tapi membaca URL dari frame JSON-RPC.
 ///
 /// Frame yang bukan navigasi jaringan mengembalikan `None`, termasuk frame
 /// yang bukan JSON: frame rusak dijawab oleh penerjemah, bukan di sini.

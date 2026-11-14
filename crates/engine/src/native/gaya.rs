@@ -37,6 +37,15 @@ pub struct GayaTerhitung {
     pub terlihat: bool,
     /// `text-align`, waris.
     pub perataan: Option<String>,
+    /// `font-family` sebagai daftar nama, waris, urut prioritas.
+    ///
+    /// Disimpan sudah dipecah dan tanpa tanda kutip: lapisan lukis mencari face
+    /// per nama, dan mengurai string yang sama berulang kali di dalam loop
+    /// glyph hanya membakar waktu tanpa mengubah hasil. Nama generik
+    /// (`serif`, `monospace`) tetap disimpan apa adanya supaya daftar yang
+    /// diminta bisa dilaporkan utuh; yang tidak punya face dilewati saat
+    /// pencarian.
+    pub keluarga_font: Vec<String>,
     /// Menandai `line-height` datang dari deklarasi atau warisan. Tanpa ini,
     /// elemen yang menaikkan `font-size` tetap memakai `line-height` induk,
     /// padahal `normal` di CSS ikut ukuran font elemen itu sendiri.
@@ -53,6 +62,7 @@ impl Default for GayaTerhitung {
             tinggi_baris: ukuran_font * 1.2,
             terlihat: true,
             perataan: None,
+            keluarga_font: Vec::new(),
             tinggi_baris_diatur: false,
         }
     }
@@ -218,6 +228,12 @@ fn terapkan(deklarasi: &[(String, String)], warisan: &GayaTerhitung, akar: f32) 
                 gaya.terlihat = !nilai.trim().eq_ignore_ascii_case("hidden");
             }
             "text-align" => gaya.perataan = Some(nilai.clone()),
+            "font-family" => {
+                let daftar = keluarga_font(nilai);
+                if !daftar.is_empty() {
+                    gaya.keluarga_font = daftar;
+                }
+            }
             _ => {}
         }
     }
@@ -226,6 +242,28 @@ fn terapkan(deklarasi: &[(String, String)], warisan: &GayaTerhitung, akar: f32) 
         gaya.tinggi_baris = gaya.ukuran_font * 1.2;
     }
     gaya
+}
+
+/// `font-family` dipecah per koma, tanda kutip pembungkus dibuang.
+///
+/// Nama yang mengandung spasi boleh tanpa kutip di CSS (`font-family: Times New
+/// Roman`), dan memotongnya per kata akan menghasilkan tiga keluarga yang tidak
+/// ada. Karena itu pemisahnya koma saja, bukan spasi.
+#[must_use]
+pub fn keluarga_font(nilai: &str) -> Vec<String> {
+    nilai
+        .split(',')
+        .map(|bagian| {
+            let t = bagian.trim();
+            let t = t
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(t);
+            t.trim().to_string()
+        })
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// `font-weight`: angka biasa, atau kata kunci yang punya padanan pasti.

@@ -126,7 +126,13 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // memakai rantai dua face dengan pemilihan per code point dan shaping
     // `rustybuzz` (diuji di modul itu: aksara Devanagari berganti face dan
     // matra `i` mendahului konsonannya); yang menggantikannya adalah batas
-    // yang lebih sempit: tanpa `@font-face`, tanpa face per bobot.
+    // yang lebih sempit: tanpa face per bobot.
+    // "`@font-face` tidak diunduh" dicabut setelah `cdp::native_wire::gaya`
+    // mengunduh byte tiap `@font-face` dan `native::teks::KumpulanFont`
+    // memasangnya, sehingga `font-family` yang menamai face unduhan menang
+    // atas rantai tertanam (diuji di `native::teks` dan
+    // `crates/cdp/tests/jaringan.rs`); yang menggantikannya adalah batas yang
+    // lebih sempit: `font-weight`/`font-style` belum memilih antar face.
     // "raster tidak melukis teks" juga dicabut setelah `native::paint`
     // melukis glyph dari outline TrueType, lalu klausa "tanpa gambar/gradien/
     // border, tanpa tebal sintetis, `justify` rata kiri, tidak ada pemotongan"
@@ -142,15 +148,19 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // "stylesheet eksternal tidak diambil" dicabut setelah
     // `cdp::native_wire::gaya` mengambil `<link rel=stylesheet>` beserta
     // `@import` rekursif dan memasangnya di posisi `<link>`-nya; yang
-    // menggantikannya adalah batas at-rule yang lebih sempit: `@media` dan
-    // `@font-face` masih dicatat lalu tidak dijalankan.
+    // menggantikannya adalah batas at-rule yang lebih sempit: `@media` masih
+    // dicatat lalu isinya dilewati.
     // Yang tersisa di daftar adalah celah yang masih benar-benar terbuka.
     for wajib in [
         // Batas teks yang masih terbuka. Kalau baris ini hilang, daftar
-        // mengklaim webfont sudah diunduh padahal `@font-face` masih dicatat
-        // lalu dilewati, dan halaman yang bergantung pada `font-family` akan
-        // dilaporkan tampil sesuai desainnya.
-        "`@font-face` tidak diunduh",
+        // mengklaim halaman yang mendeklarasikan dua face sekeluarga dengan
+        // bobot berbeda tampil sesuai desainnya, padahal yang dipakai selalu
+        // face pertama yang memetakan code point-nya.
+        "`font-weight` dan `font-style` tidak memilih",
+        // Penjaga arah sebaliknya untuk klausa yang baru dicabut: kalau baris
+        // ini hilang, daftar bisa kembali mengaku webfont tidak diunduh
+        // padahal `@font-face` sudah diambil dan dipasang.
+        "`@font-face` diunduh dan dipakai",
         "raster melukis latar kotak dan glyph teks",
         "`fetch()` di dalam isolat",
         // Batas peristiwa CDP yang masih terbuka. Kalau baris ini hilang,
@@ -161,7 +171,7 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         // mengklaim `@media` sudah dijalankan padahal isinya masih dilewati,
         // dan halaman yang menaruh tata letaknya di dalam `@media` akan
         // dilaporkan tampil benar.
-        "at-rule selain `@import` belum dijalankan",
+        "at-rule selain `@import` dan `@font-face` belum dijalankan",
         // Batas screenshot yang masih benar-benar terbuka: encoder `webp`
         // belum ada. Kalau baris ini hilang, daftar mengklaim screenshot
         // melayani semua format yang diminta Chrome.
@@ -220,6 +230,10 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         // selebar `.notdef`.
         "pengukuran teks hanya satu face",
         "tidak ada shaping",
+        // Klausa lama sebelum webfont diunduh: kalau salah satunya kembali,
+        // pembaca mengira `font-family` masih diabaikan.
+        "`@font-face` tidak diunduh",
+        "`font-family` diabaikan",
         "belum melukis gambar",
         "belum melukis gradien",
         "justify` diperlakukan seperti rata kiri",
