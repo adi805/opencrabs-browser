@@ -35,6 +35,11 @@ pub enum Format {
     /// JPEG lossy dengan mutu 0-100. Raster software tidak punya tabel
     /// kuantisasi lain, jadi mutu di sini benar-benar mutu encoder.
     Jpeg { mutu: u8 },
+    /// WebP lossless (VP8L). Encoder Rust murni di mesin ini tidak punya
+    /// jalur lossy, jadi varian ini tidak membawa mutu: `quality` dari CDP
+    /// dicatat pemanggil di daftar diabaikan, bukan diterima lalu berpengaruh
+    /// nol tanpa jejak.
+    Webp,
 }
 
 impl Format {
@@ -44,6 +49,7 @@ impl Format {
         match self {
             Self::Png { .. } => "image/png",
             Self::Jpeg { .. } => "image/jpeg",
+            Self::Webp => "image/webp",
         }
     }
 
@@ -53,6 +59,10 @@ impl Format {
         match self {
             Self::Png { .. } => b"\x89PNG\r\n\x1a\n",
             Self::Jpeg { .. } => b"\xff\xd8\xff",
+            // Container WebP: `RIFF` di awal, lalu ukuran, lalu `WEBP` di
+            // offset 8. Prefiksnya cukup `RIFF` karena ukuran berkas berada
+            // di antaranya; tes yang memeriksa format juga menuntut `WEBP`.
+            Self::Webp => b"RIFF",
         }
     }
 }
@@ -389,6 +399,7 @@ fn lukis_penuh(
     let data = match format {
         Format::Png { cepat } => kodekan_png(&pixmap, cepat)?,
         Format::Jpeg { mutu } => kodekan_jpeg(&pixmap, mutu)?,
+        Format::Webp => kodekan_webp(&pixmap)?,
     };
     Ok(Raster {
         width: lebar,
@@ -474,6 +485,25 @@ fn kodekan_jpeg(pixmap: &Pixmap, mutu: u8) -> Result<Vec<u8>, NativeError> {
         jpeg_encoder::ColorType::Rgb,
     )
     .map_err(|e| NativeError::raster(format!("JPEG gagal dikodekan: {e}")))?;
+    Ok(out)
+}
+
+/// WebP lossless (VP8L) dari piksel straight, sama seperti PNG.
+///
+/// Tidak ada parameter mutu yang bisa dioper: encoder-nya lossless, dan
+/// `quality` dari CDP sudah dicatat pemanggil sebagai diabaikan. Batas WebP
+/// 16384 px per sisi dijaga encoder-nya sendiri; galatnya diteruskan apa
+/// adanya alih-alih menghasilkan berkas kosong.
+fn kodekan_webp(pixmap: &Pixmap) -> Result<Vec<u8>, NativeError> {
+    let mut out = Vec::new();
+    let enc = image_webp::WebPEncoder::new(&mut out);
+    enc.encode(
+        &rgba_lurus(pixmap),
+        pixmap.width(),
+        pixmap.height(),
+        image_webp::ColorType::Rgba8,
+    )
+    .map_err(|e| NativeError::raster(format!("WebP gagal dikodekan: {e}")))?;
     Ok(out)
 }
 
@@ -1513,6 +1543,47 @@ mod tests {
         assert!(
             !raster.data.starts_with(b"\x89PNG"),
             "JPEG tidak boleh berupa PNG"
+        );
+    }
+
+    /// WebP di mesin ini lossless, dan itu harus dibuktikan dengan mendekode
+    /// balik, bukan cuma dari magic bytes: encoder lossy pun menghasilkan
+    /// container yang sama, jadi yang membedakan hanya warna piksel sesudah
+    /// bolak-balik.
+    #[test]
+    fn webp_lossless_bolak_balik() {
+        let doc = Document::parse_html(
+            "<body><div style=\"width:40px;height:40px;background-color:#123456\"></div></body>",
+        )
+        .unwrap();
+        let raster = lukis_dengan(&doc, Viewport::new(40.0, 40.0), None, Format::Webp).unwrap();
+        assert_eq!(&raster.data[..4], b"RIFF", "harus container RIFF");
+        assert_eq!(&raster.data[8..12], b"WEBP", "container harus WebP");
+        assert_eq!(raster.format.mime(), "image/webp");
+
+        let mut dec =
+            image_webp::WebPDecoder::new(std::io::Cursor::new(&raster.data)).expect("dekode");
+        assert_eq!(dec.dimensions(), (40, 40));
+        let alfa = dec.has_alpha();
+        let mut buf = vec![0u8; dec.output_buffer_size().expect("ukuran buffer")];
+        dec.read_image(&mut buf).expect("baca gambar");
+        let per = if alfa { 4 } else { 3 };
+        // `Raster::piksel` menyimpan premultiplied, tapi latar uji ini opak
+        // (alfa 255), jadi nilai tersimpannya sama dengan warna straight.
+        let (piksel, sisa) = raster.rgba.as_chunks::<4>();
+        assert!(sisa.is_empty(), "buffer RGBA harus kelipatan empat");
+        for (i, asal) in piksel.iter().enumerate() {
+            let keluar = &buf[i * per..i * per + 3];
+            assert_eq!(
+                keluar,
+                &asal[..3],
+                "piksel {i} berubah sesudah encode+decode WebP"
+            );
+        }
+        assert_eq!(
+            raster.piksel(0, 0),
+            Some([0x12, 0x34, 0x56, 0xff]),
+            "warna kotak harus terbaca apa adanya"
         );
     }
 

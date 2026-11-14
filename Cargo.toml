@@ -43,6 +43,11 @@ zune-jpeg = "0.5"
 # arti konkret alih-alih diterima lalu diabaikan. Versi ini sudah ada di lock
 # lewat `tiny-skia`, jadi tidak ada crate baru yang masuk.
 png = "0.17"
+# Encoder WebP untuk `Page.captureScreenshot` format `webp`. Rust murni
+# (VP8L lossless): dependensi normalnya cuma `byteorder-lite` dan
+# `quick-error`. `webp` (binding C libwebp) muncul di pohon crate itu sebagai
+# dev-dependency, jadi tidak ikut dibangun dan tidak masuk biner.
+image-webp = "0.2"
 # `parallel` mengaktifkan `unsafe impl Send/Sync for Runtime` di rquickjs-core.
 # Tanpa fitur itu isolat tidak bisa hidup di dalam state axum/daemon yang
 # multi-thread, dan `Engine: Send + Sync` tidak bisa dipenuhi. Fitur ini cuma

@@ -54,12 +54,14 @@ use std::fmt;
 /// Daftar ini adalah kontrak: menambah kemampuan berarti menghapus barisnya
 /// di sini dan menambah tesnya, bukan sekadar menambah kode.
 pub const CELAH: &[&str] = &[
-    "at-rule selain `@import` dan `@font-face` belum dijalankan: `@media` \
-     dicatat lalu isinya dilewati, jadi halaman yang menaruh aturan tata \
-     letaknya di dalam `@media` tampil tanpa aturan itu. `@import` \
-     diselesaikan lapisan pengambil (`cdp::native_wire::gaya`) sampai \
-     kedalaman 3, dan `@font-face` diurai lalu byte-nya diunduh lapisan yang \
-     sama",
+    "`@media` dijalankan: prelude-nya dievaluasi terhadap viewport yang \
+     sedang dipakai (`width`/`height` beserta `min-`/`max-` dan varian \
+     `device-`, `orientation`, `prefers-color-scheme`, \
+     `prefers-reduced-motion`), lalu isi blok yang cocok masuk kaskade di \
+     posisi blok itu. Yang belum: `@supports` belum dijalankan (dicatat di \
+     `diabaikan`), dan kueri ber-`not` atau berfitur di luar daftar itu \
+     dianggap tak dikenal lalu dilewati dengan alasannya, bukan diterapkan \
+     dengan arti karangan",
     "teks diukur dan dibentuk dari rantai dua face yang ditanam di \
      `crates/engine/assets/` (`DejaVuSans.ttf` untuk Latin, Yunani, Kiril, \
      Arab, dan Ibrani; `NotoSansDevanagari-Regular.ttf` untuk Devanagari), \
@@ -91,10 +93,12 @@ pub const CELAH: &[&str] = &[
      `border-style` selain `solid` (dilaporkan, tidak dilukis), `border` per \
      sisi (`border-left` dan sejenisnya), `object-fit` selain `fill`, dan tebal \
      sungguhan dari face bold (yang ada hanya tebal sintetis dari satu face)",
-    "`Page.captureScreenshot` mengeluarkan `png` dan `jpeg` saja: `webp` (dan \
-     format lain di luar dua itu) belum punya encoder di mesin ini, jadi \
-     permintaannya ditolak dengan nama formatnya. Yang sudah dihormati: \
-     `quality`, `optimizeForSpeed`, `clip.scale` (render ulang pada kerapatan \
+    "`Page.captureScreenshot` mengeluarkan `png`, `jpeg`, dan `webp`; format \
+     lain di luar tiga itu ditolak dengan nama formatnya. `webp` di sini \
+     lossless (VP8L) karena encoder-nya Rust murni: Chrome memakai WebP lossy \
+     untuk `quality` yang sama, jadi berkas dari mesin ini bisa lebih besar \
+     daripada Chrome pada halaman berfoto. Yang sudah dihormati: `quality` \
+     (jpeg), `optimizeForSpeed`, `clip.scale` (render ulang pada kerapatan \
      itu, bukan pembesaran gambar hasil), `captureBeyondViewport`, dan \
      `fromSurface` (dicatat, hasilnya sama karena mesin software cuma punya \
      satu permukaan)",

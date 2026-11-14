@@ -23,7 +23,7 @@ use taffy::prelude::{
 };
 
 use super::NativeError;
-use super::css::{Kaskade, LembarLuar};
+use super::css::{Kaskade, KonteksMedia, LembarLuar};
 use super::dom::{Document, NodeId, NodeKind};
 use super::gaya::{GayaTerhitung, Konteks, PohonGaya, dimensi, panjang};
 
@@ -246,7 +246,18 @@ fn hitung_penuh(
     let akar_dokumen = doc.root();
     // Kaskade dibangun SEKALI per dokumen. Mengurai stylesheet per elemen
     // akan mengulang pekerjaan yang sama sebanyak jumlah node.
-    let kaskade = Kaskade::kumpulkan_dengan(doc, eksternal);
+    // `@media` dievaluasi dengan viewport yang sedang dipakai, bukan default:
+    // aturan `max-width` yang dievaluasi dengan lebar karangan tidak punya
+    // gejala, ia hanya membuat halaman salah tanpa galat.
+    let kaskade = Kaskade::kumpulkan_dengan_media(
+        doc,
+        eksternal,
+        KonteksMedia {
+            lebar: viewport.width,
+            tinggi: viewport.height,
+            ..KonteksMedia::default()
+        },
+    );
     laporan.catatan_kaskade = kaskade.diabaikan().to_vec();
     // Gaya terhitung juga dibangun sekali: pewarisan turun dari akar, dan
     // `em`/`rem` butuh ukuran font induk yang baru diketahui setelah induk

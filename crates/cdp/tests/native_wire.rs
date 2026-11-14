@@ -703,11 +703,11 @@ async fn accessibility_get_full_ax_tree_mengirim_peran_dan_nama() {
     mesin.stop().expect("berhenti");
 }
 
-/// AC: tangkapan layar mengeluarkan PNG dan JPEG sungguhan dengan ukuran yang
-/// diminta, `clip.scale` benar-benar memperbesar keluaran, dan format yang
-/// belum punya encoder (`webp`) ditolak dengan namanya.
+/// AC: tangkapan layar mengeluarkan PNG, JPEG, dan WebP sungguhan dengan
+/// ukuran yang diminta, `clip.scale` benar-benar memperbesar keluaran, dan
+/// format yang belum punya encoder (`avif`) ditolak dengan namanya.
 #[tokio::test]
-async fn page_capture_screenshot_melayani_png_jpeg_dan_menolak_webp() {
+async fn page_capture_screenshot_melayani_png_jpeg_webp_dan_menolak_format_lain() {
     let mesin = nyalakan();
     let port = mesin.info().devtools_port;
     let mut soket = sambung(port, "/devtools/browser").await;
@@ -763,10 +763,54 @@ async fn page_capture_screenshot_melayani_png_jpeg_dan_menolak_webp() {
         &sesi,
     )
     .await;
+    assert!(webp.get("error").is_none(), "WebP harus dilayani: {webp}");
+    let data = webp["result"]["data"].as_str().expect("data webp base64");
+    let bytes = cdp::base64::dekode(data).expect("base64 yang dikirim harus sah");
+    assert_eq!(&bytes[..4], b"RIFF", "harus container RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP", "container harus WebP");
     assert_eq!(
-        webp["error"]["code"],
+        webp["result"]["receipt"]["format"], "image/webp",
+        "tanda terima harus menyebut WebP: {webp}"
+    );
+
+    // `quality` bersama WebP dicatat, bukan diterima lalu berpengaruh nol
+    // tanpa jejak: encoder di mesin ini lossless.
+    let webp_mutu = minta_cdp_sesi(
+        &mut soket,
+        14,
+        "Page.captureScreenshot",
+        json!({"format": "webp", "quality": 40}),
+        &sesi,
+    )
+    .await;
+    assert!(
+        webp_mutu.get("error").is_none(),
+        "quality tidak boleh menolak WebP: {webp_mutu}"
+    );
+    let catatan = webp_mutu["result"]["receipt"]["diabaikan"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        catatan.iter().any(|c| c
+            .as_str()
+            .is_some_and(|c| c.contains("lossless") && c.contains("40"))),
+        "quality 40 harus tercatat sebagai diabaikan: {webp_mutu}"
+    );
+
+    // Format di luar tiga yang punya encoder tetap ditolak dengan namanya.
+    let avif = minta_cdp_sesi(
+        &mut soket,
+        15,
+        "Page.captureScreenshot",
+        json!({"format": "avif"}),
+        &sesi,
+    )
+    .await;
+    assert_eq!(
+        avif["error"]["code"],
         json!(-32602),
-        "webp belum punya encoder dan harus ditolak dengan nama: {webp}"
+        "format tanpa encoder harus ditolak dengan nama: {avif}"
     );
 
     let skala = minta_cdp_sesi(

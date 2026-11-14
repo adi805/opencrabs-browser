@@ -839,9 +839,9 @@ impl Dalam {
 
     /// `Page.captureScreenshot`: rasterisasi kotak layout menjadi gambar.
     ///
-    /// Format yang dikeluarkan hanya `png` dan `jpeg`, karena hanya itu yang
-    /// punya encoder di dalam mesin ini. Format lain ditolak dengan nama, bukan
-    /// diganti diam-diam.
+    /// Format yang dikeluarkan `png`, `jpeg`, dan `webp` (lossless), karena
+    /// hanya itu yang punya encoder di dalam mesin ini. Format lain ditolak
+    /// dengan nama, bukan diganti diam-diam.
     ///
     /// Parameter yang benar-benar dibaca: `format`, `quality`, `clip`
     /// (`x`/`y`/`width`/`height`/`scale`), `captureBeyondViewport`,
@@ -1406,12 +1406,13 @@ fn param_node_id(params: &Value) -> Result<usize, Galat> {
 /// Membaca `params.format` dan `params.quality` menjadi format encoder.
 ///
 /// Format yang tidak punya encoder di mesin ini ditolak dengan namanya, bukan
-/// diganti jadi PNG: klien yang meminta `webp` lalu menerima PNG dengan
-/// ekstensi `webp` baru tahu masalahnya setelah gambarnya rusak.
+/// diganti jadi PNG: klien yang meminta `avif` lalu menerima PNG dengan
+/// ekstensi `avif` baru tahu masalahnya setelah gambarnya rusak.
 ///
-/// `quality` hanya berlaku untuk JPEG. Chrome mengabaikannya pada PNG, jadi
-/// mengirimnya bersama `format: "png"` dicatat di daftar diabaikan alih-alih
-/// ditolak.
+/// `quality` hanya berlaku untuk JPEG. Chrome memakainya juga untuk WebP
+/// lossy, sedangkan encoder di mesin ini lossless (VP8L), jadi `quality`
+/// bersama `png` maupun `webp` dicatat di daftar diabaikan alih-alih
+/// diterima lalu berpengaruh nol tanpa jejak.
 fn format_dari(params: &Value) -> Result<(paint::Format, Vec<String>), Galat> {
     let mut diabaikan = Vec::new();
     let nama = params
@@ -1438,11 +1439,19 @@ fn format_dari(params: &Value) -> Result<(paint::Format, Vec<String>), Galat> {
                 mutu: u8::try_from(m).unwrap_or(80),
             }
         }
+        "webp" => {
+            if let Some(q) = mutu {
+                diabaikan.push(format!(
+                    "quality {q}: encoder WebP di mesin ini lossless (VP8L), nilai ini tidak berpengaruh"
+                ));
+            }
+            paint::Format::Webp
+        }
         lain => {
             return Err(Galat::baru(
                 -32602,
                 format!(
-                    "format '{lain}' belum didukung: mesin native mengeluarkan `png` dan `jpeg`"
+                    "format '{lain}' belum didukung: mesin native mengeluarkan `png`, `jpeg`, dan `webp`"
                 ),
             ));
         }

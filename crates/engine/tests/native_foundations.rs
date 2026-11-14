@@ -147,9 +147,9 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // tidak ada jalur dorong, dan domain lain belum ada.
     // "stylesheet eksternal tidak diambil" dicabut setelah
     // `cdp::native_wire::gaya` mengambil `<link rel=stylesheet>` beserta
-    // `@import` rekursif dan memasangnya di posisi `<link>`-nya; yang
-    // menggantikannya adalah batas at-rule yang lebih sempit: `@media` masih
-    // dicatat lalu isinya dilewati.
+    // `@import` rekursif dan memasangnya di posisi `<link>`-nya; `@media` lalu
+    // juga dijalankan terhadap viewport (diuji di `native::css`), jadi batas
+    // at-rule yang tersisa lebih sempit lagi: `@supports` belum dijalankan.
     // Yang tersisa di daftar adalah celah yang masih benar-benar terbuka.
     for wajib in [
         // Batas teks yang masih terbuka. Kalau baris ini hilang, daftar
@@ -167,15 +167,14 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         // daftar mengklaim mesin mendorong peristiwa ke klien tanpa ditanya,
         // padahal antreannya baru dikuras sesudah klien mengirim frame.
         "antreannya baru dikuras sesudah klien mengirim satu frame",
-        // Batas at-rule yang masih terbuka. Kalau baris ini hilang, daftar
-        // mengklaim `@media` sudah dijalankan padahal isinya masih dilewati,
-        // dan halaman yang menaruh tata letaknya di dalam `@media` akan
-        // dilaporkan tampil benar.
-        "at-rule selain `@import` dan `@font-face` belum dijalankan",
-        // Batas screenshot yang masih benar-benar terbuka: encoder `webp`
-        // belum ada. Kalau baris ini hilang, daftar mengklaim screenshot
-        // melayani semua format yang diminta Chrome.
-        "`webp` (dan",
+        // Batas at-rule yang masih terbuka setelah `@media` dijalankan:
+        // `@supports`. Kalau baris ini hilang, daftar mengklaim aturan
+        // bersyarat sudah dihormati padahal blok `@supports` masih dilewati.
+        "`@supports` belum dijalankan",
+        // Batas screenshot yang masih terbuka setelah encoder WebP masuk:
+        // encoder-nya lossless, jadi `quality` tidak berpengaruh. Kalau baris
+        // ini hilang, daftar mengklaim keluaran WebP setara Chrome.
+        "`webp` di sini",
         // Batas AX yang masih terbuka: isi `<iframe>`. Kalau baris ini hilang,
         // daftar mengklaim pohon aksesibilitas sudah mencakup dokumen anak,
         // padahal iframe belum dimuat sama sekali.
@@ -196,6 +195,17 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("rasterisasi bitmap"),
         "rasterisasi sudah ditutup, jangan dikembalikan ke CELAH: {semua}"
+    );
+    // `@media` sudah dijalankan dan `webp` sudah punya encoder. Kalau kalimat
+    // lamanya kembali, pembaca mengira keduanya masih dilewati padahal
+    // `native::css` dan `native::paint` membuktikan sebaliknya.
+    assert!(
+        !semua.contains("`@media` dicatat lalu isinya dilewati"),
+        "@media sudah dijalankan, jangan kembalikan kalimat lamanya: {semua}"
+    );
+    assert!(
+        !semua.contains("`webp` (dan"),
+        "webp sudah punya encoder, jangan kembalikan kalimat lamanya: {semua}"
     );
     // Kalimat lama "teks ... tidak dilukis" sudah tidak benar: glyph dilukis
     // dari outline face yang ditanam. Kalau kalimat itu kembali, pembaca

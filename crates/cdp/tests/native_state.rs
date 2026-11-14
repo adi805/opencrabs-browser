@@ -599,11 +599,12 @@ fn capture_screenshot_mengembalikan_png_base64() {
     assert_eq!(hasil["receipt"]["kotakDilukis"].as_u64(), Some(1));
 }
 
-/// JPEG dilayani oleh encoder sendiri, dan `quality` benar-benar dipakai:
-/// dua mutu berbeda menghasilkan ukuran byte berbeda. Yang tidak punya encoder
-/// (`webp`) ditolak dengan nama, bukan diam-diam dikirim PNG berlabel JPEG.
+/// JPEG dan WebP dilayani oleh encoder sendiri, dan `quality` benar-benar
+/// dipakai pada JPEG: dua mutu berbeda menghasilkan ukuran byte berbeda. Yang
+/// tidak punya encoder (`avif`) ditolak dengan nama, bukan diam-diam dikirim
+/// PNG berlabel AVIF.
 #[test]
-fn capture_screenshot_melayani_jpeg_dan_menolak_webp() {
+fn capture_screenshot_melayani_jpeg_dan_webp_dan_menolak_format_lain() {
     let state = NativeState::baru();
     let id = tab(&state);
     let sesi = lekat(&state, &id);
@@ -646,17 +647,34 @@ fn capture_screenshot_melayani_jpeg_dan_menolak_webp() {
         "quality 10 harus lebih kecil dari 95: {mutu_rendah} vs {mutu_tinggi}"
     );
 
-    let jawab = balas_sesi(
+    let webp = ok_sesi(
         &state,
         5,
         "Page.captureScreenshot",
         json!({"format": "webp"}),
         &sesi,
     );
+    assert_eq!(
+        webp["receipt"]["format"].as_str(),
+        Some("image/webp"),
+        "tanda terima harus menyebut WebP: {webp}"
+    );
+    let data = webp["data"].as_str().expect("data base64");
+    let bytes = cdp::base64::dekode(data).expect("base64 sah");
+    assert_eq!(&bytes[..4], b"RIFF", "harus container RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP", "container harus WebP");
+
+    let jawab = balas_sesi(
+        &state,
+        6,
+        "Page.captureScreenshot",
+        json!({"format": "avif"}),
+        &sesi,
+    );
     assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
     let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        pesan.contains("webp") && pesan.contains("png") && pesan.contains("jpeg"),
+        pesan.contains("avif") && pesan.contains("webp") && pesan.contains("jpeg"),
         "galat harus menyebut yang diminta dan yang didukung: {pesan}"
     );
 }

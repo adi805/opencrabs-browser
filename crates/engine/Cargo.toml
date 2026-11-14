@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 html5ever.workspace = true
+image-webp.workspace = true
 jpeg-encoder.workspace = true
 markup5ever_rcdom.workspace = true
 nix.workspace = true

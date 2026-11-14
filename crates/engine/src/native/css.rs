@@ -2,9 +2,12 @@
 //!
 //! Yang diurai di sini adalah subset CSS yang benar-benar dipakai halaman
 //! biasa: blok aturan `selektor { deklarasi }`, daftar selektor dipisah koma,
-//! `!important`, dan shorthand `padding`/`margin`. At-rule (`@media`,
-//! `@font-face`, `@supports`) **tidak** dijalankan: setiap at-rule dicatat di
-//! [`Kaskade::diabaikan`], bukan diterapkan dengan arti lain. `@import`
+//! `!important`, dan shorthand `padding`/`margin`. `@media` **dijalankan**:
+//! prelude-nya dievaluasi terhadap [`KonteksMedia`], dan isinya masuk kaskade
+//! di posisi blok itu bila cocok. `@font-face` dibaca karena bloknya
+//! mendeklarasikan face. At-rule lain (`@supports`, sisa `@import`) tetap
+//! **tidak** dijalankan: dicatat di [`Kaskade::diabaikan`], bukan diterapkan
+//! dengan arti lain. `@import`
 //! diselesaikan lebih dulu oleh lapisan yang mengenal jaringan
 //! (`cdp::native_wire::gaya`), jadi yang sampai ke sini sudah berupa teks
 //! sisipan; `@import` yang masih tersisa di teks tetap dicatat sebagai at-rule
@@ -197,6 +200,221 @@ pub struct Lembar {
     pub diabaikan: Vec<String>,
 }
 
+/// Kondisi media yang dipakai mengevaluasi `@media`.
+///
+/// Angkanya datang dari viewport yang sedang dipakai layout, bukan tebakan:
+/// `@media (max-width: 600px)` yang dievaluasi dengan lebar karangan akan
+/// menerapkan aturan yang seharusnya tidak berlaku, dan tidak ada galat yang
+/// menandainya.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KonteksMedia {
+    pub lebar: f32,
+    pub tinggi: f32,
+    pub skema_gelap: bool,
+    pub gerak_berkurang: bool,
+}
+
+impl Default for KonteksMedia {
+    fn default() -> Self {
+        Self {
+            lebar: 1280.0,
+            tinggi: 800.0,
+            skema_gelap: false,
+            gerak_berkurang: false,
+        }
+    }
+}
+
+impl KonteksMedia {
+    #[must_use]
+    pub fn baru(lebar: f32, tinggi: f32) -> Self {
+        Self {
+            lebar,
+            tinggi,
+            ..Self::default()
+        }
+    }
+
+    /// Mengevaluasi prelude `@media`, mis. `screen and (min-width: 600px)`.
+    ///
+    /// Daftar dipisah koma berarti ATAU; `and` di dalam satu alternatif
+    /// berarti DAN. Alternatif yang memakai fitur tak dikenal dianggap tak
+    /// dikenal, bukan cocok: CSS memperlakukan kueri rusak sebagai `not all`,
+    /// dan menerapkannya akan mengubah halaman secara salah tanpa gejala.
+    #[must_use]
+    pub fn cocok(&self, kueri: &str) -> HasilKueri {
+        let kueri = kueri.trim();
+        if kueri.is_empty() {
+            return HasilKueri::Cocok;
+        }
+        let mut tak_dikenal = None;
+        for alternatif in kueri.split(',') {
+            match self.satu_alternatif(alternatif.trim()) {
+                HasilKueri::Cocok => return HasilKueri::Cocok,
+                HasilKueri::Tidak => {}
+                HasilKueri::TidakDikenal(a) => {
+                    if tak_dikenal.is_none() {
+                        tak_dikenal = Some(a);
+                    }
+                }
+            }
+        }
+        match tak_dikenal {
+            Some(a) => HasilKueri::TidakDikenal(a),
+            None => HasilKueri::Tidak,
+        }
+    }
+
+    fn satu_alternatif(&self, alternatif: &str) -> HasilKueri {
+        if alternatif.is_empty() {
+            return HasilKueri::Tidak;
+        }
+        let rendah = alternatif.to_ascii_lowercase();
+        if let Some(sisa) = rendah.strip_prefix("only ") {
+            return self.satu_alternatif(sisa);
+        }
+        if rendah.starts_with("not ") {
+            // `not` membalik seluruh alternatif. Mesin ini belum mengurai
+            // pohonnya, jadi menebak hasil balikannya lebih berbahaya
+            // daripada melewatinya.
+            return HasilKueri::TidakDikenal(format!("`{alternatif}` memakai `not`"));
+        }
+        let mut hasil = HasilKueri::Cocok;
+        for bagian in rendah.split(" and ") {
+            let bagian = bagian.trim();
+            if bagian.is_empty() {
+                continue;
+            }
+            let ini = if bagian.starts_with('(') {
+                self.satu_fitur(bagian)
+            } else {
+                match bagian {
+                    // Mesin ini layar, jadi `all` dan `screen` cocok.
+                    "all" | "screen" => HasilKueri::Cocok,
+                    _ => HasilKueri::Tidak,
+                }
+            };
+            match ini {
+                HasilKueri::Cocok => {}
+                HasilKueri::Tidak => return HasilKueri::Tidak,
+                HasilKueri::TidakDikenal(a) => {
+                    if matches!(hasil, HasilKueri::Cocok) {
+                        hasil = HasilKueri::TidakDikenal(a);
+                    }
+                }
+            }
+        }
+        hasil
+    }
+
+    fn satu_fitur(&self, bagian: &str) -> HasilKueri {
+        let dalam = bagian
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(bagian)
+            .trim();
+        let (nama, nilai) = match dalam.split_once(':') {
+            Some((n, v)) => (n.trim(), Some(v.trim())),
+            None => (dalam, None),
+        };
+        match (nama, nilai) {
+            ("width", Some(v)) | ("device-width", Some(v)) => {
+                banding(panjang(v, self), self.lebar, |w, b| (w - b).abs() < 0.5)
+            }
+            ("height", Some(v)) | ("device-height", Some(v)) => {
+                banding(panjang(v, self), self.tinggi, |h, b| (h - b).abs() < 0.5)
+            }
+            ("min-width", Some(v)) | ("min-device-width", Some(v)) => {
+                banding(panjang(v, self), self.lebar, |w, b| w >= b)
+            }
+            ("max-width", Some(v)) | ("max-device-width", Some(v)) => {
+                banding(panjang(v, self), self.lebar, |w, b| w <= b)
+            }
+            ("min-height", Some(v)) | ("min-device-height", Some(v)) => {
+                banding(panjang(v, self), self.tinggi, |h, b| h >= b)
+            }
+            ("max-height", Some(v)) | ("max-device-height", Some(v)) => {
+                banding(panjang(v, self), self.tinggi, |h, b| h <= b)
+            }
+            ("orientation", Some(v)) => match v {
+                "landscape" => boolean(self.lebar >= self.tinggi),
+                "portrait" => boolean(self.lebar < self.tinggi),
+                _ => HasilKueri::TidakDikenal(format!("nilai `orientation: {v}`")),
+            },
+            ("prefers-color-scheme", Some(v)) => match v {
+                "dark" => boolean(self.skema_gelap),
+                "light" => boolean(!self.skema_gelap),
+                "no-preference" => HasilKueri::Cocok,
+                _ => HasilKueri::TidakDikenal(format!("nilai `prefers-color-scheme: {v}`")),
+            },
+            ("prefers-reduced-motion", Some(v)) => match v {
+                "reduce" => boolean(self.gerak_berkurang),
+                "no-preference" => boolean(!self.gerak_berkurang),
+                _ => HasilKueri::TidakDikenal(format!("nilai `prefers-reduced-motion: {v}`")),
+            },
+            _ => HasilKueri::TidakDikenal(format!("fitur `{dalam}`")),
+        }
+    }
+}
+
+/// Keputusan satu kueri media.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HasilKueri {
+    Cocok,
+    Tidak,
+    /// Kueri memakai fitur yang belum dikenal mesin ini. Isinya **tidak**
+    /// diterapkan: aturan yang salah berlaku tidak punya gejala, jadi
+    /// melewatinya sambil mencatat alasannya jauh lebih jujur.
+    TidakDikenal(String),
+}
+
+/// Membandingkan panjang kueri terhadap ukuran sekarang.
+fn banding(kueri: Option<f32>, sekarang: f32, uji: fn(f32, f32) -> bool) -> HasilKueri {
+    match kueri {
+        Some(k) if uji(sekarang, k) => HasilKueri::Cocok,
+        Some(_) => HasilKueri::Tidak,
+        None => HasilKueri::TidakDikenal("panjang tanpa angka".to_string()),
+    }
+}
+
+fn boolean(b: bool) -> HasilKueri {
+    if b {
+        HasilKueri::Cocok
+    } else {
+        HasilKueri::Tidak
+    }
+}
+
+/// Mengurai panjang kueri media: `600px`, `40em`, `50vw`, atau angka polos.
+///
+/// `em`/`rem` di kueri media selalu 16px, tidak mengikuti `font-size` akar
+/// dokumen: begitulah spesifikasinya, dan memakai font akar akan membuat
+/// kueri yang sama punya arti berbeda per halaman.
+fn panjang(teks: &str, media: &KonteksMedia) -> Option<f32> {
+    let t = teks.trim();
+    if let Some(v) = t.strip_suffix("px") {
+        return v.trim().parse().ok();
+    }
+    if let Some(v) = t.strip_suffix("em").or_else(|| t.strip_suffix("rem")) {
+        return v.trim().parse::<f32>().ok().map(|n| n * 16.0);
+    }
+    if let Some(v) = t.strip_suffix("vw") {
+        return v
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|n| n * media.lebar / 100.0);
+    }
+    if let Some(v) = t.strip_suffix("vh") {
+        return v
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|n| n * media.tinggi / 100.0);
+    }
+    t.parse().ok()
+}
+
 /// Seluruh lembar gaya yang berlaku untuk satu dokumen, urut dokumen.
 #[derive(Debug, Clone, Default)]
 pub struct Kaskade {
@@ -207,6 +425,8 @@ pub struct Kaskade {
     /// Dinaikkan tiap lembar baru supaya urutan tetap naik lintas lembar.
     urutan_berikut: usize,
     diabaikan: Vec<String>,
+    /// Kondisi media yang dipakai mengevaluasi `@media` di seluruh lembar.
+    media: KonteksMedia,
 }
 
 impl Kaskade {
@@ -226,7 +446,21 @@ impl Kaskade {
     /// halaman yang menaruh `<link>` di atas blok `<style>`.
     #[must_use]
     pub fn kumpulkan_dengan(doc: &Document, eksternal: &[LembarLuar]) -> Self {
-        let mut k = Self::default();
+        Self::kumpulkan_dengan_media(doc, eksternal, KonteksMedia::default())
+    }
+
+    /// Sama dengan [`Self::kumpulkan_dengan`], tapi `@media` dievaluasi
+    /// terhadap viewport yang benar-benar dipakai layout.
+    #[must_use]
+    pub fn kumpulkan_dengan_media(
+        doc: &Document,
+        eksternal: &[LembarLuar],
+        media: KonteksMedia,
+    ) -> Self {
+        let mut k = Self {
+            media,
+            ..Self::default()
+        };
         for (id, node) in doc.nodes().iter().enumerate() {
             let Some(tag) = node.tag() else {
                 continue;
@@ -271,7 +505,12 @@ impl Kaskade {
     /// stylesheet eksternal.
     pub fn tambah_lembar(&mut self, teks: &str, asal: &str) {
         let mut lembar = Lembar::default();
-        lembar.aturan = urai_lembar(teks, &mut lembar.diabaikan, &mut self.font_face);
+        lembar.aturan = urai_lembar(
+            teks,
+            &mut lembar.diabaikan,
+            &mut self.font_face,
+            &self.media,
+        );
         for aturan in &mut lembar.aturan {
             aturan.urutan += self.urutan_berikut;
         }
@@ -471,6 +710,7 @@ pub fn urai_lembar(
     teks: &str,
     diabaikan: &mut Vec<String>,
     font: &mut Vec<FontFace>,
+    media: &KonteksMedia,
 ) -> Vec<Aturan> {
     let chars: Vec<char> = teks.chars().collect();
     let n = chars.len();
@@ -497,6 +737,7 @@ pub fn urai_lembar(
                 i += 1;
             }
             let nama: String = chars[mulai + 1..i].iter().collect();
+            let setelah_nama = i;
             // At-rule berakhir di `;` (mis. `@import`) atau di blok `{}`
             // (mis. `@media`). Isinya TIDAK dijalankan: menjalankan
             // `@media` tanpa informasi media yang benar akan menerapkan
@@ -540,6 +781,33 @@ pub fn urai_lembar(
                             .push("at-rule `@font-face` tanpa `font-family`/`url()`".to_string()),
                     },
                     None => diabaikan.push("at-rule `@font-face` tanpa blok".to_string()),
+                }
+                continue;
+            }
+            if nama.eq_ignore_ascii_case("media") {
+                let Some(isi) = badan else {
+                    diabaikan.push("at-rule `@media` tanpa blok".to_string());
+                    continue;
+                };
+                let prelude: String = match buka {
+                    Some(b) => chars[setelah_nama..b].iter().collect(),
+                    None => String::new(),
+                };
+                let prelude = prelude.trim();
+                match media.cocok(prelude) {
+                    HasilKueri::Cocok => {
+                        // Isi `@media` masuk kaskade di POSISI bloknya, bukan
+                        // di akhir lembar: urutan sumber masih menentukan
+                        // pemenang saat spesifisitas sama.
+                        aturan.extend(urai_lembar(&isi, diabaikan, font, media));
+                    }
+                    HasilKueri::Tidak => diabaikan.push(format!(
+                        "at-rule `@media {prelude}` tidak cocok dengan viewport {}x{}",
+                        media.lebar, media.tinggi
+                    )),
+                    HasilKueri::TidakDikenal(alasan) => diabaikan.push(format!(
+                        "at-rule `@media {prelude}` tidak dievaluasi: {alasan}"
+                    )),
                 }
                 continue;
             }
@@ -846,22 +1114,104 @@ mod tests {
         let doc = dokumen(
             "<html><head>\
              <link rel=\"stylesheet\" href=\"https://contoh.test/x.css\">\
-             <style>@media screen { div{width:1px} } div{height:2px}</style>\
+             <style>@supports (display:grid) { div{width:1px} } div{height:2px}</style>\
              </head><body><div id=\"a\"></div></body></html>",
         );
         let k = Kaskade::kumpulkan(&doc);
         let id = doc.pilih_satu("#a").unwrap().unwrap();
         let g = peta(&k, &doc, id);
-        // aturan di dalam @media tidak dijalankan
-        assert!(!g.contains_key("width"), "aturan @media tidak boleh jalan");
+        // aturan di dalam @supports tidak dijalankan
+        assert!(
+            !g.contains_key("width"),
+            "aturan @supports tidak boleh jalan"
+        );
         // aturan sesudahnya tetap jalan
         assert_eq!(g.get("height").map(String::as_str), Some("2px"));
         let catatan = k.diabaikan().join(" | ");
         assert!(catatan.contains("x.css"), "href harus tercatat: {catatan}");
         assert!(
-            catatan.contains("@media"),
+            catatan.contains("@supports"),
             "at-rule harus tercatat: {catatan}"
         );
+    }
+
+    #[test]
+    fn test_media_query_dievaluasi_terhadap_viewport() {
+        let html = "<html><head><style>\
+             @media (min-width: 600px) { #a{width:11px} }\
+             @media (max-width: 599px) { #a{width:99px} }\
+             @media screen and (min-width: 400px) { #a{height:12px} }\
+             @media print { #a{height:98px} }\
+             </style></head><body><div id=\"a\"></div></body></html>";
+        let doc = dokumen(html);
+        let id = doc.pilih_satu("#a").unwrap().unwrap();
+
+        let lapang = Kaskade::kumpulkan_dengan_media(&doc, &[], KonteksMedia::baru(800.0, 600.0));
+        let g = peta(&lapang, &doc, id);
+        assert_eq!(
+            g.get("width").map(String::as_str),
+            Some("11px"),
+            "min-width harus jalan"
+        );
+        assert_eq!(
+            g.get("height").map(String::as_str),
+            Some("12px"),
+            "screen and min-width harus jalan"
+        );
+
+        let sempit = Kaskade::kumpulkan_dengan_media(&doc, &[], KonteksMedia::baru(300.0, 600.0));
+        let g2 = peta(&sempit, &doc, id);
+        assert_eq!(
+            g2.get("width").map(String::as_str),
+            Some("99px"),
+            "max-width harus jalan"
+        );
+        assert!(
+            !g2.contains_key("height"),
+            "min-width 400 tidak cocok di lebar 300"
+        );
+    }
+
+    #[test]
+    fn test_media_query_prefers_dan_fitur_tak_dikenal() {
+        let html = "<html><head><style>\
+             @media (prefers-color-scheme: dark) { #a{color:#ffffff} }\
+             @media (min-resolution: 2dppx) { #a{width:50px} }\
+             @media not screen { #a{width:77px} }\
+             </style></head><body><div id=\"a\"></div></body></html>";
+        let doc = dokumen(html);
+        let id = doc.pilih_satu("#a").unwrap().unwrap();
+
+        let terang = Kaskade::kumpulkan(&doc);
+        let g = peta(&terang, &doc, id);
+        assert!(
+            !g.contains_key("color"),
+            "skema terang tidak boleh kena aturan gelap"
+        );
+        assert!(
+            !g.contains_key("width"),
+            "fitur tak dikenal tidak boleh diterapkan"
+        );
+        let catatan = terang.diabaikan().join(" | ");
+        assert!(
+            catatan.contains("min-resolution"),
+            "fitur tak dikenal harus tercatat: {catatan}"
+        );
+        assert!(
+            catatan.contains("not screen"),
+            "`not` harus tercatat: {catatan}"
+        );
+
+        let gelap = Kaskade::kumpulkan_dengan_media(
+            &doc,
+            &[],
+            KonteksMedia {
+                skema_gelap: true,
+                ..KonteksMedia::default()
+            },
+        );
+        let g2 = peta(&gelap, &doc, id);
+        assert_eq!(g2.get("color").map(String::as_str), Some("#ffffff"));
     }
 
     fn dengan_lembar(html: &str, selektor: &str, lembar: &[LembarLuar]) -> HashMap<String, String> {
