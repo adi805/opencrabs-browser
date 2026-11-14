@@ -34,6 +34,17 @@ env:
   # punya fitur itu (run 43531270141: 689 instruksi BMI2, laptop Sandy Bridge
   # cuma punya avx/popcnt/sse4_2).
   RUSTFLAGS: "-C target-cpu=x86-64 -C target-feature=-bmi2,-bmi1"
+  # RUSTFLAGS tidak pernah sampai ke compiler C. ring membawa kode BoringSSL
+  # (CRYPTO_store_u32_be di crypto/internal.h:435) yang dikompilasi `cc`, dan
+  # di runner Haswell+ gcc menerjemahkan bswap menjadi `movbe` — fitur Haswell
+  # yang tidak ada di Sandy Bridge. Itu yang membunuh `browserd keygen`
+  # (SIGILL di offset 0xda00f1, run 43539289311). Flag dari env cc-rs ditempel
+  # paling akhir, jadi `-march=x86-64` di sini menimpa apa pun yang disuntik
+  # toolchain runner.
+  CFLAGS: "-O2 -march=x86-64 -mtune=generic"
+  CXXFLAGS: "-O2 -march=x86-64 -mtune=generic"
+  CFLAGS_x86_64_unknown_linux_gnu: "-O2 -march=x86-64 -mtune=generic"
+  CXXFLAGS_x86_64_unknown_linux_gnu: "-O2 -march=x86-64 -mtune=generic"
 
 jobs:
   build:
@@ -67,7 +78,7 @@ jobs:
           # Tag ISA ikut di kunci. Tanpa itu cache `target/` dari build sebelum
           # RUSTFLAGS dipin dipulihkan apa adanya, dan artefak lama yang memuat
           # BMI2 ikut terpaket seolah-olah hasil build baru.
-          key: build-x86-64-baseline-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: build-x86-64-baseline-cflags-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build
         run: |
@@ -85,14 +96,40 @@ jobs:
             | grep -nE "target-cpu|target-feature|^-[CO]$" \
             | head -20 || echo "(tidak ditemukan di log)"
 
+      # Gate ISA hanya melihat biner akhir, jadi ia bisa bilang "ada 14 movbe"
+      # tanpa memberi tahu SIAPA pembuatnya. Langkah ini menjawab pertanyaan itu
+      # di sumbernya: objek C mana (ring) dan arsip crate mana yang membawa
+      # opcode non-baseline, plus flag yang benar-benar dipakai `cc`. Tanpa ini
+      # tiap perbaikan ISA jadi tebakan yang diuji lewat run CI berikutnya.
+      - name: Diagnostik ISA per objek
+        if: always()
+        run: |
+          echo "--- perintah cc yang dipakai build ini ---"
+          grep -oE 'running: [^ ]*(cc|gcc|clang)[^ ]* .*' /tmp/build.log 2>/dev/null \
+            | head -3 || echo "(tidak ada perintah cc di log)"
+          echo "--- env CFLAGS yang dilihat build ---"
+          env | grep -E '^(CFLAGS|CXXFLAGS)' || echo "(kosong)"
+          echo "--- objek ring yang membawa opcode non-baseline ---"
+          find target -path '*ring*/out/*.o' -type f 2>/dev/null | while read -r o; do
+            n=$(objdump -d "$o" 2>/dev/null \
+              | grep -cE '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx|movbe|andn|blsr|blsi|blsmsk|bextr|adcx|adox)\b' || true)
+            [ "$n" -gt 0 ] && echo "$n  $(basename "$o")"
+          done | sort -rn | head -15
+          echo "--- arsip crate (.rlib) yang membawa movbe ---"
+          find target -name '*.rlib' -type f 2>/dev/null | while read -r r; do
+            n=$(objdump -d "$r" 2>/dev/null | grep -cE '\bmovbe' || true)
+            [ "$n" -gt 0 ] && echo "$n  $(basename "$r")"
+          done | sort -rn | head -15
+          echo "(selesai)"
+
       - name: Probe apakah rustc menghormati baseline
         run: |
           set -eu
           mkdir -p /tmp/probe && cd /tmp/probe
           printf 'fn main(){ let x: u64 = std::env::args().count() as u64; println!("{}", x >> 3); }\n' > p.rs
           rustc -C opt-level=2 $RUSTFLAGS p.rs -o p
-          N=$(objdump -d p | grep -cE '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx)\b' || true)
-          echo "probe BMI2 pada biner hello-world: ${N}"
+          N=$(objdump -d p | grep -cE '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx|movbe|andn|blsr|blsi|blsmsk|bextr|adcx|adox)\b' || true)
+          echo "probe ISA non-baseline pada biner hello-world: ${N}"
           echo "probe RUSTFLAGS: ${RUSTFLAGS}"
 
       - name: Gate portabilitas ISA
@@ -126,15 +163,26 @@ jobs:
           #   chacha20_poly1305_{seal,open}_avx2
           #     src/aead/chacha20_poly1305/integrated.rs:122
           #     if matches!(optional_cpu_features, Some((Avx2, Bmi2)))
+          #   _aesni_ctr32_ghash_6x, _aesni_ctr32_6x, aesni_gcm_{encrypt,decrypt}
+          #     `movbe` berasal dari asm pregenerated aesni-gcm-x86_64-elf.S, dan
+          #     varian itu hanya dipilih lewat CPUID: src/aead/aes_gcm.rs:92
+          #     memasang DynKey::AesHwClMulAvxMovbe lewat gcm::clmulavxmovbe::Key.
+          #     Sandy Bridge tidak punya movbe, jadi jatuh ke AesHwClMul biasa.
           #
           # Nama simbol memuat versi crate, jadi upgrade ring otomatis
           # menggugurkan daftar ini dan gate gagal sampai jalur barunya
           # diaudit. Simbol yang tidak dikenal SELALU dihitung pelanggaran:
           # gate ini gagal-tertutup.
-          IZIN="ring_core_0_17_14__x25519_scalar_mult_adx ring_core_0_17_14__fiat_curve25519_adx_mul ring_core_0_17_14__fiat_curve25519_adx_square ring_core_0_17_14__ecp_nistz256_ord_mul_mont_adx ring_core_0_17_14__ecp_nistz256_ord_sqr_mont_adx __ecp_nistz256_mul_montx __ecp_nistz256_sqr_montx ring_core_0_17_14__bn_mulx4x_mont mulx4x_internal ring_core_0_17_14__bn_sqrx8x_internal ring_core_0_17_14__chacha20_poly1305_seal_avx2 ring_core_0_17_14__chacha20_poly1305_open_avx2"
+          IZIN="ring_core_0_17_14__x25519_scalar_mult_adx ring_core_0_17_14__fiat_curve25519_adx_mul ring_core_0_17_14__fiat_curve25519_adx_square ring_core_0_17_14__ecp_nistz256_ord_mul_mont_adx ring_core_0_17_14__ecp_nistz256_ord_sqr_mont_adx __ecp_nistz256_mul_montx __ecp_nistz256_sqr_montx ring_core_0_17_14__bn_mulx4x_mont mulx4x_internal ring_core_0_17_14__bn_sqrx8x_internal ring_core_0_17_14__chacha20_poly1305_seal_avx2 ring_core_0_17_14__chacha20_poly1305_open_avx2 ring_core_0_17_14__aesni_ctr32_ghash_6x ring_core_0_17_14__aesni_ctr32_6x ring_core_0_17_14__aesni_gcm_decrypt ring_core_0_17_14__aesni_gcm_encrypt _aesni_ctr32_ghash_6x _aesni_ctr32_6x aesni_gcm_decrypt aesni_gcm_encrypt"
 
+          # Daftar opcode di bawah adalah instruksi yang TIDAK ada di baseline
+          # x86-64 (Sandy Bridge ke bawah) dan tidak dikodekan ulang CPU lama.
+          # `movbe` masuk daftar setelah run 43539289311: gate lama hanya
+          # menghitung BMI2, sehingga biner yang membawa movbe lolos lalu mati
+          # SIGILL di `keygen`. Gate yang tidak mengenal opcode-nya adalah gate
+          # yang tidak menjaga apa pun.
           objdump -d "$BIN" \
-            | grep -E '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx)\b' \
+            | grep -E '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx|movbe|andn|blsr|blsi|blsmsk|bextr|adcx|adox)\b' \
             | sed -E 's/^ *([0-9a-f]+):.*/\1/' > /tmp/hits.txt || true
           TOTAL=$(wc -l < /tmp/hits.txt)
           if [ "$TOTAL" -eq 0 ]; then
