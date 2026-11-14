@@ -40,11 +40,10 @@ run in this session; nothing is taken from a document alone.
 
 How these eleven rows account for twelve `CELAH` entries: G2 (inheritance and
 units) is carried inside the cascade entry rather than beside it, and the two
-remaining entries, iframe traversal (AC-015) and closed shadow root piercing
-(AC-016), are tracked in section 4 because neither is a layer of its own: both
-need a nested document, which is the same work. Counting the table alone gives
-eleven; counting code gives twelve; the difference is those three, not a
-missing row.
+entries that used to sit outside this table, iframe traversal (AC-015) and
+closed shadow root piercing (AC-016), both closed on 2026-11-14 (section 4).
+The narrower limits they left behind stay in `CELAH`, so the count still comes
+from code and not from this table.
 
 ## 2. Dependency graph
 
@@ -211,8 +210,9 @@ surface, so it does not get bundled into W4.
 ### W7. G7 accessibility details
 
 After W5, so focusable/selected/expanded carry values produced by real events
-rather than constants. The iframe half needs a nested document parse, which is
-the same work AC-015 needs (see section 4).
+rather than constants. The iframe half of this row is **done** as of
+2026-11-14: the AX walk descends into `anak_tata` and into the child document,
+which is the same work AC-015 needed.
 
 ### W8. G11 CDP events
 
@@ -223,20 +223,32 @@ last is one plumbing pass instead of five.
 ## 4. The eleven are not the whole gap set
 
 `crates/engine/src/native/mod.rs:11-14` states the contract: anything missing is
-named in `CELAH`, not hidden. Three Must-AC halves still have no native
-implementation and no `CELAH` entry, so the contract is still false for those
-three (AC-009 left this table on 2026-11-12, when `native_99_tabs_budget`
-landed and passed):
+named in `CELAH`, not hidden. One Must-AC half still has no native
+implementation and no `CELAH` entry, so the contract is still false for that
+one (AC-009 left this table on 2026-11-12 when `native_99_tabs_budget` landed
+and passed; AC-015 and AC-016 left it on 2026-11-14):
 
 | AC | Missing half | Evidence |
 |---|---|---|
 | AC-011 | Rehydration latency from **SQLite**; the cold store on the production path is in memory | `PROGRESS.md` memory row; `StoreColdStore` is only reached by `browserd/src/tabstore.rs` tests |
-| AC-015 | iframe element traversal in the **native** engine | `grep -rn iframe crates/engine/` returns zero; the support that exists is `chrome-full` (`browserd/src/penanam.rs`, `browserd/tests/mata_tangan.rs`) |
-| AC-016 | closed shadow root piercing in the **native** engine | `grep -rn shadow crates/engine/` returns zero; same `chrome-full`-only story |
 
-Either three entries join `CELAH`, or the module comment stops claiming the list
-is complete. The second option is cheaper and honest; the first is the one that
-matches the contract.
+**AC-015 CLOSED 2026-11-14.** The native engine traverses `<iframe>` end to
+end: `Document` carries `bingkai`, `anak_tata` is the single child path used by
+layout, raster and the AX tree, and `cdp::native_wire::bingkai` fetches
+same-origin child documents on the `Page.navigate` path, reporting every skip
+in `bingkaiCatatan`. `DOM.getDocument` exposes the child document as a
+`#document` node under its iframe, the same shape Chrome uses. The narrower
+limits that remain are in `CELAH`: one level only, same-origin only, 8 frames
+per document, 4 MiB each, 12 MiB total, 8 s each, and `sandbox`/`allow`/`csp`
+unread.
+
+**AC-016 CLOSED 2026-11-14.** `attachShadow` exists in the isolate, a `closed`
+root is invisible to page script (`document.getElementById(...).shadowRoot ===
+null`), and automation reads straight through it: `Document::pilih` walks the
+whole tree while page script is confined to `pilih_terang`, and
+`DOM.getDocument` ships the root in `shadowRoots`. What remains is `<slot>` and
+`assignedNodes`, `:host`/`::slotted`/`:host-context`, and `elementFromPoint`
+not piercing shadow, all named in `CELAH`.
 
 ## 5. Ordering traps to avoid
 
