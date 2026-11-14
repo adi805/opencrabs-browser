@@ -28,6 +28,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   CARGO_BUILD_JOBS: "4"
+  # Artefak ini dikirim ke mesin lain, jadi baseline ISA dipin eksplisit dan
+  # tidak diserahkan ke bawaan runner. Tanpa pin, runner ubuntu26 membangun
+  # dengan BMI2/AVX2 dan biner mati "Illegal instruction" di CPU yang tidak
+  # punya fitur itu (run 43531270141: 689 instruksi BMI2, laptop Sandy Bridge
+  # cuma punya avx/popcnt/sse4_2).
+  RUSTFLAGS: "-C target-cpu=x86-64"
 
 jobs:
   build:
@@ -42,6 +48,17 @@ jobs:
           rustup show active-toolchain
           rustc -vV
 
+      - name: Lingkungan build dan baseline ISA
+        run: |
+          echo "RUSTFLAGS=${RUSTFLAGS:-<kosong>}"
+          echo "CARGO_BUILD_RUSTFLAGS=${CARGO_BUILD_RUSTFLAGS:-<kosong>}"
+          echo "--- ~/.cargo/config.toml ---"
+          cat ~/.cargo/config.toml 2>/dev/null || echo "(tidak ada)"
+          echo "--- target_feature yang dijanjikan artefak ---"
+          rustc --print cfg -C target-cpu=x86-64 \
+            | grep -E 'target_feature="(bmi2|avx2|avx512f)"' \
+            || echo "bmi2/avx2/avx512f TIDAK aktif (baseline x86-64)"
+
       - name: Disk sebelum build
         run: df -h /
 
@@ -51,6 +68,31 @@ jobs:
 
       - name: Build
         run: cargo build --locked --package browserd --profile ${{ inputs.profile || 'release' }}
+
+      - name: Gate portabilitas ISA
+        run: |
+          set -eu
+          PROFILE="${{ inputs.profile || 'release' }}"
+          case "$PROFILE" in
+            dev) DIR=debug ;;
+            *) DIR="$PROFILE" ;;
+          esac
+          BIN="target/${DIR}/browserd"
+          test -x "$BIN"
+          # Baseline x86-64 tidak punya BMI2. Artefak yang memuatnya akan mati
+          # SIGILL di CPU tanpa fitur itu (run 43531270141 mati di `sarx`), dan
+          # kegagalannya baru muncul di mesin pemakai.
+          #
+          # Yang dihitung hanya opcode BMI2. Opcode AVX2 sengaja TIDAK dihitung:
+          # biner lokal yang terbukti jalan di CPU tanpa AVX2 tetap memuat
+          # belasan instruksi AVX2 dari jalur yang dideteksi saat runtime
+          # (cpufeatures), jadi menghitungnya menghasilkan alarm palsu.
+          HITS=$(objdump -d "$BIN" | grep -cE '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx)\b' || true)
+          echo "instruksi BMI2 (di atas baseline x86-64): ${HITS}"
+          if [ "${HITS}" -ne 0 ]; then
+            echo "artefak tidak portabel: ${HITS} instruksi BMI2" >&2
+            exit 1
+          fi
 
       - name: Ukuran target sebelum dibersihkan
         if: always()
