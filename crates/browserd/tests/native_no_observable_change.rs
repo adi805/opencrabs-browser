@@ -137,25 +137,59 @@ async fn skrip_baca_saja_tidak_diklaim_mengubah_dokumen() {
     );
 }
 
-/// Batas yang jujur: skrip halaman **belum** bisa mengubah pohon DOM di mesin
-/// ini. `document` di dalam isolat adalah objek biasa, bukan DOM sungguhan
-/// (`crates/engine/src/native/js.rs`, fungsi `pasang_judul`). Karena itu skrip
-/// yang menulis judul dilaporkan `NoObservableChange`, dan itu **benar**: tidak
-/// ada yang berubah. Tes ini mengunci batasnya supaya ia tidak diam-diam
-/// berubah jadi klaim mampu ketika binding DOM disusulkan tanpa tes.
+/// Skrip halaman **bisa** mengubah pohon DOM: `document.title` di isolat
+/// menulis lewat jembatan ke arena dokumen Rust (`crates/engine/src/native/
+/// js.rs`, operasi `setTitle`), jadi perubahan itu harus terlihat di tanda
+/// terima, bukan ditelan sebagai "tidak ada perubahan".
+///
+/// Tes ini dulu mengunci batas yang berlawanan ("menulis judul belum
+/// menyentuh pohon DOM") karena `document` saat itu objek biasa. Jembatannya
+/// sudah ada, jadi batas itu dibalik: yang dikunci sekarang adalah bahwa
+/// perubahan DOM **dilaporkan**, supaya mutasi yang diam-diam hilang tidak
+/// lolos sebagai sukses.
 #[tokio::test]
-async fn skrip_yang_menulis_judul_belum_menyentuh_pohon_dom() {
+async fn skrip_yang_menulis_judul_mengubah_pohon_dom() {
     let tab = Tab::new();
-    let hasil = tab.kirim(
+    let sebelum = tab.kirim(
         3,
+        "Runtime.evaluate",
+        json!({"expression": "document.title"}),
+    );
+    assert_eq!(
+        sebelum["result"]["value"],
+        json!(""),
+        "dokumen kosong punya judul string kosong, bukan null"
+    );
+
+    let hasil = tab.kirim(
+        4,
         "Runtime.evaluate",
         json!({"expression": "document.title = 'berubah'"}),
     );
     assert_eq!(
         status(&hasil["receipt"]),
-        "NoObservableChange",
-        "menulis ke objek `document` palsu tidak mengubah DOM: {}",
+        "Changed",
+        "menulis judul mengubah dokumen dan wajib dilaporkan: {}",
         hasil["receipt"]
     );
-    assert_eq!(hasil["receipt"]["sesudah"]["judul"], Value::Null);
+    assert_eq!(
+        hasil["receipt"]["sesudah"]["judul"],
+        json!("berubah"),
+        "judul baru harus terbaca dari dokumen, bukan dari isolat saja: {}",
+        hasil["receipt"]
+    );
+    assert!(
+        hasil["receipt"]["delta"]["node"].as_u64().unwrap_or(0) > 0,
+        "elemen `<title>` baru menambah node: {}",
+        hasil["receipt"]
+    );
+
+    // Bukti bahwa yang berubah adalah DOKUMEN, bukan variabel di isolat:
+    // evaluasi berikutnya membaca ulang lewat jembatan yang sama.
+    let ulang = tab.kirim(
+        5,
+        "Runtime.evaluate",
+        json!({"expression": "document.title"}),
+    );
+    assert_eq!(ulang["result"]["value"], json!("berubah"));
 }
