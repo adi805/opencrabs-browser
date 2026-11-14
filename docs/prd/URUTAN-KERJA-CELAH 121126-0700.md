@@ -21,6 +21,11 @@ run in this session; nothing is taken from a document alone.
 - Module sizes that bound the effort column, re-measured 2026-11-13 (`wc -l`):
   `layout.rs` 765, `css.rs` 555, `tab_pool.rs` 550, `gaya.rs` 416, `axtree.rs` 376,
   `paint.rs` 362, `dom.rs` 356, `teks.rs` 315, `js.rs` 190, `mod.rs` 203.
+- The count is a snapshot and it moved. Re-counted 2026-11-14 with the same
+  `awk` command after G10 closed: **thirteen** entries. The DOM entry was
+  rewritten in place rather than deleted, so the number went up by one while the
+  gap itself shrank (see the G10 row). Any row here that cites twelve describes
+  2026-11-13, not today.
 
 ## 1. The twelve, with what each one blocks
 
@@ -35,7 +40,7 @@ run in this session; nothing is taken from a document alone.
 | G7 | AX tree: no chained `aria-labelledby`, no focusable/selected/expanded, no iframe content | `axtree.rs` | AC-006 | G4 for real state values | M |
 | G8 | No `fetch()` inside the isolate | `js.rs` + a daemon policy gate | FR-002, AC-003 (partly) | G10 for binding plumbing | M |
 | G9 | ~~`Runtime.evaluate` returns a string; JS types lost~~ **CLOSED 2026-11-12**: `NilaiJs` keeps the type, objects travel by value, `navigator.webdriver` is boolean `false` | `cdp/src/native_wire` + `js.rs` | AC-017 met, AC-018 met, AC-003 partly | what remains is `objectId`/`callFunctionOn`/`awaitPromise`, named in `CELAH` | S |
-| G10 | `document` inside the isolate is a plain object, not a DOM | `js.rs` + `dom.rs` | AC-003, AC-007, AC-019, AC-020 | G2/G3 (bind an API that is stable) | L |
+| G10 | ~~`document` inside the isolate is a plain object, not a DOM~~ **CLOSED 2026-11-14**: the plain-object half died in W4b (`document` is the tab's real tree, and a JS mutation is visible to `DOM.getDocument` and to the raster). The surface a page script actually touches landed the same day, each item behind a test in `native::js::tests`: `innerHTML` setter and `insertAdjacentHTML` (fragment parsing in `dom.rs`, container-aware for `table`/`tbody`/`tr`/`select`/`template`), `outerHTML` getter, `classList`, `dataset`, `matches`/`closest`, `nextElementSibling`/`previousElementSibling`, `ownerDocument`/`isConnected`, `replaceChildren`, `cloneNode`. What the `CELAH` entry names now is only the narrower remainder: `querySelectorAll` yields an `Array` instead of a live `NodeList`, there is no `document.write`, and `style`/CSSOM cannot be written | `js.rs` + `dom.rs` | AC-003, AC-007, AC-019, AC-020 no longer wait on this row | — | L |
 | G11 | Engine emits no CDP events (`Runtime.consoleAPICalled`, `Page.loadEventFired`, `Network.*`) | `cdp/src/native_wire` event bus | FR-007 clients that wait | producers from G10/G8 | M |
 
 How these eleven rows account for twelve `CELAH` entries: G2 (inheritance and
