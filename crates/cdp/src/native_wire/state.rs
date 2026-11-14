@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use engine::native::layout::Viewport;
 use engine::native::{
-    ColdStore, Document, MemoryColdStore, NilaiJs, NodeId, NodeKind, Snapshot, TabId, TabPool,
-    axtree, paint,
+    ColdStore, Document, LembarLuar, MemoryColdStore, NilaiJs, NodeId, NodeKind, Snapshot, TabId,
+    TabPool, axtree, paint,
 };
 use serde_json::{Map, Value, json};
 
@@ -271,30 +271,33 @@ impl NativeState {
     /// diserahkan lewat [`Self::tangani_ambil`].
     #[must_use]
     pub fn tangani(&self, teks: &str) -> Option<String> {
-        self.kunci().tangani(teks, None, None)
+        self.kunci()
+            .tangani(teks, None, None, LembarJaringan::default())
     }
 
     /// Menjawab satu frame dari soket satu halaman, yang tidak membawa
     /// `sessionId` karena tabnya sudah ditentukan oleh URL soket.
     #[must_use]
     pub fn tangani_halaman(&self, teks: &str, sesi: &str) -> Option<String> {
-        self.kunci().tangani(teks, Some(sesi), None)
+        self.kunci()
+            .tangani(teks, Some(sesi), None, LembarJaringan::default())
     }
 
     /// Menjawab satu frame dengan dokumen jaringan yang sudah diambil lebih
     /// dulu.
     ///
-    /// `ambilan` diisi pemanggil async **sebelum** kunci state diambil, supaya
-    /// satu navigasi yang lambat tidak membekukan tab lain. `None` berarti
-    /// frame ini tidak butuh jaringan.
+    /// `ambilan` dan `gaya` diisi pemanggil async **sebelum** kunci state
+    /// diambil, supaya satu navigasi yang lambat tidak membekukan tab lain.
+    /// `None` berarti frame ini tidak butuh jaringan.
     #[must_use]
     pub fn tangani_ambil(
         &self,
         teks: &str,
         sesi: Option<&str>,
         ambilan: Option<Result<Ambilan, Galat>>,
+        gaya: LembarJaringan,
     ) -> Option<String> {
-        self.kunci().tangani(teks, sesi, ambilan)
+        self.kunci().tangani(teks, sesi, ambilan, gaya)
     }
 
     /// Daftar target dalam bentuk `/json/list` milik Chrome, tanpa URL soket
@@ -319,7 +322,8 @@ impl NativeState {
     }
 
     pub fn buka(&self, url: &str) -> Result<String, Galat> {
-        self.kunci().buat_target(url, None)
+        self.kunci()
+            .buat_target(url, None, LembarJaringan::default())
     }
 
     /// Sama dengan [`Self::buka`], tapi dokumen jaringannya sudah diambil
@@ -328,8 +332,9 @@ impl NativeState {
         &self,
         url: &str,
         ambilan: Option<Result<Ambilan, Galat>>,
+        gaya: LembarJaringan,
     ) -> Result<String, Galat> {
-        self.kunci().buat_target(url, ambilan)
+        self.kunci().buat_target(url, ambilan, gaya)
     }
 
     pub fn tutup(&self, id: &str) -> Result<(), Galat> {
@@ -366,6 +371,7 @@ impl Dalam {
         teks: &str,
         sesi_paksa: Option<&str>,
         ambilan: Option<Result<Ambilan, Galat>>,
+        gaya: LembarJaringan,
     ) -> Option<String> {
         let mut frame: Value = match serde_json::from_str(teks) {
             Ok(nilai) => nilai,
@@ -397,7 +403,7 @@ impl Dalam {
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let hasil = self.jalankan(&metode, &params, sesi.as_deref(), ambilan);
+        let hasil = self.jalankan(&metode, &params, sesi.as_deref(), ambilan, gaya);
         // Notifikasi (tanpa `id`) tidak dijawab.
         let id = id?;
         Some(bingkai(id, hasil))
@@ -409,6 +415,7 @@ impl Dalam {
         params: &Value,
         sesi: Option<&str>,
         ambilan: Option<Result<Ambilan, Galat>>,
+        gaya: LembarJaringan,
     ) -> Result<Value, Galat> {
         match metode {
             "Browser.getVersion" => Ok(json!({
@@ -421,7 +428,7 @@ impl Dalam {
             "Target.getTargets" => Ok(json!({ "targetInfos": self.info_target() })),
             "Target.createTarget" => {
                 let url = param_teks(params, "url")?;
-                Ok(json!({ "targetId": self.buat_target(&url, ambilan)? }))
+                Ok(json!({ "targetId": self.buat_target(&url, ambilan, gaya)? }))
             }
             "Target.closeTarget" => {
                 let id = param_teks(params, "targetId")?;
@@ -446,7 +453,7 @@ impl Dalam {
                 self.lepas(&s)?;
                 Ok(json!({}))
             }
-            "Page.navigate" => self.navigasi(params, sesi, ambilan),
+            "Page.navigate" => self.navigasi(params, sesi, ambilan, gaya),
             "Page.reload" => {
                 let tab = self.tab_dari_sesi(sesi)?;
                 self.muat_ulang(tab)?;
@@ -506,9 +513,13 @@ impl Dalam {
         &mut self,
         url: &str,
         ambilan: Option<Result<Ambilan, Galat>>,
+        gaya: LembarJaringan,
     ) -> Result<String, Galat> {
-        let dok = dokumen_awal(url, ambilan)?;
-        let id = self.pool.buka(&dok.url, &dok.html).map_err(pool_galat)?;
+        let dok = dokumen_awal(url, ambilan, gaya)?;
+        let id = self
+            .pool
+            .buka_dengan(&dok.url, &dok.html, dok.lembar)
+            .map_err(pool_galat)?;
         let judul = self.pool.tab(id).and_then(|t| t.dokumen.judul());
         self.tabs.insert(
             id,
@@ -616,13 +627,14 @@ impl Dalam {
         params: &Value,
         sesi: Option<&str>,
         ambilan: Option<Result<Ambilan, Galat>>,
+        gaya: LembarJaringan,
     ) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
         let url = param_teks(params, "url")?;
-        let dok = dokumen_awal(&url, ambilan)?;
+        let dok = dokumen_awal(&url, ambilan, gaya)?;
         let sebelum = self.sidik(tab)?;
         self.pool
-            .ganti_dokumen(tab, &dok.url, &dok.html)
+            .ganti_dokumen_dengan(tab, &dok.url, &dok.html, dok.lembar)
             .map_err(pool_galat)?;
         let judul = self.pool.tab(tab).and_then(|t| t.dokumen.judul());
         if let Some(meta) = self.tabs.get_mut(&tab) {
@@ -644,6 +656,9 @@ impl Dalam {
                 "contentType": a.content_type,
             })),
             "receipt": banding(&sebelum, &sesudah),
+            // Halaman yang tampak tanpa gaya bisa dijelaskan dari sini: tiap
+            // tautan yang dilewati atau gagal disebut beserta alasannya.
+            "gayaCatatan": dok.catatan_gaya,
         }))
     }
 
@@ -806,7 +821,10 @@ impl Dalam {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-        let raster = paint::lukis_dengan(&t.dokumen, viewport, klip, format)
+        // Lembar gaya eksternal milik tab ikut dilukis. Tanpa ini, halaman
+        // yang gaya-nya datang dari `<link>` akan terlukis tanpa gaya sama
+        // sekali, dan itu justru celah yang sedang ditutup.
+        let raster = paint::lukis_dengan_lembar(&t.dokumen, viewport, klip, format, &t.lembar)
             .map_err(|err| Galat::baru(-32000, format!("tangkapan layar gagal: {err}")))?;
         diabaikan_param.extend(raster.diabaikan.iter().cloned());
         Ok(json!({
@@ -1183,6 +1201,23 @@ pub struct DokumenAwal {
     pub html: String,
     /// Terisi hanya kalau dokumennya datang dari jaringan.
     pub jaringan: Option<Sumber>,
+    /// Stylesheet eksternal yang sudah diambil untuk dokumen ini, urut
+    /// kemunculan `<link>`-nya.
+    pub lembar: Vec<LembarLuar>,
+    /// Tautan yang dilewati atau gagal diambil, beserta alasannya.
+    pub catatan_gaya: Vec<String>,
+}
+
+/// Lembar gaya eksternal yang sudah diambil pemanggil async, sebelum kunci
+/// state dipegang.
+///
+/// Dipisah dari [`Ambilan`] karena keduanya datang dari dua putaran jaringan
+/// yang berbeda: HTML dulu, baru stylesheet-nya (yang URL-nya baru diketahui
+/// setelah HTML diurai).
+#[derive(Debug, Clone, Default)]
+pub struct LembarJaringan {
+    pub lembar: Vec<LembarLuar>,
+    pub catatan: Vec<String>,
 }
 
 /// Mengubah satu URL menjadi dokumen, atau galat yang menyebut apa yang salah.
@@ -1194,12 +1229,15 @@ pub struct DokumenAwal {
 pub fn dokumen_awal(
     url: &str,
     ambilan: Option<Result<Ambilan, Galat>>,
+    gaya: LembarJaringan,
 ) -> Result<DokumenAwal, Galat> {
     if url.is_empty() || url == "about:blank" {
         return Ok(DokumenAwal {
             url: url.to_owned(),
             html: String::new(),
             jaringan: None,
+            lembar: Vec::new(),
+            catatan_gaya: Vec::new(),
         });
     }
     if let Some(sisa) = url.strip_prefix("data:") {
@@ -1216,6 +1254,8 @@ pub fn dokumen_awal(
             url: url.to_owned(),
             html: percent_decode(isi),
             jaringan: None,
+            lembar: Vec::new(),
+            catatan_gaya: Vec::new(),
         });
     }
     if super::jaringan::butuh_jaringan(url) {
@@ -1226,6 +1266,8 @@ pub fn dokumen_awal(
                     url: a.url,
                     html: a.html,
                     jaringan: Some(sumber),
+                    lembar: gaya.lembar,
+                    catatan_gaya: gaya.catatan,
                 })
             }
             Some(Err(galat)) => Err(galat),

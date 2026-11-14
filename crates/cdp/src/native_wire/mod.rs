@@ -16,12 +16,13 @@
 //! Dokumen `http`/`https` diambil lewat [`jaringan`] **sebelum** kunci state
 //! dipegang: satu navigasi yang lambat tidak boleh membekukan tab lain.
 
+pub mod gaya;
 pub mod jaringan;
 pub mod state;
 
 pub use state::{
-    ColdStoreObj, DokumenAwal, Galat, MAKS_TAB, NativeState, PabrikDingin, Sidik, banding,
-    dokumen_awal, pabrik_memori, percent_decode,
+    ColdStoreObj, DokumenAwal, Galat, LembarJaringan, MAKS_TAB, NativeState, PabrikDingin, Sidik,
+    banding, dokumen_awal, pabrik_memori, percent_decode,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -314,8 +315,11 @@ async fn target_baru(State(app): State<App>, uri: Uri) -> Response {
         Some(query) => percent_decode(query),
         None => String::new(),
     };
-    let ambilan = ambil_untuk_url(&url).await;
-    match app.state.buka_dengan(&url, ambilan) {
+    let (ambilan, gaya) = match ambil_untuk_url(&url).await {
+        Some(j) => (Some(j.ambilan), j.gaya),
+        None => (None, LembarJaringan::default()),
+    };
+    match app.state.buka_dengan(&url, ambilan, gaya) {
         Ok(id) => Json(json!({
             "id": id,
             "type": "page",
@@ -429,7 +433,11 @@ async fn layani(socket: WebSocket, state: NativeState, sesi: Option<String>) {
         // Jaringan diambil di sini, sebelum kunci state: frame yang tidak
         // menavigasi ke `http`/`https` tidak menyentuh jaringan sama sekali.
         let ambilan = ambil_untuk_frame(&teks).await;
-        let jawaban = state.tangani_ambil(&teks, sesi.as_deref(), ambilan);
+        let (dokumen, gaya) = match ambilan {
+            Some(j) => (Some(j.ambilan), j.gaya),
+            None => (None, LembarJaringan::default()),
+        };
+        let jawaban = state.tangani_ambil(&teks, sesi.as_deref(), dokumen, gaya);
         if let Some(jawaban) = jawaban
             && tx.send(AxumMessage::Text(jawaban.into())).await.is_err()
         {
@@ -438,19 +446,47 @@ async fn layani(socket: WebSocket, state: NativeState, sesi: Option<String>) {
     }
 }
 
+/// Dokumen jaringan beserta lembar gaya eksternalnya.
+///
+/// Dua putaran, bukan satu: URL stylesheet baru diketahui setelah HTML diurai,
+/// dan `href` relatif harus diselesaikan terhadap URL **setelah** pengalihan.
+struct JaringanDokumen {
+    ambilan: Result<jaringan::Ambilan, Galat>,
+    gaya: LembarJaringan,
+}
+
 /// Mengambil dokumen untuk satu URL kalau URL itu memang butuh jaringan.
-async fn ambil_untuk_url(url: &str) -> Option<Result<jaringan::Ambilan, Galat>> {
+async fn ambil_untuk_url(url: &str) -> Option<JaringanDokumen> {
     if !jaringan::butuh_jaringan(url) {
         return None;
     }
-    Some(jaringan::muat(url, jaringan::Batas::default()).await)
+    Some(ambil_dokumen(url).await)
+}
+
+/// Mengambil dokumen lalu stylesheet-nya.
+///
+/// Kalau dokumennya gagal diambil, tidak ada HTML untuk diurai, jadi tidak ada
+/// tautan yang bisa diambil: `gaya` dibiarkan kosong alih-alih menebak URL.
+async fn ambil_dokumen(url: &str) -> JaringanDokumen {
+    let ambilan = jaringan::muat(url, jaringan::Batas::default()).await;
+    let gaya = match &ambilan {
+        Ok(a) => {
+            let hasil = gaya::ambil(&a.url, &a.html).await;
+            LembarJaringan {
+                lembar: hasil.lembar,
+                catatan: hasil.catatan,
+            }
+        }
+        Err(_) => LembarJaringan::default(),
+    };
+    JaringanDokumen { ambilan, gaya }
 }
 
 /// Sama dengan [`ambil_untuk_url`], tapi membaca URL dari frame JSON-RPC.
 ///
 /// Frame yang bukan navigasi jaringan mengembalikan `None`, termasuk frame
 /// yang bukan JSON: frame rusak dijawab oleh penerjemah, bukan di sini.
-async fn ambil_untuk_frame(teks: &str) -> Option<Result<jaringan::Ambilan, Galat>> {
+async fn ambil_untuk_frame(teks: &str) -> Option<JaringanDokumen> {
     let frame: Value = serde_json::from_str(teks).ok()?;
     let url = match frame.get("method")?.as_str()? {
         "Page.navigate" | "Target.createTarget" => {

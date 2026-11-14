@@ -292,6 +292,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "ureq",
+ "url",
 ]
 
 [[package]]

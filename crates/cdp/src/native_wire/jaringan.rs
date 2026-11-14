@@ -36,6 +36,25 @@ pub const BATAS_CONNECT: Duration = Duration::from_secs(5);
 /// Batas jumlah pengalihan. Sama dengan bawaan Chrome.
 pub const BATAS_REDIRECT: u32 = 5;
 
+/// Batas badan satu lembar gaya.
+///
+/// Satu mebibyte cukup untuk CSS produksi terbesar yang masuk akal (Bootstrap 5
+/// minified ~230 KB). Lembar yang lebih besar **dilewati dengan alasan**, bukan
+/// dipotong: CSS yang terpotong di tengah aturan menghasilkan kaskade yang
+/// salah tanpa satu pun galat, dan itu jauh lebih sulit dilacak daripada
+/// halaman yang jelas tanpa gaya.
+pub const BATAS_BYTE_CSS: usize = 1024 * 1024;
+
+/// Batas waktu satu lembar gaya, lebih pendek dari dokumen: halaman yang CSS-nya
+/// lambat tetap harus bisa dibaca, dan lembar yang belum datang dilewati.
+pub const BATAS_WAKTU_CSS: Duration = Duration::from_secs(5);
+
+/// Jumlah lembar gaya terbanyak yang diambil untuk satu dokumen.
+pub const MAKS_LEMBAR: usize = 16;
+
+/// Total byte CSS terbanyak untuk satu dokumen, dijumlahkan lintas lembar.
+pub const BATAS_TOTAL_CSS: usize = 2 * 1024 * 1024;
+
 /// Batas yang dipakai satu pengambilan. Bisa diperkecil di tes.
 #[derive(Debug, Clone, Copy)]
 pub struct Batas {
@@ -100,6 +119,20 @@ impl Ambilan {
     }
 }
 
+/// Satu lembar gaya yang berhasil diambil, beserta apa yang dikatakan server.
+///
+/// `url` adalah URL **setelah** pengalihan. `teks` sudah didekode menurut
+/// charset yang diklaim server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gaya {
+    pub url: String,
+    pub teks: String,
+    pub status: u16,
+    pub byte: usize,
+    pub charset: String,
+    pub content_type: String,
+}
+
 /// Apakah URL ini butuh jaringan. Pemanggil async memakai ini untuk
 /// memutuskan mengambil dokumen **sebelum** kunci state dipegang.
 #[must_use]
@@ -128,6 +161,93 @@ pub async fn muat(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
 
 /// Versi blocking, dipakai tes dan `spawn_blocking`.
 pub fn muat_blokir(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
+    let jawaban = ambil_badan(url, batas)?;
+    let mime = mime_dari(&jawaban.content_type);
+    if !mime.is_empty() && mime != "text/html" && mime != "application/xhtml+xml" {
+        return Err(Galat::baru(
+            -32000,
+            format!(
+                "'{}' menjawab content-type '{mime}'; mesin ini hanya mengurai \
+                 dokumen HTML, dan mengurai biner jadi pohon kosong akan menyesatkan",
+                jawaban.url
+            ),
+        ));
+    }
+    let charset = charset_dari(&jawaban.content_type).unwrap_or_else(|| "utf-8".to_owned());
+    let byte = jawaban.badan.len();
+    let html = dekode(&jawaban.badan, &charset);
+    Ok(Ambilan {
+        url: jawaban.url,
+        html,
+        status: jawaban.status,
+        byte,
+        charset,
+        content_type: jawaban.content_type,
+    })
+}
+
+/// Mengambil satu lembar gaya di `spawn_blocking`.
+pub async fn muat_css(url: &str, batas: Batas) -> Result<Gaya, Galat> {
+    let url = url.to_owned();
+    let untuk_galat = url.clone();
+    tokio::task::spawn_blocking(move || muat_css_blokir(&url, batas))
+        .await
+        .map_err(|err| {
+            Galat::baru(
+                -32000,
+                format!("pengambilan CSS '{untuk_galat}' gagal di thread: {err}"),
+            )
+        })?
+}
+
+/// Versi blocking [`muat_css`].
+///
+/// `content-type` yang diterima hanya `text/css` atau kosong. Server yang
+/// mengirim stylesheet sebagai `text/plain` atau `application/octet-stream`
+/// akan dilewati dengan nama mime-nya, bukan ditebak: menebak berarti
+/// menjalankan apa pun yang kebetulan berakhiran `.css` sebagai CSS, dan
+/// `text/html` yang disajikan di URL `.css` adalah halaman galat, bukan gaya.
+pub fn muat_css_blokir(url: &str, batas: Batas) -> Result<Gaya, Galat> {
+    let jawaban = ambil_badan(url, batas)?;
+    let mime = mime_dari(&jawaban.content_type);
+    if !mime.is_empty() && mime != "text/css" {
+        return Err(Galat::baru(
+            -32000,
+            format!(
+                "'{}' menjawab content-type '{mime}', bukan 'text/css'; stylesheet \
+                 dilewati alih-alih diurai sebagai CSS",
+                jawaban.url
+            ),
+        ));
+    }
+    let charset = charset_dari(&jawaban.content_type).unwrap_or_else(|| "utf-8".to_owned());
+    let byte = jawaban.badan.len();
+    let teks = dekode(&jawaban.badan, &charset);
+    Ok(Gaya {
+        url: jawaban.url,
+        teks,
+        status: jawaban.status,
+        byte,
+        charset,
+        content_type: jawaban.content_type,
+    })
+}
+
+/// Badan satu jawaban HTTP, sudah dibaca penuh dan dibatasi ukurannya.
+struct Jawaban {
+    url: String,
+    status: u16,
+    content_type: String,
+    badan: Vec<u8>,
+}
+
+/// Satu permintaan GET yang badan dan metadatanya dipakai bersama oleh
+/// pengambilan dokumen dan pengambilan stylesheet.
+///
+/// Status 4xx/5xx tetap diambil badannya, seperti browser: halaman 404 punya
+/// HTML yang perlu dibaca agen, dan stylesheet 404 tetap dilaporkan statusnya
+/// alih-alih diperlakukan sebagai "tidak ada gaya".
+fn ambil_badan(url: &str, batas: Batas) -> Result<Jawaban, Galat> {
     if !butuh_jaringan(url) {
         return Err(Galat::baru(
             -32000,
@@ -140,11 +260,8 @@ pub fn muat_blokir(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
         .redirects(batas.redirect)
         .user_agent(super::USER_AGENT)
         .build();
-    let jawaban = agent.get(url).call();
-    let resp = match jawaban {
+    let resp = match agent.get(url).call() {
         Ok(resp) => resp,
-        // 4xx/5xx tetap punya badan, dan browser merendernya. Yang tidak boleh
-        // adalah melaporkan status 200 untuk halaman yang server bilang 404.
         Err(ureq::Error::Status(_, resp)) => resp,
         Err(ureq::Error::Transport(t)) => {
             return Err(Galat::baru(
@@ -156,22 +273,6 @@ pub fn muat_blokir(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
     let status = resp.status();
     let url_akhir = resp.get_url().to_owned();
     let content_type = resp.header("content-type").unwrap_or("").to_owned();
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if !mime.is_empty() && mime != "text/html" && mime != "application/xhtml+xml" {
-        return Err(Galat::baru(
-            -32000,
-            format!(
-                "'{url_akhir}' menjawab content-type '{mime}'; mesin ini hanya mengurai \
-                 dokumen HTML, dan mengurai biner jadi pohon kosong akan menyesatkan"
-            ),
-        ));
-    }
-    let charset = charset_dari(&content_type).unwrap_or_else(|| "utf-8".to_owned());
     let mut buf = Vec::new();
     let batas_baca = u64::try_from(batas.byte)
         .unwrap_or(u64::MAX)
@@ -190,16 +291,22 @@ pub fn muat_blokir(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
             ),
         ));
     }
-    let byte = buf.len();
-    let html = dekode(&buf, &charset);
-    Ok(Ambilan {
+    Ok(Jawaban {
         url: url_akhir,
-        html,
         status,
-        byte,
-        charset,
         content_type,
+        badan: buf,
     })
+}
+
+/// Mime telanjang dari header `content-type`, tanpa parameter.
+fn mime_dari(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// `charset=` dari header `content-type`, kalau ada.

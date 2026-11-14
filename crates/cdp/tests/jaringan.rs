@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
+use cdp::native_wire::gaya;
 use cdp::native_wire::jaringan::{self, Batas};
 
 /// Server HTTP satu pakai. Menerima `n` koneksi lalu berhenti.
@@ -232,4 +233,309 @@ fn charset_dibaca_dari_header_content_type() {
         Some("windows-1252")
     );
     assert_eq!(jaringan::charset_dari("text/html"), None);
+}
+
+// --- stylesheet eksternal -------------------------------------------------
+
+fn css(badan: &str) -> Vec<u8> {
+    respons(
+        "200 OK",
+        &[("content-type", "text/css; charset=utf-8")],
+        badan.as_bytes(),
+    )
+}
+
+#[test]
+fn muat_css_menerima_text_css_dan_menolak_html() {
+    let alamat = server(2, |jalur| {
+        if jalur == "/gaya.css" {
+            css("body { margin: 0 }")
+        } else {
+            html("<p>halaman galat</p>")
+        }
+    });
+    let url = format!("http://{alamat}/gaya.css");
+    let gaya = jaringan::muat_css_blokir(&url, Batas::default()).expect("css terambil");
+    assert_eq!(gaya.teks, "body { margin: 0 }");
+    assert_eq!(gaya.status, 200);
+    assert_eq!(gaya.url, url);
+
+    // Server yang menjawab `text/html` di URL `.css` mengirim halaman galat,
+    // bukan gaya. Mengurainya sebagai CSS akan menghasilkan kaskade kosong
+    // tanpa satu pun galat.
+    let url = format!("http://{alamat}/salah.css");
+    let galat = jaringan::muat_css_blokir(&url, Batas::default()).expect_err("html harus ditolak");
+    assert!(
+        galat.pesan.contains("text/html"),
+        "pesan harus menyebut mime yang diterima: {}",
+        galat.pesan
+    );
+    assert!(
+        galat.pesan.contains("bukan 'text/css'"),
+        "pesan: {}",
+        galat.pesan
+    );
+}
+
+#[test]
+fn muat_css_membatasi_ukuran_lembar() {
+    let besar = "a{color:red}".repeat(512);
+    let alamat = server(1, move |_| css(&besar));
+    let url = format!("http://{alamat}/besar.css");
+    let batas = Batas {
+        byte: 64,
+        ..Batas::default()
+    };
+    let galat = jaringan::muat_css_blokir(&url, batas).expect_err("lembar besar harus ditolak");
+    assert!(
+        galat.pesan.contains("melebihi batas 64 byte"),
+        "pesan: {}",
+        galat.pesan
+    );
+}
+
+#[tokio::test]
+async fn gaya_jaringan_mengambil_tautan_relatif_dan_melewati_media_print() {
+    let alamat = server(2, |jalur| {
+        if jalur.ends_with("/gaya.css") {
+            css("#k { height: 44px }")
+        } else {
+            html("<p>galat</p>")
+        }
+    });
+    let url = format!("http://{alamat}/artikel/satu");
+    let dokumen = r#"<!doctype html><html><head>
+        <link rel="stylesheet" href="gaya.css">
+        <link rel="stylesheet" href="cetak.css" media="print">
+        <link rel="alternate stylesheet" href="https://cdn.test/luar.css">
+        </head><body><div id="k">isi</div></body></html>"#;
+
+    let hasil = gaya::ambil(&url, dokumen).await;
+    assert_eq!(hasil.lembar.len(), 1, "hanya satu yang layak diambil");
+    // `href` disimpan apa adanya: kaskade mencocokkannya dengan node `<link>`
+    // di pohon, dan URL absolut tidak akan pernah cocok.
+    assert_eq!(hasil.lembar[0].href, "gaya.css");
+    assert_eq!(hasil.lembar[0].teks, "#k { height: 44px }");
+    let catatan = hasil.catatan.join(" | ");
+    assert!(
+        catatan.contains("media=\"print\""),
+        "alasan media print harus tercatat: {catatan}"
+    );
+    assert!(
+        catatan.contains("rel") || catatan.contains("alternate"),
+        "tautan alternate harus tercatat: {catatan}"
+    );
+}
+
+#[tokio::test]
+async fn gaya_jaringan_menyelesaikan_href_relatif_terhadap_url_akhir_pengalihan() {
+    // `/awal` dialihkan ke `/artikel/`, jadi `href="gaya.css"` berarti
+    // `/artikel/gaya.css`. Memakai URL yang diminta akan meminta
+    // `/gaya.css` dan mendapat 404 yang tidak kelihatan sebabnya.
+    let alamat = server(3, |jalur| match jalur {
+        "/awal" => respons("302 Found", &[("location", "/artikel/")], b""),
+        "/artikel/" => html(
+            r#"<html><head><link rel="stylesheet" href="gaya.css"></head><body><p>x</p></body></html>"#,
+        ),
+        "/artikel/gaya.css" => css("p { color: #0000ff }"),
+        _ => respons(
+            "404 Not Found",
+            &[("content-type", "text/plain")],
+            b"tidak ada",
+        ),
+    });
+
+    let url = format!("http://{alamat}/awal");
+    let ambil = jaringan::muat(&url, Batas::default())
+        .await
+        .expect("dokumen");
+    assert_eq!(ambil.url, format!("http://{alamat}/artikel/"), "url akhir");
+
+    let hasil = gaya::ambil(&ambil.url, &ambil.html).await;
+    assert_eq!(hasil.lembar.len(), 1, "catatan: {:?}", hasil.catatan);
+    assert_eq!(hasil.lembar[0].teks, "p { color: #0000ff }");
+}
+
+#[tokio::test]
+async fn gaya_jaringan_ikut_sampai_ke_layar() {
+    // Rantai penuh: HTML + CSS dari server lokal, lalu tangkapan layar lewat
+    // state. Kalau salah satu sambungan lupa meneruskan lembar, halaman akan
+    // terlukis tanpa gaya dan tes ini gagal pada perbandingan piksel.
+    use cdp::native_wire::{LembarJaringan, NativeState};
+    use serde_json::json;
+
+    let alamat = server(2, |jalur| match jalur {
+        "/gaya.css" => css("#k { background-color: #ff0000 }"),
+        _ => html(
+            r#"<html><head><link rel="stylesheet" href="/gaya.css"></head><body><div id="k" style="height:40px;width:40px">isi</div></body></html>"#,
+        ),
+    });
+    let url = format!("http://{alamat}/halaman");
+    let ambil = jaringan::muat(&url, Batas::default())
+        .await
+        .expect("dokumen");
+    let hasil = gaya::ambil(&ambil.url, &ambil.html).await;
+    assert_eq!(hasil.lembar.len(), 1, "catatan: {:?}", hasil.catatan);
+
+    let potret = |lembar: Vec<engine::native::LembarLuar>| {
+        let state = NativeState::baru();
+        let buka =
+            json!({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}});
+        let target = state.tangani(&buka.to_string()).expect("balasan");
+        let target: serde_json::Value = serde_json::from_str(&target).expect("json");
+        let id = target["result"]["targetId"]
+            .as_str()
+            .expect("targetId")
+            .to_owned();
+        let lekat = json!({"id": 2, "method": "Target.attachToTarget", "params": {"targetId": id}});
+        let sesi = state.tangani(&lekat.to_string()).expect("balasan");
+        let sesi: serde_json::Value = serde_json::from_str(&sesi).expect("json");
+        let sesi = sesi["result"]["sessionId"]
+            .as_str()
+            .expect("sessionId")
+            .to_owned();
+
+        let navigasi = json!({
+            "id": 3, "method": "Page.navigate",
+            "params": {"url": url}, "sessionId": sesi,
+        });
+        let jawab = state
+            .tangani_ambil(
+                &navigasi.to_string(),
+                Some(&sesi),
+                Some(Ok(ambil.clone())),
+                LembarJaringan {
+                    lembar,
+                    catatan: hasil.catatan.clone(),
+                },
+            )
+            .expect("balasan navigasi");
+        let jawab: serde_json::Value = serde_json::from_str(&jawab).expect("json");
+        assert!(jawab.get("error").is_none(), "navigasi gagal: {jawab}");
+
+        let potret = json!({
+            "id": 4, "method": "Page.captureScreenshot",
+            "params": {"format": "png", "clip": {"x": 0, "y": 0, "width": 80, "height": 60, "scale": 1}},
+            "sessionId": sesi,
+        });
+        let jawab = state.tangani(&potret.to_string()).expect("balasan potret");
+        let jawab: serde_json::Value = serde_json::from_str(&jawab).expect("json");
+        jawab["result"]["data"].as_str().expect("data").to_owned()
+    };
+
+    let dengan_gaya = potret(hasil.lembar.clone());
+    let tanpa_gaya = potret(Vec::new());
+    assert_ne!(
+        dengan_gaya, tanpa_gaya,
+        "lembar eksternal tidak sampai ke pelukis: raster identik dengan halaman tanpa gaya"
+    );
+}
+
+// --- @import --------------------------------------------------------------
+
+#[test]
+fn impor_urai_bentuk_url_kutip_dan_media() {
+    let (impor, sisa) = gaya::impor_dari(
+        "@import \"a.css\";\n@import url(b.css) screen;\n@import url('c.css') print;\np { color: red }",
+    );
+    assert_eq!(impor.len(), 3, "tiga impor terbaca: {impor:?}");
+    assert_eq!(impor[0].href, "a.css");
+    assert_eq!(impor[0].media, None);
+    assert_eq!(impor[1].href, "b.css");
+    assert_eq!(impor[1].media.as_deref(), Some("screen"));
+    assert_eq!(impor[2].href, "c.css");
+    assert_eq!(impor[2].media.as_deref(), Some("print"));
+    // Pernyataan `@import` dibuang dari teks yang disisakan: setelah isinya
+    // benar-benar disisipkan, catatan "at-rule tidak dijalankan" jadi bohong.
+    assert!(!sisa.contains("@import"), "sisa: {sisa:?}");
+    assert!(sisa.contains("p { color: red }"), "sisa: {sisa:?}");
+}
+
+#[tokio::test]
+async fn impor_relatif_diambil_dan_ditaruh_di_depan_aturan_induk() {
+    let alamat = server(2, |jalur| match jalur {
+        "/dasar.css" => css("@import \"anak.css\";\np { color: #ff0000 }"),
+        "/anak.css" => css("p { height: 7px }"),
+        _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
+    });
+    let dokumen = r#"<html><head><link rel="stylesheet" href="dasar.css"></head><body><p>x</p></body></html>"#;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    assert_eq!(hasil.lembar.len(), 1, "catatan: {:?}", hasil.catatan);
+    let teks = &hasil.lembar[0].teks;
+    let posisi_anak = teks.find("height: 7px").expect("isi impor ikut");
+    let posisi_induk = teks.find("color: #ff0000").expect("aturan induk utuh");
+    assert!(
+        posisi_anak < posisi_induk,
+        "isi @import harus mendahului aturan induk: {teks:?}"
+    );
+    assert!(!teks.contains("@import"), "sisa @import: {teks:?}");
+}
+
+#[tokio::test]
+async fn impor_siklus_berhenti_dan_dicatat() {
+    // A -> B -> A. Tanpa pemutus siklus ini berputar sampai anggaran habis.
+    let alamat = server(2, |jalur| match jalur {
+        "/a.css" => css("@import \"b.css\";\na { height: 1px }"),
+        "/b.css" => css("@import \"a.css\";\nb { height: 2px }"),
+        _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
+    });
+    let dokumen = r#"<html><head><link rel="stylesheet" href="a.css"></head><body></body></html>"#;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    assert_eq!(hasil.lembar.len(), 1);
+    let catatan = hasil.catatan.join(" | ");
+    assert!(
+        catatan.contains("siklus"),
+        "siklus harus dicatat dengan namanya: {catatan}"
+    );
+    assert!(hasil.lembar[0].teks.contains("height: 2px"), "b ikut");
+}
+
+#[tokio::test]
+async fn impor_kedalaman_berlebih_dicatat_bukan_diambil() {
+    // Rantai lima berkas: lembar akar (bukan impor) -> impor 1 -> 2 -> 3 -> 4.
+    // `KEDALAMAN_IMPOR` = 3 berarti tiga tingkat impor boleh, tingkat keempat
+    // dilewati. Akar sengaja tidak dihitung: halaman yang menautkan langsung
+    // lima berkas bertingkat itu bukan impor sedalam lima.
+    let alamat = server(4, |jalur| match jalur {
+        "/1.css" => css("@import \"2.css\";\na{height:1px}"),
+        "/2.css" => css("@import \"3.css\";\nb{height:2px}"),
+        "/3.css" => css("@import \"4.css\";\nc{height:3px}"),
+        "/4.css" => css("@import \"5.css\";\nd{height:4px}"),
+        "/5.css" => css("e{height:5px}"),
+        _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
+    });
+    let dokumen = r#"<html><head><link rel="stylesheet" href="1.css"></head><body></body></html>"#;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    let teks = &hasil.lembar[0].teks;
+    assert!(teks.contains("height:4px"), "impor ketiga ikut: {teks:?}");
+    assert!(
+        !teks.contains("height:5px"),
+        "impor keempat harus dilewati: {teks:?}"
+    );
+    let catatan = hasil.catatan.join(" | ");
+    assert!(
+        catatan.contains("kedalaman"),
+        "alasan kedalaman harus tercatat: {catatan}"
+    );
+}
+
+#[tokio::test]
+async fn impor_berkondisi_media_dicatat_tidak_dijalankan() {
+    let alamat = server(1, |jalur| match jalur {
+        "/dasar.css" => css("@import \"cetak.css\" print;\np{height:5px}"),
+        _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
+    });
+    let dokumen =
+        r#"<html><head><link rel="stylesheet" href="dasar.css"></head><body></body></html>"#;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    let catatan = hasil.catatan.join(" | ");
+    assert!(
+        catatan.contains("print"),
+        "kondisi media harus disebut: {catatan}"
+    );
+    assert_eq!(
+        hasil.lembar[0].teks.trim(),
+        "p{height:5px}",
+        "isi impor berkondisi tidak boleh disisipkan"
+    );
 }

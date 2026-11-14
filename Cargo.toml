@@ -70,6 +70,10 @@ tokio-tungstenite = "0.29"
 # `spawn_blocking`, dan TLS-nya rustls: `deny.toml` melarang openssl.
 # Fitur `charset` dipakai supaya halaman non-UTF8 tidak jadi teks rusak.
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip", "brotli", "charset"] }
+# Penyelesaian URL relatif untuk `href` stylesheet terhadap URL akhir dokumen
+# dan `<base href>`. Sudah ada di lock lewat `ureq`, jadi ini bukan crate baru
+# yang masuk ke tree; yang ditambah hanya deklarasi langsungnya.
+url = "2"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
