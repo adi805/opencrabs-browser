@@ -16,6 +16,7 @@
 //! begitu diukur cukup ganti angkanya dan jumlah tab panas ikut menyesuaikan.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use super::NativeError;
@@ -141,7 +142,21 @@ impl ColdStore for MemoryColdStore {
 pub struct TabPanas {
     pub id: TabId,
     pub url: String,
-    pub dokumen: Document,
+    /// Pohon DOM, dibagi dengan isolat JavaScript lewat [`Arc`].
+    ///
+    /// Disimpan sebagai `Arc<Mutex<..>>`, bukan `Document`, karena skrip
+    /// halaman harus bisa memutasi pohon yang **sama** yang dibaca
+    /// `DOM.getDocument` dan dilukis raster. Dua salinan berarti dua kebenaran
+    /// yang menyimpang, dan penyimpangan itu baru ketahuan saat tangkapan layar
+    /// tidak cocok dengan hasil `querySelector`.
+    ///
+    /// Field-nya privat dan hanya bisa diakses lewat [`TabPanas::dokumen`]
+    /// supaya pinjaman tidak hidup lebih lama dari yang disadari pemanggil.
+    ///
+    /// **Jangan memegang kunci ini sambil menjalankan skrip halaman.**
+    /// Jembatan DOM mengunci pohon yang sama saat skrip berjalan, jadi kunci
+    /// yang ditinggal di sisi Rust akan mengunci diri sendiri.
+    dokumen: Arc<Mutex<Document>>,
     pub isolat: Isolat,
     pub terakhir_dipakai: Instant,
     /// Lembar gaya eksternal milik dokumen ini, urut sesuai `<link>`-nya.
@@ -150,6 +165,25 @@ pub struct TabPanas {
     /// hanya bisa didapat dari jaringan: menghitung ulang berarti mengambil
     /// ulang setiap tangkapan layar.
     pub lembar: Vec<LembarLuar>,
+}
+
+impl TabPanas {
+    /// Membaca pohon. Pinjaman dilepas saat nilai ini jatuh.
+    #[must_use]
+    pub fn dokumen(&self) -> MutexGuard<'_, Document> {
+        kunci(&self.dokumen)
+    }
+
+    /// Salinan [`Arc`] pohon, untuk diserahkan ke isolat baru.
+    #[must_use]
+    pub fn pohon(&self) -> Arc<Mutex<Document>> {
+        Arc::clone(&self.dokumen)
+    }
+}
+
+/// Mengunci pohon satu tab. Poison dipulihkan, bukan diteruskan.
+fn kunci(dokumen: &Arc<Mutex<Document>>) -> MutexGuard<'_, Document> {
+    dokumen.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Alasan tab disingkirkan. Dicatat supaya tes bisa membedakan penyingkiran
@@ -276,9 +310,18 @@ impl<C: ColdStore> TabPool<C> {
         lembar: Vec<LembarLuar>,
     ) -> Result<TabPanas, PoolError> {
         // Layout sengaja tidak dihitung di sini: lihat catatan di `TabPanas`.
-        let dokumen = Document::parse_html(html)?;
-        let isolat = Isolat::new(self.pagu_isolat)?;
-        if let Some(judul) = dokumen.judul() {
+        // Satu pohon, dua pemakai: isolat dan `TabPanas` memegang `Arc` yang
+        // sama. `Isolat::new` sengaja tidak dipakai di sini, karena isolat
+        // tanpa pohon tidak bisa menjawab `document.getElementById`.
+        let dokumen = Arc::new(Mutex::new(Document::parse_html(html)?));
+        let isolat = Isolat::dengan_dokumen(self.pagu_isolat, Arc::clone(&dokumen))?;
+        // Judul dibaca di blok sendiri supaya kuncinya jatuh sebelum
+        // `pasang_judul` menjalankan skrip: jembatan mengunci pohon yang sama.
+        let judul = {
+            let dokumen = kunci(&dokumen);
+            dokumen.judul()
+        };
+        if let Some(judul) = judul {
             isolat.pasang_judul(&judul)?;
         }
         Ok(TabPanas {
@@ -305,14 +348,17 @@ impl<C: ColdStore> TabPool<C> {
         };
 
         let tab = self.panas.remove(korban);
-        let snapshot = Snapshot {
-            id: tab.id,
-            url: tab.url.clone(),
-            judul: tab.dokumen.judul(),
-            html: tab.dokumen.to_html(),
-            jumlah_node: tab.dokumen.jumlah_node(),
-            disingkirkan_pada: epoch_millis(),
-            lembar: tab.lembar.clone(),
+        let snapshot = {
+            let dokumen = kunci(&tab.dokumen);
+            Snapshot {
+                id: tab.id,
+                url: tab.url.clone(),
+                judul: dokumen.judul(),
+                html: dokumen.to_html(),
+                jumlah_node: dokumen.jumlah_node(),
+                disingkirkan_pada: epoch_millis(),
+                lembar: tab.lembar.clone(),
+            }
         };
         self.dingin
             .simpan(&snapshot)
@@ -479,11 +525,11 @@ mod tests {
 
         p.hidupkan(a).unwrap();
         let tab = p.tab(a).expect("tab hidup lagi");
-        assert_eq!(tab.dokumen.jumlah_node(), node_dingin);
+        assert_eq!(tab.dokumen().jumlah_node(), node_dingin);
         assert_eq!(tab.url, "https://a.test");
-        assert_eq!(tab.dokumen.judul().as_deref(), Some("tab"));
+        assert_eq!(tab.dokumen().judul().as_deref(), Some("tab"));
         assert!(
-            !tab.dokumen.nodes().is_empty(),
+            !tab.dokumen().nodes().is_empty(),
             "dokumen dipulihkan ke RAM, bukan cuma metadata"
         );
     }
@@ -565,9 +611,12 @@ mod tests {
         assert_eq!(p.jumlah_dialamat(), 2, "tidak ada tab yang hilang");
         let tab = p.tab(a).expect("tab a panas setelah ganti dokumen");
         assert_eq!(tab.url, "https://a.test/kedua");
-        assert_eq!(tab.dokumen.judul().as_deref(), Some("baru"));
+        assert_eq!(tab.dokumen().judul().as_deref(), Some("baru"));
         assert!(
-            tab.dokumen.teks(tab.dokumen.root()).contains("halo"),
+            {
+                let d = tab.dokumen();
+                d.teks(d.root()).contains("halo")
+            },
             "isi dokumen baru terbaca"
         );
         assert!(

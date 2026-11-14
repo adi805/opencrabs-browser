@@ -480,7 +480,9 @@ async fn metode_belum_ada_menjawab_galat_yang_menyebut_lapisannya() {
         // `DOM.querySelector` dulu di sini; sekarang dijawab sungguhan, jadi
         // yang menguji cabang "belum ada" adalah tumpukan jaringan.
         (4, "Network.enable", "jaringan"),
-        (5, "Input.dispatchMouseEvent", "hands"),
+        // `Input.dispatchMouseEvent` dulu di sini; sekarang dijawab sungguhan,
+        // jadi yang menguji cabang "belum ada" adalah peristiwa papan ketik.
+        (5, "Input.dispatchKeyEvent", "papan ketik"),
     ] {
         let frame = json!({
             "id": nomor,
@@ -933,4 +935,132 @@ async fn tunggu_id(soket: &mut Klien, id: i64) -> Value {
             return nilai;
         }
     }
+}
+
+/// AC-003 lewat protokol sungguhan: mutasi `document` dari `Runtime.evaluate`
+/// harus terlihat oleh `DOM.getDocument`.
+///
+/// Sebelum jembatan W4b, `document` di dalam isolat adalah objek kosong: skrip
+/// bisa menulis `document.title` tanpa mengubah apa pun. Tes ini menuntut
+/// pohon yang **sama**, bukan salinan, jadi ia gagal kalau kedua sisi punya
+/// pohon sendiri.
+#[tokio::test]
+async fn mutasi_dari_runtime_evaluate_terlihat_oleh_dom_get_document() {
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+    let mut soket = sambung(port, "/devtools/browser").await;
+    let sesi = tab_dengan(
+        &mut soket,
+        "<html><body><div id=\"kartu\"><p>lama</p></div></body></html>",
+    )
+    .await;
+
+    let sebelum = minta_cdp_sesi(
+        &mut soket,
+        10,
+        "DOM.getDocument",
+        json!({"depth": -1}),
+        &sesi,
+    )
+    .await;
+    assert!(sebelum.get("error").is_none(), "getDocument: {sebelum}");
+    // Keadaan awal dibuktikan isinya, bukan cuma "tidak ada galat": kalau
+    // pohonnya kosong, mutasi di bawah akan lolos karena apa pun yang ditulis
+    // akan terlihat sebagai "ada".
+    assert!(
+        cari_teks(&sebelum["result"]["root"], "lama"),
+        "teks fixture harus ada sebelum mutasi: {}",
+        sebelum["result"]["root"]
+    );
+
+    // Tulis lewat skrip halaman.
+    let tulis = minta_cdp_sesi(
+        &mut soket,
+        11,
+        "Runtime.evaluate",
+        json!({"expression": "document.getElementById('kartu').textContent = 'baru'"}),
+        &sesi,
+    )
+    .await;
+    assert!(tulis.get("error").is_none(), "evaluate: {tulis}");
+    assert_eq!(
+        tulis["result"]["receipt"]["status"], "Changed",
+        "mutasi harus terbaca sebagai perubahan: {tulis}"
+    );
+
+    let sesudah = minta_cdp_sesi(
+        &mut soket,
+        12,
+        "DOM.getDocument",
+        json!({"depth": -1}),
+        &sesi,
+    )
+    .await;
+    assert!(sesudah.get("error").is_none(), "getDocument: {sesudah}");
+    assert!(
+        cari_teks(&sesudah["result"]["root"], "baru"),
+        "teks baru harus ada di pohon CDP: {}",
+        sesudah["result"]["root"]
+    );
+    assert!(
+        !cari_teks(&sesudah["result"]["root"], "lama"),
+        "teks lama tidak boleh tersisa: {}",
+        sesudah["result"]["root"]
+    );
+
+    // Elemen baru dari `createElement` juga harus menambah pohon.
+    let tambah = minta_cdp_sesi(
+        &mut soket,
+        13,
+        "Runtime.evaluate",
+        json!({"expression":
+            "var s = document.createElement('span');
+             s.textContent = 'tambahan';
+             document.getElementById('kartu').appendChild(s);"}),
+        &sesi,
+    )
+    .await;
+    assert!(tambah.get("error").is_none(), "evaluate: {tambah}");
+
+    let akhir = minta_cdp_sesi(
+        &mut soket,
+        14,
+        "DOM.getDocument",
+        json!({"depth": -1}),
+        &sesi,
+    )
+    .await;
+    assert!(
+        cari_teks(&akhir["result"]["root"], "tambahan"),
+        "elemen baru harus muncul: {}",
+        akhir["result"]["root"]
+    );
+    assert!(
+        hitung_node(&akhir["result"]["root"]) > hitung_node(&sesudah["result"]["root"]),
+        "jumlah node harus bertambah: {} -> {}",
+        hitung_node(&sesudah["result"]["root"]),
+        hitung_node(&akhir["result"]["root"])
+    );
+
+    mesin.stop().expect("berhenti");
+}
+
+/// Menghitung node di satu cabang pohon `DOM.getDocument`.
+fn hitung_node(simpul: &Value) -> usize {
+    let sendiri = usize::from(simpul.is_object());
+    sendiri
+        + simpul["children"]
+            .as_array()
+            .map(|anak| anak.iter().map(hitung_node).sum())
+            .unwrap_or(0)
+}
+
+/// Mencari satu nilai teks di seluruh cabang pohon.
+fn cari_teks(simpul: &Value, dicari: &str) -> bool {
+    if simpul["nodeValue"].as_str() == Some(dicari) {
+        return true;
+    }
+    simpul["children"]
+        .as_array()
+        .is_some_and(|anak| anak.iter().any(|a| cari_teks(a, dicari)))
 }

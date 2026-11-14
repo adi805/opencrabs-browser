@@ -98,6 +98,28 @@ impl LaporanLayout {
         self.terhitung.get(&node)
     }
 
+    /// Kotak terdalam yang menutupi satu titik, untuk hit-test pointer.
+    ///
+    /// `kotak` diisi dalam urutan pre-order (induk sebelum anak), jadi
+    /// pemindaian mundur menemukan **anak terdahulu yang paling dalam**:
+    /// elemen di atas latar, bukan latar yang menutupi seluruh halaman.
+    /// Batas kanan/bawah eksklusif, sama seperti `elementFromPoint` di browser:
+    /// titik tepat di tepi kotak 200x100 milik kotak sebelah, bukan kotak ini.
+    ///
+    /// Yang dikembalikan bisa node teks; pemanggil yang butuh elemen menaiki
+    /// `parent` sendiri, karena pohon tidak ada di sini.
+    #[must_use]
+    pub fn kotak_di(&self, x: f32, y: f32) -> Option<&Kotak> {
+        self.kotak.iter().rev().find(|k| {
+            k.width > 0.0
+                && k.height > 0.0
+                && x >= k.x
+                && x < k.x + k.width
+                && y >= k.y
+                && y < k.y + k.height
+        })
+    }
+
     /// Kotak terbesar menurut luas, berguna untuk memilih elemen utama
     /// sebuah halaman tanpa selektor CSS.
     #[must_use]

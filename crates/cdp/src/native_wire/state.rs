@@ -18,10 +18,10 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use engine::native::layout::Viewport;
+use engine::native::layout::{self, Viewport};
 use engine::native::{
-    ColdStore, Document, LembarLuar, MemoryColdStore, NilaiJs, NodeId, NodeKind, Snapshot, TabId,
-    TabPool, axtree, paint,
+    ColdStore, Document, LembarLuar, MemoryColdStore, NativeError, NilaiJs, NodeId, NodeKind,
+    Snapshot, TabId, TabPool, axtree, paint,
 };
 use serde_json::{Map, Value, json};
 
@@ -132,10 +132,9 @@ impl Galat {
             "Page.captureSnapshot" | "Page.printToPDF" => {
                 "hanya PNG yang bisa dirasterkan; MHTML dan PDF belum ada"
             }
-            "Input.dispatchMouseEvent"
-            | "Input.dispatchKeyEvent"
-            | "Input.insertText"
-            | "Input.dispatchTouchEvent" => "pengiriman peristiwa DOM belum ada; itu lapisan hands",
+            "Input.dispatchKeyEvent" | "Input.insertText" | "Input.dispatchTouchEvent" => {
+                "peristiwa papan ketik dan sentuh belum ada; yang dibangun baru pointer mouse"
+            }
             "DOM.getBoxModel" => {
                 "kotak layout belum memisahkan padding, border, dan margin; \
                  `DOM.getBoxModel` butuh keempatnya, dan mengarangnya jadi kebohongan"
@@ -220,6 +219,11 @@ struct Dalam {
     tabs: BTreeMap<TabId, MetaTab>,
     sesi: BTreeMap<String, TabId>,
     berikut_sesi: u64,
+    /// Sasaran `mousePressed` terakhir, per tab. `click` hanya dikirim kalau
+    /// tombol dilepas di node yang **sama**; tanpa ini, menekan di satu tombol
+    /// lalu melepas di tempat lain akan menghasilkan klik yang tidak pernah
+    /// terjadi di browser sungguhan.
+    tekanan: BTreeMap<TabId, NodeId>,
 }
 
 /// State mesin native, dipakai bersama oleh server dan tes.
@@ -252,6 +256,7 @@ impl NativeState {
                 tabs: BTreeMap::new(),
                 sesi: BTreeMap::new(),
                 berikut_sesi: 1,
+                tekanan: BTreeMap::new(),
             })),
         }
     }
@@ -474,6 +479,7 @@ impl Dalam {
             "DOM.getOuterHTML" => self.dom_luar_html(params, sesi),
             "DOM.resolveNode" => self.dom_simpul(params, sesi),
             "Runtime.evaluate" => self.evaluasi(params, sesi),
+            "Input.dispatchMouseEvent" => self.kirim_mouse(params, sesi),
             // Metode yang tidak mengubah apa pun di mesin ini. Dijawab `{}`
             // karena memang tidak ada yang perlu dilakukan, bukan karena
             // fiturnya ada: mesin ini tidak mengirim peristiwa.
@@ -520,7 +526,7 @@ impl Dalam {
             .pool
             .buka_dengan(&dok.url, &dok.html, dok.lembar)
             .map_err(pool_galat)?;
-        let judul = self.pool.tab(id).and_then(|t| t.dokumen.judul());
+        let judul = self.pool.tab(id).and_then(|t| t.dokumen().judul());
         self.tabs.insert(
             id,
             MetaTab {
@@ -606,11 +612,12 @@ impl Dalam {
             .pool
             .tab(tab)
             .ok_or_else(|| Galat::baru(-32001, format!("target '{}' tidak dikenal", tab.0)))?;
+        let dokumen = t.dokumen();
         Ok(Sidik::baru(
             &t.url,
-            t.dokumen.judul(),
-            t.dokumen.jumlah_node(),
-            &t.dokumen.to_html(),
+            dokumen.judul(),
+            dokumen.jumlah_node(),
+            &dokumen.to_html(),
         ))
     }
 }
@@ -636,7 +643,7 @@ impl Dalam {
         self.pool
             .ganti_dokumen_dengan(tab, &dok.url, &dok.html, dok.lembar)
             .map_err(pool_galat)?;
-        let judul = self.pool.tab(tab).and_then(|t| t.dokumen.judul());
+        let judul = self.pool.tab(tab).and_then(|t| t.dokumen().judul());
         if let Some(meta) = self.tabs.get_mut(&tab) {
             meta.url = dok.url.clone();
             meta.judul = judul;
@@ -674,7 +681,7 @@ impl Dalam {
         self.pool
             .ganti_dokumen(tab, &url, &html)
             .map_err(pool_galat)?;
-        let judul = self.pool.tab(tab).and_then(|t| t.dokumen.judul());
+        let judul = self.pool.tab(tab).and_then(|t| t.dokumen().judul());
         if let Some(meta) = self.tabs.get_mut(&tab) {
             meta.judul = judul;
         }
@@ -693,7 +700,7 @@ impl Dalam {
         }
         let (url, html) = {
             let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-            (t.url.clone(), t.dokumen.to_html())
+            (t.url.clone(), t.dokumen().to_html())
         };
         self.pool
             .ganti_dokumen(tab, &url, &html)
@@ -739,7 +746,7 @@ impl Dalam {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-        Ok(axtree::json_pohon(&t.dokumen))
+        Ok(axtree::json_pohon(&t.dokumen()))
     }
 
     /// `Page.captureScreenshot`: rasterisasi kotak layout menjadi gambar.
@@ -824,7 +831,7 @@ impl Dalam {
         // Lembar gaya eksternal milik tab ikut dilukis. Tanpa ini, halaman
         // yang gaya-nya datang dari `<link>` akan terlukis tanpa gaya sama
         // sekali, dan itu justru celah yang sedang ditutup.
-        let raster = paint::lukis_dengan_lembar(&t.dokumen, viewport, klip, format, &t.lembar)
+        let raster = paint::lukis_dengan_lembar(&t.dokumen(), viewport, klip, format, &t.lembar)
             .map_err(|err| Galat::baru(-32000, format!("tangkapan layar gagal: {err}")))?;
         diabaikan_param.extend(raster.diabaikan.iter().cloned());
         Ok(json!({
@@ -846,6 +853,160 @@ impl Dalam {
         }))
     }
 
+    /// `Input.dispatchMouseEvent`: hit-test kotak layout, lalu jalankan
+    /// pendengar halaman.
+    ///
+    /// Yang dikirim ke skrip halaman bukan "klik" tapi urutan peristiwa yang
+    /// sama dengan browser: `mousedown` saat tombol ditekan, `mouseup` saat
+    /// dilepas, dan `click` **hanya kalau keduanya mendarat di node yang
+    /// sama**. Menekan di satu tombol lalu melepas di tempat lain tidak
+    /// menghasilkan klik di browser sungguhan, dan mesin yang tetap
+    /// mengirimnya akan membuat halaman bereaksi pada klik yang tidak pernah
+    /// terjadi.
+    ///
+    /// Titik di luar semua kotak bukan galat: hasilnya tanda terima dengan
+    /// `target: null` dan nol pendengar. Galat akan memaksa klien membedakan
+    /// "klik di luar" dari "perintahnya salah", dan itu dua hal berbeda.
+    fn kirim_mouse(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
+        let jenis = param_teks(params, "type")?;
+        // Koordinat datang sebagai `f64` dari JSON; layout bekerja di `f32`.
+        // Cast langsung, bukan `try_from`: `f32` tidak mengimplementasikan
+        // `TryFrom<f64>` di std, dan koordinat di luar rentang `f32` memang
+        // tidak mungkin menjadi titik di dalam kotak mana pun.
+        #[allow(clippy::cast_possible_truncation)]
+        let x = params.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let y = params.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let tombol = match params.get("button").and_then(Value::as_str) {
+            None | Some("none") => 0,
+            Some("left") => 0,
+            Some("middle") => 1,
+            Some("right") => 2,
+            Some(lain) => {
+                return Err(Galat::baru(
+                    -32602,
+                    format!("button {lain:?} tidak dikenal: left, middle, right, none"),
+                ));
+            }
+        };
+        let klik = params
+            .get("clickCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if !matches!(
+            jenis.as_str(),
+            "mousePressed" | "mouseReleased" | "mouseMoved"
+        ) {
+            return Err(Galat::baru(
+                -32602,
+                format!(
+                    "type {jenis:?} tidak dikenal; yang didukung: mousePressed, mouseReleased, mouseMoved"
+                ),
+            ));
+        }
+
+        let tab = self.tab_dari_sesi(sesi)?;
+        if self.pool.tab(tab).is_none() {
+            self.pool.hidupkan(tab).map_err(pool_galat)?;
+        }
+        let sasaran = self.sasaran_di(tab, x, y)?;
+        let detail = json!({
+            "button": tombol,
+            "clientX": x,
+            "clientY": y,
+            "detail": klik,
+            "screenX": x,
+            "screenY": y,
+        })
+        .to_string();
+
+        let mut dikirim: Vec<(&str, usize)> = Vec::new();
+        if let Some(node) = sasaran {
+            let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+            match jenis.as_str() {
+                "mousePressed" => {
+                    let n = t
+                        .isolat
+                        .kirim_peristiwa("mousedown", node, &detail)
+                        .map_err(galat_skrip)?;
+                    dikirim.push(("mousedown", n));
+                    self.tekanan.insert(tab, node);
+                }
+                "mouseReleased" => {
+                    let n = t
+                        .isolat
+                        .kirim_peristiwa("mouseup", node, &detail)
+                        .map_err(galat_skrip)?;
+                    dikirim.push(("mouseup", n));
+                    let ditekan = self.tekanan.remove(&tab);
+                    if ditekan == Some(node) {
+                        let n = t
+                            .isolat
+                            .kirim_peristiwa("click", node, &detail)
+                            .map_err(galat_skrip)?;
+                        dikirim.push(("click", n));
+                    }
+                }
+                _ => {
+                    let n = t
+                        .isolat
+                        .kirim_peristiwa("mousemove", node, &detail)
+                        .map_err(galat_skrip)?;
+                    dikirim.push(("mousemove", n));
+                }
+            }
+        } else {
+            // Klik di luar semua kotak: tekanan sebelumnya dibuang, karena
+            // melepas tombol di tempat kosong memang tidak menghasilkan klik.
+            if jenis == "mouseReleased" {
+                self.tekanan.remove(&tab);
+            }
+        }
+
+        let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+        let node = sasaran.map(|n| {
+            let dok = t.dokumen();
+            node_json(&dok, n, 0, 0)
+        });
+        Ok(json!({
+            "target": node,
+            "peristiwa": dikirim
+                .iter()
+                .map(|(tipe, n)| json!({ "type": tipe, "pendengar": n }))
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Node terdalam yang menutupi satu titik, dinaikkan ke elemen terdekat.
+    ///
+    /// Hit-test bekerja pada kotak hasil layout yang **sekarang**, bukan pada
+    /// kotak yang dihitung saat dokumen dimuat: skrip halaman yang mengubah
+    /// ukuran elemen harus menggeser sasaran klik, dan itu yang membuat
+    /// hit-test ini berguna.
+    fn sasaran_di(&mut self, tab: TabId, x: f32, y: f32) -> Result<Option<NodeId>, Galat> {
+        let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
+        let dok = t.dokumen();
+        let viewport = Viewport::new(VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1);
+        let laporan = layout::hitung_dengan(&dok, viewport, &t.lembar)
+            .map_err(|err| Galat::baru(-32000, format!("layout untuk hit-test gagal: {err}")))?;
+        let Some(kotak) = laporan.kotak_di(x, y) else {
+            return Ok(None);
+        };
+        let mut id = kotak.node;
+        // Teks bukan sasaran peristiwa: di browser, klik pada teks menyasar
+        // elemen induknya.
+        while let Some(node) = dok.node(id) {
+            if matches!(node.kind, NodeKind::Element(_)) {
+                return Ok(Some(id));
+            }
+            match node.parent {
+                Some(induk) => id = induk,
+                None => return Ok(None),
+            }
+        }
+        Ok(None)
+    }
+
     fn dokumen(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
         // `depth` bawaan Chrome adalah 1: akar dan anak langsungnya.
@@ -854,7 +1015,8 @@ impl Dalam {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-        Ok(json!({ "root": node_json(&t.dokumen, t.dokumen.root(), kedalaman, 0) }))
+        let dokumen = t.dokumen();
+        Ok(json!({ "root": node_json(&dokumen, dokumen.root(), kedalaman, 0) }))
     }
 
     /// `DOM.querySelector` dan `DOM.querySelectorAll`.
@@ -882,8 +1044,8 @@ impl Dalam {
         }
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
         let hasil = match akar {
-            Some(n) => t.dokumen.pilih_dalam(n, &selektor),
-            None => t.dokumen.pilih(&selektor),
+            Some(n) => t.dokumen().pilih_dalam(n, &selektor),
+            None => t.dokumen().pilih(&selektor),
         }
         .map_err(|err| Galat::baru(-32000, err.to_string()))?;
         if banyak {
@@ -904,7 +1066,7 @@ impl Dalam {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-        let html = t.dokumen.luar_html(id).ok_or_else(|| {
+        let html = t.dokumen().luar_html(id).ok_or_else(|| {
             Galat::baru(
                 -32000,
                 format!("node {id} bukan elemen, jadi tidak punya HTML luar"),
@@ -925,8 +1087,8 @@ impl Dalam {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
         let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
-        let node = t
-            .dokumen
+        let dokumen = t.dokumen();
+        let node = dokumen
             .node(id)
             .ok_or_else(|| Galat::baru(-32000, format!("node {id} tidak ada")))?;
         let tag = node
@@ -1189,6 +1351,15 @@ fn klip_dari(params: &Value) -> Result<Option<paint::Klip>, Galat> {
 
 fn pool_galat(err: engine::native::PoolError) -> Galat {
     Galat::baru(-32000, format!("tab pool: {err}"))
+}
+
+/// Galat dari isolat saat menjalankan pendengar halaman.
+///
+/// Dibedakan dari galat protokol: yang gagal di sini adalah skrip halaman,
+/// bukan perintah klien, jadi kodenya `-32000` (server error) dan pesannya
+/// menyebut skripnya.
+fn galat_skrip(err: NativeError) -> Galat {
+    Galat::baru(-32000, format!("pendengar halaman gagal: {err}"))
 }
 
 /// Dokumen yang siap dipasang ke tab.

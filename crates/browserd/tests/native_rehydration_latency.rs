@@ -140,9 +140,9 @@ fn test_tab_rehydration_latency() {
     let tab = pool.tab(id_dingin).expect("tab hidup");
     assert_eq!(tab.url, "https://a.test");
     assert!(
-        tab.dokumen.jumlah_node() > JUMLAH_DIV,
+        tab.dokumen().jumlah_node() > JUMLAH_DIV,
         "dokumen hasil rehidrasi terlalu kecil: {} node",
-        tab.dokumen.jumlah_node()
+        tab.dokumen().jumlah_node()
     );
     assert_eq!(
         pool.jumlah_dingin().expect("hitung dingin"),

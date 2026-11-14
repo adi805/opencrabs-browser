@@ -62,7 +62,16 @@ pub const CELAH: &[&str] = &[
      tidak ada font fallback per aksara (aksara di luar face diukur selebar \
      `.notdef`), dan tidak ada shaping/kerning/ligatur, jadi teks Arab, \
      Devanagari, atau emoji diukur bukan selebar bentuk aslinya",
-    "peristiwa DOM (klik, input, fokus) belum ada; itu tugas lapisan hands",
+    "peristiwa pointer (`mousedown`, `mouseup`, `click`, `mousemove`) dan \
+     pendengar halaman untuk `click`/`input`/`change`/`focus`/`blur`/`keydown` \
+     sudah ada, tapi peristiwa **papan ketik dan sentuh** belum: \
+     `Input.dispatchKeyEvent` dan `Input.dispatchTouchEvent` masih dijawab \
+     galat, jadi `keydown` hanya bisa dipicu skrip halaman lewat \
+     `dispatchEvent`, bukan lewat input sungguhan. `focus()`/`blur()` hanya \
+     mengirim peristiwanya: tidak ada state fokus, jadi \
+     `document.activeElement` tidak bergerak. Fase tangkap, `once`/`passive`, \
+     dan `composedPath` belum ada, jadi `addEventListener(tipe, fn, true)` \
+     diperlakukan sama dengan `false`",
     "raster melukis latar kotak dan glyph teks, tapi belum melukis gambar, \
      gradien, bayangan, garis (`border`), maupun `border-radius`. Teks dilukis \
      dengan face yang sama seperti pengukuran, jadi tidak ada tebal sintetis: \
@@ -87,12 +96,16 @@ pub const CELAH: &[&str] = &[
      object) dan objek dikirim *by value*, tapi belum ada `objectId`, \
      `Runtime.callFunctionOn`, maupun `awaitPromise`: klien yang menyimpan \
      pegangan objek atau menunggu promise tidak bisa memakainya",
-    "`document` di dalam isolat adalah objek biasa, bukan DOM sungguhan: skrip \
-     yang menulis `document.title` tidak mengubah pohon DOM. `navigator` juga \
-     objek biasa, bukan instance `Navigator`, jadi pemeriksa yang membaca \
-     prototipe bisa membedakannya dari browser sungguhan. Buffer `console` \
-     hidup di global `__log` (non-enumerable, jadi tidak muncul di \
-     `Object.keys(globalThis)`, tapi namanya bisa ditebak)",
+    "`navigator` di dalam isolat adalah objek biasa, bukan instance \
+     `Navigator`, jadi pemeriksa yang membaca prototipe bisa membedakannya dari \
+     browser sungguhan. Buffer `console` hidup di global `__log` \
+     (non-enumerable, jadi tidak muncul di `Object.keys(globalThis)`, tapi \
+     namanya bisa ditebak). `document` sendiri sudah pohon sungguhan sejak \
+     jembatan W4b: mutasi dari skrip halaman terlihat oleh `DOM.getDocument` \
+     dan oleh raster (`native::js::tests::test_js_runtime_dom_mutations`), tapi \
+     cakupannya masih inti DOM (cari, buat, sisip, hapus, teks, atribut, \
+     `children`/`parentNode`, `title`), belum `classList`, `innerHTML` setter, \
+     `dataset`, maupun `insertAdjacentHTML`",
     "mesin tidak mengirim peristiwa CDP (`Runtime.consoleAPICalled`, `Page.loadEventFired`, \
      `Network.*`); klien yang menunggu event akan menunggu selamanya",
     "elemen di dalam `<iframe>` tidak bisa ditelusuri mesin native (AC-015): \
@@ -123,6 +136,17 @@ pub enum NativeError {
 
     #[error("rasterisasi gagal: {0}")]
     Raster(String),
+
+    #[error("operasi DOM ditolak: {0}")]
+    Dom(String),
+
+    /// Skrip berjalan lebih lama dari pagu waktunya lalu dibatalkan.
+    ///
+    /// Dibedakan dari [`Self::Script`] karena penyebabnya bukan kesalahan
+    /// skrip: skrip yang benar pun bisa melewati batas kalau halaman memang
+    /// berat. Pemanggil yang ingin menaikkan batas perlu tahu itu.
+    #[error("skrip melewati batas waktu {0} dan dibatalkan")]
+    BatasWaktu(String),
 }
 
 impl NativeError {
@@ -143,8 +167,16 @@ impl NativeError {
         Self::Script(format!("{err:?}"))
     }
 
+    pub(crate) fn batas_waktu(batas: std::time::Duration) -> Self {
+        Self::BatasWaktu(format!("{} ms", batas.as_millis()))
+    }
+
     pub(crate) fn raster(pesan: impl Into<String>) -> Self {
         Self::Raster(pesan.into())
+    }
+
+    pub(crate) fn dom(pesan: impl Into<String>) -> Self {
+        Self::Dom(pesan.into())
     }
 }
 
