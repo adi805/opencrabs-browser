@@ -67,7 +67,20 @@ jobs:
           key: build-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build
-        run: cargo build --locked --package browserd --profile ${{ inputs.profile || 'release' }}
+        run: |
+          set -o pipefail
+          cargo build --locked --package browserd --profile ${{ inputs.profile || 'release' }} --verbose 2>&1 | tee /tmp/build.log
+
+      - name: Diagnostik perintah rustc
+        if: always()
+        run: |
+          echo "--- variabel yang bisa menimpa RUSTFLAGS ---"
+          env | grep -iE "^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|CARGO_HOME)=" || true
+          echo "--- perintah rustc untuk crate browserd ---"
+          grep -m1 -- "--crate-name browserd " /tmp/build.log \
+            | tr ' ' '\n' \
+            | grep -nE "target-cpu|target-feature|^-[CO]$" \
+            | head -20 || echo "(tidak ditemukan di log)"
 
       - name: Gate portabilitas ISA
         run: |
