@@ -23,6 +23,7 @@
 //! dipegang: satu navigasi yang lambat tidak boleh membekukan tab lain.
 
 pub mod ambil;
+pub mod bingkai;
 pub mod gaya;
 pub mod jaringan;
 pub mod peristiwa;
@@ -44,6 +45,7 @@ use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
+use engine::native::Document;
 use engine::native::ambil::Pengambil;
 use engine::{Engine, EngineError, EngineInfo, LaunchSpec, Penggerak};
 use futures_util::{SinkExt, StreamExt};
@@ -530,15 +532,44 @@ async fn ambil_dokumen(url: &str) -> JaringanDokumen {
             let hasil = gaya::ambil(&a.url, &a.html).await;
             let mut catatan = hasil.catatan;
             let font = unduh_font(&a.url, &a.html, &hasil.lembar, &mut catatan).await;
+            // Dokumen `<iframe>` diambil setelah stylesheet: iframe bukan
+            // prasyarat tampilan induk, jadi induk tidak menunggu anaknya
+            // lebih lama dari yang perlu.
+            let (bingkai, catatan_bingkai) = ambil_bingkai(&a.url, &a.html).await;
             LembarJaringan {
                 lembar: hasil.lembar,
                 catatan,
                 font,
+                bingkai,
+                catatan_bingkai,
             }
         }
         Err(_) => LembarJaringan::default(),
     };
     JaringanDokumen { ambilan, gaya }
+}
+
+/// Mengambil dokumen anak untuk setiap `<iframe>` same-origin.
+///
+/// Pohon induk diurai di sini sekali lagi, sama seperti `unduh_font`: `src`
+/// relatif harus diselesaikan terhadap URL **setelah** pengalihan, dan pohon
+/// yang dipakai kaskade belum ada saat pengambilan ini berjalan. Kalau HTML
+/// tidak bisa diurai, tidak ada iframe yang bisa dipanggil, jadi hasilnya
+/// kosong.
+async fn ambil_bingkai(dasar: &str, html: &str) -> (Vec<(String, String)>, Vec<String>) {
+    let dokumen = match Document::parse_html(html) {
+        Ok(dok) => dok,
+        Err(err) => {
+            return (
+                Vec::new(),
+                vec![format!(
+                    "iframe tidak diambil: pohon induk gagal diurai: {err}"
+                )],
+            );
+        }
+    };
+    let hasil = bingkai::ambil(dasar, &dokumen).await;
+    (hasil.dokumen, hasil.catatan)
 }
 
 /// Mengunduh byte setiap `@font-face` dokumen lalu memasangnya.

@@ -21,4 +21,5 @@ thiserror.workspace = true
 tiny-skia.workspace = true
 ttf-parser.workspace = true
 tracing.workspace = true
+url.workspace = true
 zune-jpeg.workspace = true

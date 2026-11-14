@@ -239,11 +239,34 @@ fn hitung_penuh(
     eksternal: &[LembarLuar],
     font: std::sync::Arc<super::teks::KumpulanFont>,
 ) -> Result<LaporanLayout, NativeError> {
+    hitung_sub(doc, doc.root(), viewport, eksternal, font, 0)
+}
+
+/// Kedalaman maksimum dokumen `<iframe>` yang ditata bersarang.
+///
+/// Iframe di dalam iframe sah, tapi tanpa batas ia jadi jalan memutar untuk
+/// menghabiskan waktu: satu halaman bisa memuat ratusan iframe bersarang.
+/// Yang lebih dalam dari ini dilaporkan, bukan ditata.
+const KEDALAMAN_BINGKAI_MAKS: usize = 8;
+
+/// Layout satu pohon dokumen, mulai dari `akar_dokumen`.
+///
+/// Dipakai dua kali: sekali untuk dokumen induk, sekali per `<iframe>` dengan
+/// akar dokumen anak dan viewport sebesar kotak iframe-nya. Karena batasnya
+/// parameter, tidak ada jalur kedua yang harus dirawat terpisah dari jalur
+/// utama.
+fn hitung_sub(
+    doc: &Document,
+    akar_dokumen: NodeId,
+    viewport: Viewport,
+    eksternal: &[LembarLuar],
+    font: std::sync::Arc<super::teks::KumpulanFont>,
+    kedalaman: usize,
+) -> Result<LaporanLayout, NativeError> {
     let mut taffy: TaffyTree<KonteksTeks> = TaffyTree::new();
     let mut peta: HashMap<NodeId, taffy::NodeId> = HashMap::new();
     let mut laporan = LaporanLayout::default();
 
-    let akar_dokumen = doc.root();
     // Kaskade dibangun SEKALI per dokumen. Mengurai stylesheet per elemen
     // akan mengulang pekerjaan yang sama sebanyak jumlah node.
     // `@media` dievaluasi dengan viewport yang sedang dipakai, bukan default:
@@ -262,15 +285,11 @@ fn hitung_penuh(
     // Gaya terhitung juga dibangun sekali: pewarisan turun dari akar, dan
     // `em`/`rem` butuh ukuran font induk yang baru diketahui setelah induk
     // dihitung.
-    let pohon = PohonGaya::hitung(doc, &kaskade);
+    let pohon = PohonGaya::hitung_dari(doc, &kaskade, akar_dokumen);
     laporan.terhitung = pohon.salin_terhitung();
 
     let mut anak_teratas = Vec::new();
-    for &anak in &doc
-        .node(akar_dokumen)
-        .map(|n| n.children.clone())
-        .unwrap_or_default()
-    {
+    for anak in doc.anak_tata(akar_dokumen) {
         if let Some(id) = tempatkan(
             &mut taffy,
             &font,
@@ -335,6 +354,66 @@ fn hitung_penuh(
     let mut kotak = Vec::new();
     kumpulkan(&taffy, &peta, doc, akar_dokumen, 0.0, 0.0, &mut kotak)?;
     laporan.kotak = kotak;
+
+    // Dokumen `<iframe>` ditata setelah dokumen ini selesai, karena ukuran
+    // kotak iframe baru diketahui di situ. Isinya sengaja **tidak** masuk
+    // taffy induk: `<iframe>` adalah elemen diganti, jadi tinggi isinya tidak
+    // mengubah tinggi kotaknya. Kotak anak digeser sebesar posisi iframe-nya,
+    // sehingga koordinatnya tetap absolut terhadap viewport induk dan
+    // hit-test tidak perlu tahu soal bingkai.
+    if kedalaman < KEDALAMAN_BINGKAI_MAKS {
+        let bingkai: Vec<NodeId> = doc
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.tag() == Some("iframe") && n.bingkai.is_some())
+            .map(|(i, _)| i)
+            .filter(|&id| {
+                // Hanya iframe milik pohon ini, bukan milik dokumen lain yang
+                // kebetulan ada di arena yang sama.
+                doc.akar_pohon(id) == akar_dokumen
+            })
+            .collect();
+        for iframe in bingkai {
+            let Some(kotak) = laporan.kotak_untuk(iframe) else {
+                continue;
+            };
+            let Some(akar_anak) = doc.bingkai(iframe) else {
+                continue;
+            };
+            if kotak.width <= 0.0 || kotak.height <= 0.0 {
+                laporan.diabaikan.push(format!(
+                    "iframe {iframe}: kotak {}x{}, isinya tidak ditata",
+                    kotak.width, kotak.height
+                ));
+                continue;
+            }
+            let sub = hitung_sub(
+                doc,
+                akar_anak,
+                Viewport::new(kotak.width, kotak.height),
+                eksternal,
+                std::sync::Arc::clone(&font),
+                kedalaman + 1,
+            )?;
+            for mut k in sub.kotak {
+                k.x += kotak.x;
+                k.y += kotak.y;
+                laporan.kotak.push(k);
+            }
+            laporan.gaya.extend(sub.gaya);
+            laporan.terhitung.extend(sub.terhitung);
+            laporan.teks.extend(sub.teks);
+            laporan.teks_tersembunyi.extend(sub.teks_tersembunyi);
+            laporan.catatan_kaskade.extend(sub.catatan_kaskade);
+            laporan.diabaikan.extend(sub.diabaikan);
+        }
+    } else {
+        laporan.diabaikan.push(format!(
+            "kedalaman iframe melewati {KEDALAMAN_BINGKAI_MAKS}, sisanya tidak ditata"
+        ));
+    }
+
     Ok(laporan)
 }
 
@@ -406,7 +485,19 @@ fn tempatkan(
             .map_or(super::gaya::UKURAN_FONT_AWAL, |g| g.ukuran_font),
         ukuran_font_akar: pohon.ukuran_font_akar(),
     };
-    let gaya = baca_gaya(&deklarasi, konteks, id, laporan);
+    let mut gaya = baca_gaya(&deklarasi, konteks, id, laporan);
+    // `<iframe>` adalah elemen diganti: tanpa ukuran dari CSS ia memakai
+    // 300x150 seperti browser. Tanpa ini kotaknya nol karena tidak punya
+    // anak di pohon terang, dan isi dokumen anaknya tidak akan pernah
+    // mendapat ruang untuk ditata.
+    if node.tag() == Some("iframe") {
+        if !deklarasi.iter().any(|(n, _)| n == "width") {
+            gaya.taffy.size.width = Dimension::length(300.0);
+        }
+        if !deklarasi.iter().any(|(n, _)| n == "height") {
+            gaya.taffy.size.height = Dimension::length(150.0);
+        }
+    }
     laporan.gaya.insert(id, deklarasi);
     if !gaya.tampil {
         return Ok(None);
@@ -415,7 +506,7 @@ fn tempatkan(
     let daun = taffy.new_leaf(gaya.taffy).map_err(NativeError::layout)?;
     peta.insert(id, daun);
 
-    for anak in node.children.clone() {
+    for anak in doc.anak_tata(id) {
         if let Some(c) = tempatkan(taffy, font, doc, pohon, anak, peta, laporan)? {
             taffy.add_child(daun, c).map_err(NativeError::layout)?;
         }
@@ -432,9 +523,9 @@ fn kumpulkan(
     ofset_y: f32,
     out: &mut Vec<Kotak>,
 ) -> Result<(), NativeError> {
-    let Some(node) = doc.node(id) else {
+    if doc.node(id).is_none() {
         return Ok(());
-    };
+    }
 
     let (mut x, mut y) = (ofset_x, ofset_y);
     if let Some(tid) = peta.get(&id) {
@@ -450,7 +541,7 @@ fn kumpulkan(
         });
     }
 
-    for anak in node.children.clone() {
+    for anak in doc.anak_tata(id) {
         kumpulkan(taffy, peta, doc, anak, x, y, out)?;
     }
     Ok(())

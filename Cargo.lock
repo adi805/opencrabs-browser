@@ -543,6 +543,7 @@ dependencies = [
  "tiny-skia",
  "tracing",
  "ttf-parser",
+ "url",
  "zune-jpeg",
 ]
 

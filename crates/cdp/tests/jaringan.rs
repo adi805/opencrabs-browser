@@ -408,6 +408,12 @@ async fn gaya_jaringan_ikut_sampai_ke_layar() {
                     lembar,
                     catatan: hasil.catatan.clone(),
                     font: std::sync::Arc::new(engine::native::teks::KumpulanFont::baru()),
+                    // Tes ini tidak menguji iframe, jadi tidak ada dokumen
+                    // anak yang diserahkan. Ditulis eksplisit, bukan
+                    // `..Default::default()`, supaya field baru berikutnya
+                    // tetap memaksa tes ini dilihat ulang.
+                    bingkai: Vec::new(),
+                    catatan_bingkai: Vec::new(),
                 },
             )
             .expect("balasan navigasi");

@@ -219,6 +219,10 @@ struct MetaTab {
     url: String,
     judul: Option<String>,
     id_target: String,
+    /// Iframe yang dilewati atau gagal diambil untuk dokumen yang sedang
+    /// terbuka. Disimpan per tab, bukan global: dua tab bisa membuka dua
+    /// halaman yang iframe-nya berbeda.
+    catatan_bingkai: Vec<String>,
 }
 
 struct Dalam {
@@ -562,6 +566,10 @@ impl Dalam {
             .pool
             .buka_dengan(&dok.url, &dok.html, dok.lembar, dok.font)
             .map_err(pool_galat)?;
+        // Iframe dipasang sesudah dokumen induk ada: pohonnya yang dipakai
+        // memutuskan iframe mana yang boleh dimuat, dan pohon itu baru lahir
+        // di `buka_dengan`.
+        let catatan_bingkai = self.pool.pasang_bingkai_dari(id, &dok.url, &dok.bingkai);
         let judul = self.pool.tab(id).and_then(|t| t.dokumen().judul());
         self.tabs.insert(
             id,
@@ -569,6 +577,7 @@ impl Dalam {
                 url: dok.url,
                 judul,
                 id_target: id.0.to_string(),
+                catatan_bingkai,
             },
         );
         Ok(id.0.to_string())
@@ -693,6 +702,10 @@ impl Dalam {
         self.pool
             .ganti_dokumen_dengan(tab, &dok.url, &dok.html, dok.lembar, dok.font)
             .map_err(pool_galat)?;
+        let catatan_bingkai = self.pool.pasang_bingkai_dari(tab, &dok.url, &dok.bingkai);
+        if let Some(meta) = self.tabs.get_mut(&tab) {
+            meta.catatan_bingkai = catatan_bingkai.clone();
+        }
         let judul = self.pool.tab(tab).and_then(|t| t.dokumen().judul());
         if let Some(meta) = self.tabs.get_mut(&tab) {
             meta.url = dok.url.clone();
@@ -726,6 +739,14 @@ impl Dalam {
             self.peristiwa
                 .kirim(sesi, Domain::Page, peristiwa::muat_selesai(waktu));
         }
+        // Catatan iframe dari dua sumber: yang gagal diambil sebelum dokumen
+        // lahir, dan yang ditolak saat dipasang. Keduanya dikirim, karena
+        // iframe kosong yang tidak dijelaskan terlihat seperti halaman yang
+        // kehilangan isinya.
+        let mut catatan_bingkai = dok.catatan_bingkai;
+        if let Some(meta) = self.tabs.get(&tab) {
+            catatan_bingkai.extend(meta.catatan_bingkai.iter().cloned());
+        }
         let sesudah = self.sidik(tab)?;
         Ok(json!({
             "frameId": frame_id(tab),
@@ -744,6 +765,9 @@ impl Dalam {
             // Halaman yang tampak tanpa gaya bisa dijelaskan dari sini: tiap
             // tautan yang dilewati atau gagal disebut beserta alasannya.
             "gayaCatatan": dok.catatan_gaya,
+            // Iframe yang dilewati atau gagal diambil. Halaman yang tampak
+            // kehilangan isinya bisa dijelaskan dari sini tanpa menebak.
+            "bingkaiCatatan": catatan_bingkai,
         }))
     }
 
@@ -1531,6 +1555,13 @@ pub struct DokumenAwal {
     pub lembar: Vec<LembarLuar>,
     /// Tautan yang dilewati atau gagal diambil, beserta alasannya.
     pub catatan_gaya: Vec<String>,
+    /// Dokumen `<iframe>` yang sudah diambil: `(url final, html)`.
+    ///
+    /// Dipisah dari [`Self::html`] karena ia bukan bagian dokumen induk: ia
+    /// dokumen lain yang punya akar pohonnya sendiri di arena yang sama.
+    pub bingkai: Vec<(String, String)>,
+    /// Iframe yang dilewati atau gagal diambil, beserta alasannya.
+    pub catatan_bingkai: Vec<String>,
     /// Face webfont `@font-face` dokumen ini, sudah dipasang dan siap dipakai
     /// pengukur maupun pelukis. Kosong kalau halaman tidak mendeklarasikan
     /// `@font-face`.
@@ -1546,6 +1577,10 @@ pub struct DokumenAwal {
 #[derive(Debug, Clone, Default)]
 pub struct LembarJaringan {
     pub lembar: Vec<LembarLuar>,
+    /// Dokumen `<iframe>` yang sudah diambil, `(url final, html)`.
+    pub bingkai: Vec<(String, String)>,
+    /// Iframe yang dilewati atau gagal diambil, beserta alasannya.
+    pub catatan_bingkai: Vec<String>,
     /// Face webfont yang byte-nya sudah diunduh bersama stylesheet.
     ///
     /// Ikut di sini, bukan diambil saat melukis: pengambilan font butuh
@@ -1572,6 +1607,8 @@ pub fn dokumen_awal(
             jaringan: None,
             lembar: Vec::new(),
             catatan_gaya: Vec::new(),
+            bingkai: Vec::new(),
+            catatan_bingkai: Vec::new(),
             font: std::sync::Arc::new(engine::native::teks::KumpulanFont::baru()),
         });
     }
@@ -1591,6 +1628,8 @@ pub fn dokumen_awal(
             jaringan: None,
             lembar: Vec::new(),
             catatan_gaya: Vec::new(),
+            bingkai: Vec::new(),
+            catatan_bingkai: Vec::new(),
             font: std::sync::Arc::new(engine::native::teks::KumpulanFont::baru()),
         });
     }
@@ -1604,6 +1643,8 @@ pub fn dokumen_awal(
                     jaringan: Some(sumber),
                     lembar: gaya.lembar,
                     catatan_gaya: gaya.catatan,
+                    bingkai: gaya.bingkai,
+                    catatan_bingkai: gaya.catatan_bingkai,
                     font: gaya.font,
                 })
             }
@@ -1659,6 +1700,10 @@ fn node_json(doc: &Document, id: NodeId, kedalaman: i64, level: i64) -> Value {
         NodeKind::Doctype => (10, "html".to_owned(), ""),
         NodeKind::Element(tag) => (1, tag.to_uppercase(), ""),
         NodeKind::Text(teks) => (3, "#text".to_owned(), teks.as_str()),
+        // Shadow root tidak pernah muncul di `children` host-nya, jadi jalur
+        // ini hanya tercapai kalau pemanggil meminta nomornya langsung. Tipe
+        // 11 adalah `DOCUMENT_FRAGMENT_NODE`, sama seperti Chrome.
+        NodeKind::ShadowRoot { .. } => (11, "#document-fragment".to_owned(), ""),
     };
     let mut map = Map::new();
     map.insert("nodeId".to_owned(), json!(id));
@@ -1674,15 +1719,37 @@ fn node_json(doc: &Document, id: NodeId, kedalaman: i64, level: i64) -> Value {
         }
         map.insert("attributes".to_owned(), Value::Array(rata));
     }
-    map.insert("childNodeCount".to_owned(), json!(n.children.len()));
+    // Isi dokumen `<iframe>` bukan anak pohon terang: ia tinggal di
+    // `node.bingkai`, dan itulah sebabnya `children` saja membuat iframe
+    // yang berisi terlihat kosong. Chrome menaruh dokumen anak sebagai satu
+    // node `#document` di bawah elemen iframe, jadi bentuknya diikuti di sini
+    // supaya klien yang sudah menangani iframe tidak perlu jalur khusus.
+    let bingkai = n.bingkai.filter(|b| doc.node(*b).is_some());
+    let jumlah_anak = n.children.len() + usize::from(bingkai.is_some());
+    map.insert("childNodeCount".to_owned(), json!(jumlah_anak));
     let turun = kedalaman < 0 || level < kedalaman;
-    if turun && !n.children.is_empty() {
-        let anak: Vec<Value> = n
+    if turun && jumlah_anak > 0 {
+        let mut anak: Vec<Value> = n
             .children
             .iter()
             .map(|c| node_json(doc, *c, kedalaman, level + 1))
             .collect();
+        if let Some(b) = bingkai {
+            anak.push(node_json(doc, b, kedalaman, level + 1));
+        }
         map.insert("children".to_owned(), Value::Array(anak));
+    }
+    // Shadow root tidak pernah masuk `children` host-nya, jadi ia dikirim
+    // lewat `shadowRoots`, persis seperti Chrome. Tanpa ini, isi shadow yang
+    // sudah ditata dan dilukis tidak akan pernah terlihat oleh otomasi, dan
+    // itulah yang diminta AC-016.
+    if let Some(bayang) = n.bayang
+        && turun
+    {
+        map.insert(
+            "shadowRoots".to_owned(),
+            Value::Array(vec![node_json(doc, bayang, kedalaman, level + 1)]),
+        );
     }
     Value::Object(map)
 }

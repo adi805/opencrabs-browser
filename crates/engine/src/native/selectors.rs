@@ -486,6 +486,10 @@ fn urai_nth(isi: &str) -> Result<Pola, GalatSelektor> {
 
 impl Document {
     /// Seluruh elemen yang cocok dengan selektor, urut dokumen.
+    ///
+    /// Ini pandangan **otomasi**: isi shadow root (terbuka maupun tertutup)
+    /// dan isi dokumen `<iframe>` yang sudah dipasang ikut ditemukan. Skrip
+    /// halaman memakai [`Self::pilih_terang`], yang berhenti di batas pohon.
     pub fn pilih(&self, selektor: &str) -> Result<Vec<NodeId>, GalatSelektor> {
         let daftar = urai(selektor)?;
         let mut out = Vec::new();
@@ -512,6 +516,72 @@ impl Document {
         let mut out = Vec::new();
         for (id, node) in self.nodes().iter().enumerate() {
             if node.tag().is_none() || !di_bawah(self, akar, id) {
+                continue;
+            }
+            if daftar.iter().any(|k| cocok_kompleks(self, id, &k.bagian)) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Seperti [`Self::pilih`], tapi **berhenti di batas pohon**: isi shadow
+    /// root dan dokumen `<iframe>` tidak ikut.
+    ///
+    /// Ini jalur skrip halaman. Otomasi memakai [`Self::pilih`], yang menembus
+    /// keduanya. Kalau dua jalur ini disatukan, `mode: "closed"` kehilangan
+    /// artinya: `document.querySelector` akan bisa membaca isi shadow root
+    /// tertutup, dan itu justru hook yang `AC-016` minta tidak bocor.
+    pub fn pilih_terang(&self, selektor: &str) -> Result<Vec<NodeId>, GalatSelektor> {
+        let daftar = urai(selektor)?;
+        let mut out = Vec::new();
+        for (id, node) in self.nodes().iter().enumerate() {
+            if node.tag().is_none() || !self.terlihat_skrip(id) {
+                continue;
+            }
+            if daftar.iter().any(|k| cocok_kompleks(self, id, &k.bagian)) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Elemen pertama yang cocok di pohon terang.
+    pub fn pilih_satu_terang(&self, selektor: &str) -> Result<Option<NodeId>, GalatSelektor> {
+        let daftar = urai(selektor)?;
+        for (id, node) in self.nodes().iter().enumerate() {
+            if node.tag().is_none() || !self.terlihat_skrip(id) {
+                continue;
+            }
+            if daftar.iter().any(|k| cocok_kompleks(self, id, &k.bagian)) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Elemen yang cocok di dalam subtree `akar`, dibatasi ke pohon yang sama.
+    ///
+    /// Dipakai `element.querySelector`. `akar` yang berada di dalam shadow root
+    /// mencari di dalam shadow root itu saja; elemen di dokumen induk mencari
+    /// di pohon terang saja. Itu perilaku `querySelector` yang sesungguhnya:
+    /// pencarian tidak pernah menyeberang batas pohon, bahkan ke bawah.
+    pub fn pilih_dalam_terang(
+        &self,
+        akar: NodeId,
+        selektor: &str,
+    ) -> Result<Vec<NodeId>, GalatSelektor> {
+        if self.node(akar).is_none() {
+            return Err(GalatSelektor::baru(format!("node {akar} tidak ada")));
+        }
+        let daftar = urai(selektor)?;
+        let pohon = self.akar_pohon(akar);
+        let mut out = Vec::new();
+        for (id, node) in self.nodes().iter().enumerate() {
+            if node.tag().is_none() || !di_bawah(self, akar, id) {
+                continue;
+            }
+            if self.akar_pohon(id) != pohon {
                 continue;
             }
             if daftar.iter().any(|k| cocok_kompleks(self, id, &k.bagian)) {
@@ -652,6 +722,7 @@ fn posisi_anak(doc: &Document, id: NodeId) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::ModeBayang;
 
     fn dok(html: &str) -> Document {
         Document::parse_html(html).expect("html uji harus terurai")
@@ -836,5 +907,52 @@ mod tests {
             doc.pilih_dalam(9999, "p").is_err(),
             "node di luar arena harus galat, bukan senyap kosong"
         );
+    }
+
+    #[test]
+    fn otomasi_menembus_shadow_root_tertutup_skrip_tidak() {
+        let mut doc = dok("<div id=\"host\"></div>");
+        let host = doc.cari_id("host").unwrap();
+        let akar = doc.pasang_bayang(host, ModeBayang::Tertutup).unwrap();
+        let dalam = doc.buat_elemen("span");
+        doc.set_atribut(dalam, "class", "rahasia").unwrap();
+        doc.set_teks(dalam, "isi").unwrap();
+        doc.tambah_anak(akar, dalam).unwrap();
+
+        // Otomasi: `Document::pilih` melihat isi shadow root tertutup.
+        assert_eq!(doc.pilih(".rahasia").unwrap(), vec![dalam]);
+        assert_eq!(doc.pilih_satu("span").unwrap(), Some(dalam));
+        // Termasuk saat dibatasi ke host-nya: shadow root tetap turunan host.
+        assert_eq!(doc.pilih_dalam(host, ".rahasia").unwrap(), vec![dalam]);
+
+        // Skrip halaman: tidak terlihat, karena pohonnya berbeda.
+        assert!(doc.pilih_terang(".rahasia").unwrap().is_empty());
+        assert_eq!(doc.pilih_satu_terang("span").unwrap(), None);
+        assert!(
+            doc.pilih_dalam_terang(host, ".rahasia").unwrap().is_empty(),
+            "host ada di pohon terang, isi shadow root tidak"
+        );
+
+        // Dari dalam shadow root, `querySelector` melihat pohonnya sendiri dan
+        // tidak menyeberang keluar.
+        assert_eq!(
+            doc.pilih_dalam_terang(akar, ".rahasia").unwrap(),
+            vec![dalam]
+        );
+        assert!(doc.pilih_dalam_terang(akar, "#host").unwrap().is_empty());
+    }
+
+    #[test]
+    fn otomasi_menembus_dokumen_iframe_yang_sudah_dipasang() {
+        let mut doc = dok("<body><iframe id=\"f\"></iframe></body>");
+        let f = doc.cari_id("f").unwrap();
+        doc.pasang_bingkai(f, "<p class=\"dalam\">isi anak</p>")
+            .unwrap();
+
+        assert_eq!(doc.pilih(".dalam").unwrap().len(), 1);
+        assert_eq!(doc.pilih_dalam(f, "p").unwrap().len(), 1);
+        // Skrip halaman induk tidak bisa menyeberang ke dokumen anak.
+        assert!(doc.pilih_terang(".dalam").unwrap().is_empty());
+        assert!(doc.pilih_dalam_terang(f, "p").unwrap().is_empty());
     }
 }

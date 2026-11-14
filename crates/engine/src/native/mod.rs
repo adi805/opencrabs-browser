@@ -27,6 +27,7 @@
 
 pub mod ambil;
 pub mod axtree;
+pub mod bingkai;
 pub mod css;
 pub mod dom;
 pub mod gaya;
@@ -37,8 +38,9 @@ pub mod selectors;
 pub mod tab_pool;
 pub mod teks;
 
+pub use bingkai::{Muatan, asal, rencana, selesaikan};
 pub use css::{FontFace, Kaskade, LembarLuar, Tautan};
-pub use dom::{Document, Node, NodeId, NodeKind};
+pub use dom::{Document, ModeBayang, Node, NodeId, NodeKind};
 pub use js::{Isolat, NilaiJs, PaguIsolat};
 pub use layout::{Kotak, LaporanLayout, Viewport};
 pub use selectors::{GalatSelektor, Kombinator, Kompleks, OpAtribut, Pola, Sederhana};
@@ -102,12 +104,15 @@ pub const CELAH: &[&str] = &[
      itu, bukan pembesaran gambar hasil), `captureBeyondViewport`, dan \
      `fromSurface` (dicatat, hasilnya sama karena mesin software cuma punya \
      satu permukaan)",
-    "pohon aksesibilitas belum mencakup konten di dalam `<iframe>`: iframe \
-     belum dimuat sama sekali (`html5ever` hanya mem-parse dokumen induk), \
-     jadi tidak ada dokumen anak yang bisa dijadikan pohon. `aria-labelledby` \
-     berantai dan status *focusable*/*selected*/*expanded* sudah dihitung dari \
-     atribut dokumen sejak W7; yang belum adalah *focused*, karena mesin ini \
-     belum punya state fokus",
+    "pohon aksesibilitas belum mencakup dokumen anak yang tidak dimuat: isi \
+     `<iframe>` ikut ke pohon hanya kalau pemanggil sudah menyerahkan HTML-nya \
+     lewat `Document::pasang_bingkai`, karena mesin ini tidak membuka soket \
+     sendiri. Iframe lintas asal, `sandbox`, `allow`, dan `csp` tidak dibaca, \
+     jadi dokumen anak yang lolos memuat dengan hak penuh, dan kedalaman \
+     bingkai dibatasi 8. `aria-labelledby` berantai dan status \
+     *focusable*/*selected*/*expanded* sudah dihitung dari atribut dokumen \
+     sejak W7; yang belum adalah *focused*, karena mesin ini belum punya \
+     state fokus",
     "`fetch()` di dalam isolat hanya bisa lewat jalur yang dipasang pemanggil \
      (`native::ambil::Pengambil`); tanpa hook ia menolak semua. Jawabannya \
      objek biasa, bukan `Promise`: `await fetch(...)` dan `await r.text()` \
@@ -137,16 +142,25 @@ pub const CELAH: &[&str] = &[
      karena tidak ada jalur dorong dari mesin ke soket. `Runtime.exceptionThrown`, \
      `Page.frameNavigated`, `DOM.documentUpdated`, dan `Log.entryAdded` belum \
      ada, dan `Network.*` hanya melaporkan dokumen navigasi, bukan subresource",
-    "elemen di dalam `<iframe>` tidak bisa ditelusuri mesin native (AC-015): \
-     `html5ever` hanya mem-parse dokumen induk, isi `<iframe src>` tidak dimuat \
-     dan tidak di-parse, jadi kueri selektor maupun pohon AX berhenti di batas \
-     iframe. Penelusuran iframe yang berjalan hari ini hanya milik adapter \
-     `chrome-full` (`browserd/src/penanam.rs`)",
-    "shadow root tidak bisa ditembus mesin native (AC-016): `selectors.rs` hanya \
-     berjalan di pohon dokumen terang, `attachShadow`/`shadowRoot` tidak ada di \
-     isolat, jadi elemen di dalam shadow root terbuka maupun tertutup tidak \
-     terlihat oleh kueri selektor dan tidak bisa diklik sintetis. Yang berjalan \
-     hari ini hanya adapter `chrome-full`",
+    "`<iframe>` diambil oleh daemon, bukan oleh crate ini: `engine` tidak \
+     membuka soket, jadi byte dokumen anak tetap diserahkan pemanggil lewat \
+     `native::bingkai::rencana` lalu `Document::pasang_bingkai`. Yang \
+     mengisinya adalah `cdp::native_wire::bingkai`, dan batasnya di sana: satu \
+     tingkat saja (iframe di dalam iframe tidak diambil), hanya same-origin, \
+     maksimal 8 iframe per dokumen, 4 MiB per dokumen, 12 MiB total, dan 8 \
+     detik per pengambilan. Yang sudah berjalan: kueri selektor, layout, \
+     raster, pohon AX, dan `DOM.getDocument` menembus dokumen anak, `srcdoc` \
+     menang atas `src`, dan iframe lintas asal ditolak beserta alasannya. Yang \
+     belum: `sandbox`/`allow`/`csp` tidak dibaca, dan \
+     `contentDocument`/`contentWindow` tidak ada di isolat, jadi skrip halaman \
+     tidak bisa menyentuh dokumen anak",
+    "shadow root tertutup tidak terlihat skrip halaman, dan itu memang \
+     spesifikasinya, bukan celah: `selectors.rs` punya dua jalur, \
+     `pilih_terang` untuk skrip halaman yang berhenti di batas pohon, dan \
+     `pilih` untuk otomasi yang menembusnya. Yang belum: `<slot>` dan \
+     `assignedNodes` (isi bayangan tidak diproyeksikan), `:host`/`::slotted`/ \
+     `:host-context` belum dikenali parser selektor, dan `elementFromPoint` \
+     belum menembus bayangan",
 ];
 
 #[derive(Debug, thiserror::Error)]

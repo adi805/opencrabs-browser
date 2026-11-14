@@ -45,6 +45,10 @@ fn retensi_dom(doc: &Document) -> usize {
         total += n.children.capacity() * size_of::<usize>();
         match &n.kind {
             NodeKind::Element(t) | NodeKind::Text(t) => total += string_heap(t),
+            // Mode bayang adalah enum tanpa isi heap, jadi tidak ada yang
+            // ditambahkan. Ditulis eksplisit supaya `match` ini tetap
+            // lengkap kalau `ShadowRoot` kelak membawa data.
+            NodeKind::ShadowRoot { .. } => {}
             NodeKind::Document | NodeKind::Doctype => {}
         }
     }

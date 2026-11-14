@@ -106,16 +106,26 @@ impl PohonGaya {
     /// nilainya baru diketahui setelah akar selesai dihitung.
     #[must_use]
     pub fn hitung(doc: &Document, kaskade: &Kaskade) -> Self {
+        Self::hitung_dari(doc, kaskade, doc.root())
+    }
+
+    /// Seperti [`Self::hitung`], tapi dimulai dari `akar_dokumen`.
+    ///
+    /// Dipakai dokumen `<iframe>`: pohon gaya dihitung dari akar dokumen anak,
+    /// bukan dari akar arena. Tanpa parameter ini, layout anak akan mewarisi
+    /// gaya dari dokumen induk yang bukan induknya.
+    #[must_use]
+    pub fn hitung_dari(doc: &Document, kaskade: &Kaskade, akar_dokumen: NodeId) -> Self {
         let mut coba = Self::default();
         coba.turun(
             doc,
             kaskade,
-            doc.root(),
+            akar_dokumen,
             GayaTerhitung::default(),
             UKURAN_FONT_AWAL,
         );
         let akar = coba
-            .elemen_akar(doc)
+            .elemen_akar(doc, akar_dokumen)
             .and_then(|id| coba.gaya(id))
             .map_or(UKURAN_FONT_AWAL, |g| g.ukuran_font);
 
@@ -123,14 +133,14 @@ impl PohonGaya {
             akar,
             ..Self::default()
         };
-        pohon.turun(doc, kaskade, doc.root(), GayaTerhitung::default(), akar);
+        pohon.turun(doc, kaskade, akar_dokumen, GayaTerhitung::default(), akar);
         pohon
     }
 
     /// Elemen akar dokumen, yaitu elemen pertama di bawah node dokumen
     /// (`html` pada dokumen normal). `rem` diukur terhadap elemen ini.
-    fn elemen_akar(&self, doc: &Document) -> Option<NodeId> {
-        doc.node(doc.root())?
+    fn elemen_akar(&self, doc: &Document, akar_dokumen: NodeId) -> Option<NodeId> {
+        doc.node(akar_dokumen)?
             .children
             .iter()
             .copied()
@@ -150,7 +160,10 @@ impl PohonGaya {
         self.gaya.insert(id, gaya.clone());
         self.deklarasi.insert(id, deklarasi);
 
-        for &anak in doc.node(id).map(|n| &n.children).into_iter().flatten() {
+        // Anak komposit: pohon terang ditambah isi shadow root, kalau ada.
+        // Gaya waris menyeberang ke shadow root seperti di browser, dan
+        // itulah kenapa jalurnya sama dengan anak biasa.
+        for anak in doc.anak_tata(id) {
             self.turun(doc, kaskade, anak, gaya.clone(), akar);
         }
     }

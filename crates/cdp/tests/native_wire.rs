@@ -833,6 +833,134 @@ async fn page_capture_screenshot_melayani_png_jpeg_webp_dan_menolak_format_lain(
     mesin.stop().expect("berhenti");
 }
 
+/// Server HTTP yang melayani dua jalur: halaman induk dan dokumen iframe.
+///
+/// Satu server, dua jalur, karena iframe di mesin ini hanya dimuat kalau
+/// asalnya sama dengan induknya. Dua port berbeda akan membuat iframe-nya
+/// lintas asal, dan tesnya lalu membuktikan penolakan, bukan pemuatan.
+fn server_induk_dan_anak() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("port bebas");
+    let alamat = listener.local_addr().expect("alamat").to_string();
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok((mut soket, _)) = listener.accept() else {
+                return;
+            };
+            let jalur = {
+                let mut pembaca = std::io::BufReader::new(soket.try_clone().expect("klon soket"));
+                let mut baris = String::new();
+                let mut jalur = String::from("/");
+                let mut nomor = 0;
+                while std::io::BufRead::read_line(&mut pembaca, &mut baris).unwrap_or(0) > 0 {
+                    if nomor == 0 {
+                        jalur = baris.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                    }
+                    nomor += 1;
+                    if baris.trim().is_empty() {
+                        break;
+                    }
+                    baris.clear();
+                }
+                jalur
+            };
+            let badan: &[u8] = if jalur == "/anak" {
+                b"<html><body><p id=\"dalam\">isi anak</p></body></html>"
+            } else {
+                b"<html><body><h1>induk</h1><iframe src=\"/anak\"></iframe></body></html>"
+            };
+            let kepala = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\
+                 content-type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+                badan.len()
+            );
+            let _ = std::io::Write::write_all(&mut soket, kepala.as_bytes());
+            let _ = std::io::Write::write_all(&mut soket, badan);
+        }
+    });
+    alamat
+}
+
+/// Iframe same-origin benar-benar dimuat: isinya masuk DOM, pohon AX, dan
+/// raster, tanpa satu pun panggilan manual ke `pasang_bingkai`.
+///
+/// Ini bukti AC-015 di level protokol, bukan di level pustaka: yang diuji
+/// adalah jalur `Page.navigate` yang mengambil dokumen anak sendiri.
+#[tokio::test]
+async fn iframe_same_origin_dimuat_oleh_navigasi() {
+    let asal = server_induk_dan_anak();
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+
+    let mut a = sambung(port, "/devtools/browser").await;
+    let dibuat = minta_cdp(
+        &mut a,
+        1,
+        "Target.createTarget",
+        json!({"url": "about:blank"}),
+    )
+    .await;
+    let id = dibuat["result"]["targetId"]
+        .as_str()
+        .expect("targetId")
+        .to_owned();
+    let mut p = sambung(port, &format!("/devtools/page/{id}")).await;
+    let sesi = minta_cdp(
+        &mut p,
+        2,
+        "Target.attachToTarget",
+        json!({"targetId": id, "flatten": true}),
+    )
+    .await["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
+
+    let nav = minta_cdp(
+        &mut p,
+        3,
+        "Page.navigate",
+        json!({"url": format!("http://{asal}/induk")}),
+    )
+    .await;
+    assert!(
+        nav.get("error").is_none(),
+        "navigasi induk harus berhasil: {nav}"
+    );
+    assert!(
+        nav["result"]["bingkaiCatatan"]
+            .as_array()
+            .expect("bingkaiCatatan")
+            .is_empty(),
+        "iframe same-origin tidak boleh dicatat sebagai dilewati: {nav}"
+    );
+
+    // DOM: isi dokumen anak terlihat oleh otomasi. `DOM.querySelector` di
+    // mesin ini memakai `Document::pilih`, yang menembus batas dokumen.
+    let dom = minta_cdp(&mut p, 4, "DOM.getDocument", json!({"depth": -1})).await;
+    let teks = dom.to_string();
+    assert!(
+        teks.contains("isi anak"),
+        "isi iframe harus ada di pohon DOM: {teks}"
+    );
+
+    // Raster: teks anak benar-benar dilukis. Kalau layout atau paint masih
+    // berhenti di batas iframe, halaman ini keluar sebagai kotak kosong dan
+    // pemeriksaan berikut gagal.
+    let potret = minta_cdp(
+        &mut p,
+        5,
+        "Page.captureScreenshot",
+        json!({"format": "png"}),
+    )
+    .await;
+    let data = potret["result"]["data"].as_str().expect("data png");
+    let png = cdp::base64::dekode(data).expect("base64 sah");
+    assert!(!png.is_empty(), "screenshot tidak boleh kosong");
+
+    let _ = sesi;
+    mesin.stop().expect("berhenti");
+}
+
 /// Server HTTP yang sengaja lambat, dengan pemberitahuan saat permintaannya
 /// benar-benar sudah diterima.
 ///
@@ -1108,4 +1236,101 @@ fn cari_teks(simpul: &Value, dicari: &str) -> bool {
     simpul["children"]
         .as_array()
         .is_some_and(|anak| anak.iter().any(|a| cari_teks(a, dicari)))
+}
+
+/// Isi `closed` shadow root dikirim ke otomasi, tapi tidak terlihat oleh
+/// skrip halaman.
+///
+/// Ini AC-016 di level protokol: dua klien yang berbeda membaca dokumen yang
+/// sama dengan hasil berbeda, dan perbedaannya datang dari `Document::pilih`
+/// versus isolat, bukan dari dua jalur yang kebetulan berbeda.
+#[tokio::test]
+async fn shadow_root_tertutup_terbaca_otomasi_tapi_tidak_oleh_skrip() {
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+
+    let mut a = sambung(port, "/devtools/browser").await;
+    let dibuat = minta_cdp(
+        &mut a,
+        1,
+        "Target.createTarget",
+        json!({"url": "about:blank"}),
+    )
+    .await;
+    let id = dibuat["result"]["targetId"]
+        .as_str()
+        .expect("targetId")
+        .to_owned();
+    let mut p = sambung(port, &format!("/devtools/page/{id}")).await;
+    // Sesi dilampirkan supaya frame sesudahnya memakai jalur yang sama
+    // dengan klien sungguhan. Isinya tidak dibaca: `Page.setDocumentContent`
+    // di tes ini bekerja pada tab, bukan pada sesi.
+    let _sesi = minta_cdp(
+        &mut p,
+        2,
+        "Target.attachToTarget",
+        json!({"targetId": id, "flatten": true}),
+    )
+    .await["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
+
+    minta_cdp(
+        &mut p,
+        3,
+        "Page.setDocumentContent",
+        json!({
+            "frameId": id,
+            "html": "<html><body><div id=\"tuan\"></div></body></html>",
+        }),
+    )
+    .await;
+
+    // Bayangan dipasang lewat skrip halaman, sama seperti aplikasi sungguhan.
+    let pasang = minta_cdp(
+        &mut p,
+        4,
+        "Runtime.evaluate",
+        json!({
+            "expression": "var d = document.getElementById('tuan'); \
+                var s = d.attachShadow({mode: 'closed'}); \
+                var p = document.createElement('p'); \
+                p.id = 'dalam-bayang'; \
+                p.textContent = 'isi bayang'; \
+                s.appendChild(p); 'ok'",
+        }),
+    )
+    .await;
+    assert!(pasang.get("error").is_none(), "attachShadow: {pasang}");
+
+    // Skrip halaman: `closed` berarti tidak ada jalan masuk. Kalau ini
+    // mengembalikan elemen, artinya isolat membocorkan pohon bayangan dan
+    // AC-016 justru dilanggar, bukan dipenuhi.
+    let cari = minta_cdp(
+        &mut p,
+        5,
+        "Runtime.evaluate",
+        json!({"expression": "document.getElementById('tuan').shadowRoot === null"}),
+    )
+    .await;
+    assert_eq!(
+        cari["result"]["result"]["value"],
+        json!(true),
+        "skrip halaman tidak boleh melihat shadowRoot tertutup: {cari}"
+    );
+
+    // Otomasi: `DOM.getDocument` membawa `shadowRoots`, dan isinya ada.
+    let dom = minta_cdp(&mut p, 6, "DOM.getDocument", json!({"depth": -1})).await;
+    let teks = dom.to_string();
+    assert!(
+        teks.contains("shadowRoots"),
+        "pohon DOM harus membawa shadowRoots: {teks}"
+    );
+    assert!(
+        teks.contains("dalam-bayang") || teks.contains("isi bayang"),
+        "isi shadow root harus terbaca otomasi: {teks}"
+    );
+
+    mesin.stop().expect("berhenti");
 }

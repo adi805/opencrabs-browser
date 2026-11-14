@@ -371,7 +371,17 @@ pub fn pohon(doc: &Document) -> Vec<AxNode> {
             disabled,
             checked,
         });
-        let mut anak: Vec<NodeId> = node.children.clone();
+        // Anak komposit, sama seperti yang ditata dan dilukis: pohon terang,
+        // isi shadow root, lalu isi dokumen `<iframe>` kalau ada.
+        //
+        // Node dokumen milik bingkai sengaja tidak dijadikan simpul AX
+        // sendiri. Pembaca pohon ini menelusuri satu pohon; menyisipkan
+        // dokumen kedua di tengahnya hanya menambah simpul tanpa peran yang
+        // tidak bisa dipetakan ke apa pun di DOM.
+        let mut anak: Vec<NodeId> = doc.anak_tata(id);
+        if let Some(dok_anak) = doc.bingkai(id) {
+            anak.extend(doc.anak_tata(dok_anak));
+        }
         anak.reverse();
         for c in anak {
             anak_dari.push((Some(nomor.clone()), c));

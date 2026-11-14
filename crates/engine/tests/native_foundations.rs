@@ -175,10 +175,22 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         // encoder-nya lossless, jadi `quality` tidak berpengaruh. Kalau baris
         // ini hilang, daftar mengklaim keluaran WebP setara Chrome.
         "`webp` di sini",
-        // Batas AX yang masih terbuka: isi `<iframe>`. Kalau baris ini hilang,
-        // daftar mengklaim pohon aksesibilitas sudah mencakup dokumen anak,
-        // padahal iframe belum dimuat sama sekali.
-        "pohon aksesibilitas belum mencakup konten di dalam `<iframe>`",
+        // Batas AX yang masih terbuka setelah penelusuran iframe masuk: mesin
+        // tidak memuat dokumen anak sendiri. Kalau baris ini hilang, daftar
+        // mengklaim iframe dimuat otomatis, padahal byte-nya harus diserahkan
+        // pemanggil.
+        "pohon aksesibilitas belum mencakup dokumen anak yang tidak dimuat",
+        // Batas AC-015 yang masih terbuka setelah daemon mengambil dokumen
+        // anak: satu tingkat, hanya same-origin, dan `sandbox`/`allow`/`csp`
+        // tidak dibaca. Kalau baris ini hilang, daftar mengklaim iframe
+        // bertingkat dan lintas asal ikut dimuat, atau kebijakan keamanannya
+        // dihormati, padahal tidak satu pun dari itu benar.
+        "`<iframe>` diambil oleh daemon, bukan oleh crate ini",
+        // Batas AC-016 yang masih terbuka: yang tidak terlihat skrip halaman
+        // adalah root tertutup, dan itu spesifikasi, bukan kekurangan. Kalau
+        // baris ini hilang, daftar mengklaim mesin masih buta terhadap seluruh
+        // shadow root padahal otomasi sudah menembusnya.
+        "`pilih_terang` untuk skrip halaman yang berhenti di batas pohon",
     ] {
         assert!(
             semua.contains(wajib),
@@ -275,4 +287,18 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         !semua.contains("belum menghitung `aria-labelledby`"),
         "detail AX sudah dihitung, jangan kembalikan kalimat lamanya: {semua}"
     );
+    // Kalimat lama AC-015 dan AC-016 sudah tidak benar: dokumen `<iframe>`
+    // ditelusuri selektor, layout, raster, dan pohon AX, dan shadow root
+    // tertutup terbuka bagi otomasi. Kalau salah satunya kembali, pembaca
+    // mengira mesin masih buta di kedua batas itu.
+    for usang in [
+        "tidak bisa ditelusuri mesin native (AC-015)",
+        "shadow root tidak bisa ditembus mesin native (AC-016)",
+        "`attachShadow`/`shadowRoot` tidak ada di isolat",
+    ] {
+        assert!(
+            !semua.contains(usang),
+            "penelusuran iframe dan shadow root sudah ada, jangan kembalikan `{usang}`: {semua}"
+        );
+    }
 }

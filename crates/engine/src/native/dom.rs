@@ -26,6 +26,36 @@ pub enum NodeKind {
     /// Nama tag dalam huruf kecil, mis. `div`.
     Element(String),
     Text(String),
+    /// Akar pohon bayangan. Bukan elemen: ia tidak punya tag, tidak punya
+    /// kotak sendiri, dan tidak pernah muncul di `children` host-nya.
+    ShadowRoot {
+        mode: ModeBayang,
+    },
+}
+
+/// Mode shadow root, sesuai `attachShadow({ mode })`.
+///
+/// Bedanya bukan soal penyimpanan, karena keduanya disimpan sama. Bedanya
+/// siapa yang boleh **melihat**: `element.shadowRoot` hanya menjawab untuk
+/// mode terbuka, sementara kueri otomasi menembus keduanya. Tanpa pemisahan
+/// itu, `mode: "closed"` cuma nama tanpa arti.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeBayang {
+    /// `mode: "open"`.
+    Terbuka,
+    /// `mode: "closed"`.
+    Tertutup,
+}
+
+impl ModeBayang {
+    /// Ejaan mode seperti yang dipakai `attachShadow`.
+    #[must_use]
+    pub fn nama(self) -> &'static str {
+        match self {
+            Self::Terbuka => "open",
+            Self::Tertutup => "closed",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +65,15 @@ pub struct Node {
     pub attrs: Vec<(String, String)>,
     pub parent: Option<NodeId>,
     pub children: Vec<NodeId>,
+    /// Shadow root milik node ini, kalau ada. Disimpan di host, bukan di
+    /// `children`, karena isi shadow bukan anak pohon terang: `children`,
+    /// `textContent`, dan `to_html` harus tetap melihat dokumen tanpa isi
+    /// bayangan, sama seperti browser.
+    pub bayang: Option<NodeId>,
+    /// Dokumen anak hasil muatan `<iframe>` milik node ini, kalau ada.
+    /// Disimpan terpisah dari `children` karena `<iframe>` adalah elemen
+    /// diganti: isinya tidak ikut `textContent` induk.
+    pub bingkai: Option<NodeId>,
 }
 
 impl Node {
@@ -91,6 +130,8 @@ impl Document {
             attrs: Vec::new(),
             parent: None,
             children: Vec::new(),
+            bayang: None,
+            bingkai: None,
         }];
         let akar = 0;
         for anak in dom.document.children.borrow().iter() {
@@ -251,6 +292,11 @@ impl Document {
                 }
             }
             NodeKind::Doctype => out.push_str("<!DOCTYPE html>"),
+            // Isi shadow root tidak pernah ada di `children` host-nya, jadi
+            // jalur ini tidak tercapai dari `to_html`. Ditulis eksplisit
+            // supaya `match` tetap lengkap dan pembaca tidak mengira isi
+            // bayangan ikut diserialisasi.
+            NodeKind::ShadowRoot { .. } => {}
             NodeKind::Text(t) => escape_teks(t, out),
             NodeKind::Element(tag) => {
                 out.push('<');
@@ -295,6 +341,8 @@ impl Document {
             attrs: Vec::new(),
             parent: None,
             children: Vec::new(),
+            bayang: None,
+            bingkai: None,
         });
         id
     }
@@ -307,6 +355,8 @@ impl Document {
             attrs: Vec::new(),
             parent: None,
             children: Vec::new(),
+            bayang: None,
+            bingkai: None,
         });
         id
     }
@@ -343,7 +393,10 @@ impl Document {
         let Some(induk_node) = self.nodes.get(induk) else {
             return Err(NativeError::dom(format!("induk {induk} tidak ada")));
         };
-        if !matches!(&induk_node.kind, NodeKind::Document | NodeKind::Element(_)) {
+        if !matches!(
+            &induk_node.kind,
+            NodeKind::Document | NodeKind::Element(_) | NodeKind::ShadowRoot { .. }
+        ) {
             return Err(NativeError::dom(format!(
                 "node {induk} bukan wadah, tidak bisa punya anak"
             )));
@@ -488,6 +541,175 @@ impl Document {
     }
 }
 
+/// Pohon bayangan dan dokumen `<iframe>`.
+///
+/// Keduanya sama-sama pohon yang **tidak** ada di `children` host-nya, dan
+/// keduanya disimpan di arena yang sama. Itu pilihan sadar: nomor node tetap
+/// global, jadi selektor, layout, dan pohon aksesibilitas bisa menelusuri
+/// keduanya tanpa tipe baru di mana-mana. Yang membedakan hanya siapa yang
+/// boleh melihat: kueri otomasi menembus batas, skrip halaman tidak.
+impl Document {
+    /// Memasang shadow root di bawah `host`.
+    ///
+    /// Ditolak kalau `host` bukan elemen atau sudah punya shadow root: satu
+    /// host hanya boleh punya satu, dan `attachShadow` kedua di browser
+    /// melempar galat, bukan mengganti yang lama.
+    pub fn pasang_bayang(&mut self, host: NodeId, mode: ModeBayang) -> Result<NodeId, NativeError> {
+        match self.nodes.get(host) {
+            None => return Err(NativeError::dom(format!("host {host} tidak ada"))),
+            Some(n) if n.tag().is_none() => {
+                return Err(NativeError::dom(format!("node {host} bukan elemen")));
+            }
+            Some(n) if n.bayang.is_some() => {
+                return Err(NativeError::dom(format!(
+                    "node {host} sudah punya shadow root"
+                )));
+            }
+            Some(_) => {}
+        }
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            kind: NodeKind::ShadowRoot { mode },
+            attrs: Vec::new(),
+            parent: Some(host),
+            children: Vec::new(),
+            bayang: None,
+            bingkai: None,
+        });
+        self.nodes[host].bayang = Some(id);
+        Ok(id)
+    }
+
+    /// Shadow root milik `host`, **apa pun mode-nya**.
+    ///
+    /// Ini pintu otomasi, dan sengaja tidak memeriksa mode: `AC-016` meminta
+    /// root tertutup tetap bisa ditembus dari sisi otomasi. Yang dijaga
+    /// terpisah adalah jalur skrip halaman, [`Self::bayang_terbuka`].
+    #[must_use]
+    pub fn bayang(&self, host: NodeId) -> Option<NodeId> {
+        self.nodes.get(host)?.bayang
+    }
+
+    /// Shadow root yang boleh dilihat skrip halaman, yaitu yang `open`.
+    #[must_use]
+    pub fn bayang_terbuka(&self, host: NodeId) -> Option<NodeId> {
+        let id = self.bayang(host)?;
+        matches!(
+            self.nodes.get(id)?.kind,
+            NodeKind::ShadowRoot {
+                mode: ModeBayang::Terbuka
+            }
+        )
+        .then_some(id)
+    }
+
+    /// Mode sebuah shadow root, atau `None` kalau node itu bukan shadow root.
+    #[must_use]
+    pub fn mode_bayang(&self, id: NodeId) -> Option<ModeBayang> {
+        match self.nodes.get(id)?.kind {
+            NodeKind::ShadowRoot { mode } => Some(mode),
+            _ => None,
+        }
+    }
+
+    /// Memasang dokumen anak hasil muatan `<iframe>`.
+    ///
+    /// `html` di-parse sebagai dokumen tersendiri lalu digabung ke arena ini
+    /// dengan nomor node yang digeser, sehingga nomor yang sudah dipegang
+    /// pemanggil tidak berubah. Node akarnya tetap bertipe [`NodeKind::Document`],
+    /// jadi batas dokumen tetap terlihat oleh [`Self::akar_pohon`]: skrip
+    /// halaman induk tidak bisa menyeberang ke dalamnya.
+    pub fn pasang_bingkai(&mut self, iframe: NodeId, html: &str) -> Result<NodeId, NativeError> {
+        match self.nodes.get(iframe) {
+            None => return Err(NativeError::dom(format!("iframe {iframe} tidak ada"))),
+            Some(n) if n.tag() != Some("iframe") => {
+                return Err(NativeError::dom(format!("node {iframe} bukan <iframe>")));
+            }
+            Some(n) if n.bingkai.is_some() => {
+                return Err(NativeError::dom(format!(
+                    "iframe {iframe} sudah punya dokumen"
+                )));
+            }
+            Some(_) => {}
+        }
+        let anak = Document::parse_html(html)?;
+        let geser = self.nodes.len();
+        let akar = geser + anak.root;
+        for (i, mut node) in anak.nodes.into_iter().enumerate() {
+            node.parent = if i == anak.root {
+                Some(iframe)
+            } else {
+                node.parent.map(|p| p + geser)
+            };
+            node.children = node.children.iter().map(|&c| c + geser).collect();
+            node.bayang = node.bayang.map(|b| b + geser);
+            node.bingkai = node.bingkai.map(|b| b + geser);
+            self.nodes.push(node);
+        }
+        self.nodes[iframe].bingkai = Some(akar);
+        Ok(akar)
+    }
+
+    /// Dokumen anak milik `<iframe>`, kalau sudah dipasang.
+    #[must_use]
+    pub fn bingkai(&self, iframe: NodeId) -> Option<NodeId> {
+        self.nodes.get(iframe)?.bingkai
+    }
+
+    /// Anak yang ikut ditata dan dilukis: anak pohon terang, lalu isi shadow
+    /// root kalau ada.
+    ///
+    /// Node shadow root sendiri tidak ikut: ia bukan elemen dan tidak punya
+    /// kotak, jadi memasukkannya ke taffy hanya menambah kotak nol yang tidak
+    /// bisa dipakai siapa pun.
+    #[must_use]
+    pub fn anak_tata(&self, id: NodeId) -> Vec<NodeId> {
+        let Some(node) = self.nodes.get(id) else {
+            return Vec::new();
+        };
+        let mut out = node.children.clone();
+        if let Some(bayang) = node.bayang
+            && let Some(akar) = self.nodes.get(bayang)
+        {
+            out.extend(akar.children.iter().copied());
+        }
+        out
+    }
+
+    /// Akar pohon milik `id`: node dokumen terdekat, atau shadow root terdekat.
+    ///
+    /// Dua node berada di pohon yang sama kalau akarnya sama. Itu definisi
+    /// yang dipakai untuk memutuskan apa yang boleh dilihat skrip halaman,
+    /// jadi ia harus dihitung dari sambungan `parent`, bukan dari jenis node.
+    #[must_use]
+    pub fn akar_pohon(&self, id: NodeId) -> NodeId {
+        let mut kini = id;
+        let mut langkah = 0usize;
+        loop {
+            match self.nodes.get(kini) {
+                Some(n) if matches!(n.kind, NodeKind::Document | NodeKind::ShadowRoot { .. }) => {
+                    return kini;
+                }
+                Some(n) => match n.parent {
+                    Some(p) if langkah <= self.nodes.len() => {
+                        kini = p;
+                        langkah += 1;
+                    }
+                    _ => return kini,
+                },
+                None => return kini,
+            }
+        }
+    }
+
+    /// `true` kalau `id` bisa dicapai skrip halaman dari akar dokumen: tidak
+    /// di balik batas shadow root, dan tidak di dalam dokumen `<iframe>`.
+    #[must_use]
+    pub fn terlihat_skrip(&self, id: NodeId) -> bool {
+        self.akar_pohon(id) == self.root
+    }
+}
+
 fn bangun(handle: &Handle, nodes: &mut Vec<Node>, induk: NodeId) -> Option<NodeId> {
     let (kind, attrs) = match &handle.data {
         NodeData::Element { name, attrs, .. } => (
@@ -509,6 +731,8 @@ fn bangun(handle: &Handle, nodes: &mut Vec<Node>, induk: NodeId) -> Option<NodeI
         attrs,
         parent: Some(induk),
         children: Vec::new(),
+        bayang: None,
+        bingkai: None,
     });
 
     for anak in handle.children.borrow().iter() {
@@ -811,5 +1035,89 @@ mod tests {
             lagi.teks(lagi.pilih_satu("ul").unwrap().unwrap()),
             "satudua"
         );
+    }
+
+    #[test]
+    fn shadow_root_tidak_masuk_pohon_terang_tapi_tercapai_otomasi() {
+        let mut doc = Document::parse_html(r#"<div id="host"><span>terang</span></div>"#).unwrap();
+        let host = doc.cari_id("host").unwrap();
+        let akar = doc.pasang_bayang(host, ModeBayang::Terbuka).unwrap();
+        let dalam = doc.buat_elemen("b");
+        doc.set_teks(dalam, "bayang").unwrap();
+        doc.tambah_anak(akar, dalam).unwrap();
+
+        // Pohon terang tidak berubah: isi bayangan bukan anak host, jadi
+        // `textContent` host tidak ikut membawa teks bayangan.
+        assert_eq!(doc.node(host).unwrap().children.len(), 1);
+        assert_eq!(doc.teks(host), "terang");
+        assert!(!doc.to_html().contains("bayang"));
+
+        // Tapi ia tetap tercapai dari host lewat `anak_tata`: anak terang
+        // dulu, lalu isi shadow root. Urutan itu yang membuat layout dan
+        // raster melihat keduanya tanpa pohon kedua.
+        let terang = doc.node(host).unwrap().children[0];
+        assert_eq!(doc.anak_tata(host), vec![terang, dalam]);
+        assert!(doc.terpasang(dalam));
+        assert_eq!(doc.akar_pohon(dalam), akar);
+    }
+
+    #[test]
+    fn shadow_root_tertutup_hanya_terbuka_bagi_otomasi() {
+        let mut doc = Document::parse_html(r#"<div id="host"></div>"#).unwrap();
+        let host = doc.cari_id("host").unwrap();
+        let akar = doc.pasang_bayang(host, ModeBayang::Tertutup).unwrap();
+
+        // Pintu otomasi tidak memeriksa mode; pintu skrip halaman memeriksa.
+        assert_eq!(doc.bayang(host), Some(akar));
+        assert_eq!(doc.bayang_terbuka(host), None);
+        assert_eq!(doc.mode_bayang(akar), Some(ModeBayang::Tertutup));
+
+        // Shadow root kedua ditolak, bukan menggantikan yang lama.
+        assert!(doc.pasang_bayang(host, ModeBayang::Terbuka).is_err());
+        assert_eq!(doc.bayang(host), Some(akar));
+    }
+
+    #[test]
+    fn shadow_root_ditolak_pada_node_bukan_elemen() {
+        let mut doc = Document::parse_html("<p>teks</p>").unwrap();
+        let teks = doc
+            .node(doc.pilih_satu("p").unwrap().unwrap())
+            .unwrap()
+            .children[0];
+        assert!(doc.pasang_bayang(teks, ModeBayang::Terbuka).is_err());
+        assert!(doc.pasang_bayang(doc.root(), ModeBayang::Terbuka).is_err());
+    }
+
+    #[test]
+    fn bingkai_iframe_menggeser_nomor_tanpa_menggeser_nomor_lama() {
+        let mut doc = Document::parse_html(r#"<body><iframe id="f"></iframe></body>"#).unwrap();
+        let iframe = doc.cari_id("f").unwrap();
+        let sebelum = doc.nodes().len();
+
+        let akar = doc
+            .pasang_bingkai(iframe, r#"<p id="dalam">isi anak</p>"#)
+            .unwrap();
+
+        // Nomor yang sudah dipegang pemanggil tidak bergeser, dan dokumen
+        // anak mulai tepat di ujung arena yang lama.
+        assert_eq!(akar, sebelum);
+        assert_eq!(doc.cari_id("f"), Some(iframe));
+        assert_eq!(doc.bingkai(iframe), Some(akar));
+
+        // Batas dokumen tetap terlihat: isi iframe bukan pohon skrip induk.
+        let dalam = doc.cari_id("dalam").unwrap();
+        assert_eq!(doc.akar_pohon(dalam), akar);
+        assert!(!doc.terlihat_skrip(dalam));
+        assert_eq!(doc.teks(akar), "isi anak");
+
+        // `<iframe>` elemen diganti: isinya tidak ikut `textContent` induk.
+        assert_eq!(doc.teks(iframe), "");
+        assert!(!doc.to_html().contains("isi anak"));
+
+        // Satu iframe satu dokumen.
+        assert!(doc.pasang_bingkai(iframe, "<p>lagi</p>").is_err());
+        // Node selain `<iframe>` ditolak.
+        let body = doc.pilih_satu("body").unwrap().unwrap();
+        assert!(doc.pasang_bingkai(body, "<p>x</p>").is_err());
     }
 }

@@ -20,7 +20,7 @@ use rquickjs::{Context, Function, Runtime};
 
 use super::NativeError;
 use super::ambil::{JawabanAmbil, Pengambil, PengambilTolak, PermintaanAmbil};
-use super::dom::{Document, NodeId, NodeKind};
+use super::dom::{Document, ModeBayang, NodeId, NodeKind};
 
 /// Pagu keras untuk satu isolat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +191,10 @@ const JEMBATAN_DOM: &str = r##"
     var ada = bungkusCache.get(id);
     if (ada) return ada;
     var jenis = panggil("nodeType", id);
-    var baru = jenis === 3 ? new SimpulTeks(id) : new SimpulElemen(id);
+    var baru =
+      jenis === 3 ? new SimpulTeks(id)
+      : jenis === 11 ? new SimpulBayang(id)
+      : new SimpulElemen(id);
     bungkusCache.set(id, baru);
     return baru;
   }
@@ -276,6 +279,10 @@ const JEMBATAN_DOM: &str = r##"
     },
   });
 
+  Object.defineProperty(SimpulElemen.prototype, "shadowRoot", {
+    get: function () { return bungkus(panggil("shadowRoot", idDari(this))); },
+  });
+
   SimpulElemen.prototype.getAttribute = function (nama) {
     return panggil("attr", idDari(this), nama);
   };
@@ -308,10 +315,86 @@ const JEMBATAN_DOM: &str = r##"
     panggil("remove", idDari(this));
   };
   SimpulElemen.prototype.querySelector = function (s) {
-    return bungkus(panggil("selectDalam", idDari(this), s));
+    return bungkus(panggil("selectDalamTerang", idDari(this), s));
   };
   SimpulElemen.prototype.querySelectorAll = function (s) {
-    return (panggil("selectAllDalam", idDari(this), s) || []).map(bungkus);
+    return (panggil("selectAllDalamTerang", idDari(this), s) || []).map(bungkus);
+  };
+
+  // --- shadow DOM ---------------------------------------------------------
+  //
+  // Root-nya nyata di pohon Rust; yang dijaga di sini hanya siapa yang boleh
+  // melihatnya. `shadowRoot` tidak menjawab untuk mode "closed", dan
+  // `querySelector` tidak menyeberang batas pohon. Sisi otomasi memakai
+  // operasi jembatan yang lain, dan itulah yang menembus keduanya.
+  function SimpulBayang(id) {
+    nomor.set(this, id);
+  }
+
+  Object.defineProperties(SimpulBayang.prototype, {
+    nodeType: { get: function () { return 11; } },
+    nodeName: { get: function () { return "#document-fragment"; } },
+    host: { get: function () { return bungkus(panggil("bayangHost", idDari(this))); } },
+    mode: { get: function () { return String(panggil("bayangMode", idDari(this))); } },
+    childNodes: {
+      get: function () { return (panggil("children", idDari(this)) || []).map(bungkus); },
+    },
+    children: {
+      get: function () {
+        var anak = panggil("children", idDari(this)) || [];
+        var hasil = [];
+        for (var i = 0; i < anak.length; i++) {
+          if (panggil("nodeType", anak[i]) === 1) hasil.push(bungkus(anak[i]));
+        }
+        return hasil;
+      },
+    },
+    firstChild: {
+      get: function () {
+        var anak = panggil("children", idDari(this)) || [];
+        return anak.length ? bungkus(anak[0]) : null;
+      },
+    },
+    lastChild: {
+      get: function () {
+        var anak = panggil("children", idDari(this)) || [];
+        return anak.length ? bungkus(anak[anak.length - 1]) : null;
+      },
+    },
+    textContent: { get: function () { return panggil("text", idDari(this)); } },
+  });
+  SimpulBayang.prototype.appendChild = function (anak) {
+    panggil("append", idDari(this), idDari(anak));
+    return anak;
+  };
+  SimpulBayang.prototype.insertBefore = function (anak, acuan) {
+    if (acuan === null || acuan === undefined) {
+      panggil("append", idDari(this), idDari(anak));
+    } else {
+      panggil("insertBefore", idDari(this), idDari(anak), idDari(acuan));
+    }
+    return anak;
+  };
+  SimpulBayang.prototype.removeChild = function (anak) {
+    panggil("remove", idDari(anak));
+    return anak;
+  };
+  SimpulBayang.prototype.querySelector = function (s) {
+    return bungkus(panggil("selectDalamTerang", idDari(this), s));
+  };
+  SimpulBayang.prototype.querySelectorAll = function (s) {
+    return (panggil("selectAllDalamTerang", idDari(this), s) || []).map(bungkus);
+  };
+  SimpulBayang.prototype.getElementById = function (s) {
+    return bungkus(panggil("byidDalam", idDari(this), s));
+  };
+
+  SimpulElemen.prototype.attachShadow = function (init) {
+    var mode = init && init.mode;
+    if (mode !== "open" && mode !== "closed") {
+      throw new TypeError('attachShadow butuh mode "open" atau "closed"');
+    }
+    return bungkus(panggil("attachShadow", idDari(this), mode));
   };
 
   // --- peristiwa -----------------------------------------------------------
@@ -473,10 +556,10 @@ const JEMBATAN_DOM: &str = r##"
   var dokumen = {
     nodeType: 9,
     nodeName: "#document",
-    getElementById: function (s) { return bungkus(panggil("byid", s)); },
-    querySelector: function (s) { return bungkus(panggil("select", s)); },
+    getElementById: function (s) { return bungkus(panggil("byidTerang", s)); },
+    querySelector: function (s) { return bungkus(panggil("selectTerang", s)); },
     querySelectorAll: function (s) {
-      return (panggil("selectAll", s) || []).map(bungkus);
+      return (panggil("selectAllTerang", s) || []).map(bungkus);
     },
     createElement: function (t) { return bungkus(panggil("create", t)); },
     createTextNode: function (t) { return bungkus(panggil("createText", t)); },
@@ -484,8 +567,8 @@ const JEMBATAN_DOM: &str = r##"
 
   Object.defineProperties(dokumen, {
     documentElement: { get: function () { return bungkus(panggil("root")); } },
-    head: { get: function () { return bungkus(panggil("select", "head")); } },
-    body: { get: function () { return bungkus(panggil("select", "body")); } },
+    head: { get: function () { return bungkus(panggil("selectTerang", "head")); } },
+    body: { get: function () { return bungkus(panggil("selectTerang", "body")); } },
     title: {
       get: function () { return panggil("title"); },
       set: function (v) { panggil("setTitle", v); },
@@ -674,6 +757,8 @@ fn op_dom(
                 NodeKind::Doctype => 10,
                 NodeKind::Element(_) => 1,
                 NodeKind::Text(_) => 3,
+                // `DOCUMENT_FRAGMENT_NODE`: shadow root adalah fragment.
+                NodeKind::ShadowRoot { .. } => 11,
             };
             Ok(json!(jenis))
         }
@@ -697,6 +782,80 @@ fn op_dom(
         "byid" => {
             let dok = kunci(dokumen);
             Ok(json!(dok.cari_id(a).map_or(-1i64, |id| id as i64)))
+        }
+        "byidTerang" => {
+            let dok = kunci(dokumen);
+            let ketemu = dok.cari_id(a).filter(|&id| dok.terlihat_skrip(id));
+            Ok(json!(ketemu.map_or(-1i64, |id| id as i64)))
+        }
+        "byidDalam" => {
+            let akar = nomor(a)?;
+            let dok = kunci(dokumen);
+            let pohon = dok.akar_pohon(akar);
+            let ketemu = dok.nodes().iter().enumerate().find_map(|(i, n)| {
+                (n.tag().is_some() && n.attr("id") == Some(b) && dok.akar_pohon(i) == pohon)
+                    .then_some(i as i64)
+            });
+            Ok(json!(ketemu.unwrap_or(-1)))
+        }
+        // Jalur skrip halaman. Empat operasi ini sengaja terpisah dari
+        // `select*`: yang satu menembus batas pohon, yang lain tidak, dan
+        // menyatukannya berarti `mode: "closed"` kehilangan artinya.
+        "selectTerang" => {
+            let dok = kunci(dokumen);
+            let ketemu = dok.pilih_satu_terang(a).map_err(|e| e.to_string())?;
+            Ok(json!(ketemu.map_or(-1i64, |id| id as i64)))
+        }
+        "selectAllTerang" => {
+            let dok = kunci(dokumen);
+            let daftar = dok.pilih_terang(a).map_err(|e| e.to_string())?;
+            Ok(json!(daftar))
+        }
+        "selectDalamTerang" => {
+            let akar = nomor(a)?;
+            let dok = kunci(dokumen);
+            let ketemu = dok.pilih_dalam_terang(akar, b).map_err(|e| e.to_string())?;
+            Ok(json!(ketemu.first().map_or(-1i64, |&id| id as i64)))
+        }
+        "selectAllDalamTerang" => {
+            let akar = nomor(a)?;
+            let dok = kunci(dokumen);
+            let daftar = dok.pilih_dalam_terang(akar, b).map_err(|e| e.to_string())?;
+            Ok(json!(daftar))
+        }
+        "attachShadow" => {
+            let host = nomor(a)?;
+            let mode = match b {
+                "open" => ModeBayang::Terbuka,
+                "closed" => ModeBayang::Tertutup,
+                lain => return Err(format!("mode shadow tidak dikenal: {lain:?}")),
+            };
+            let id = kunci(dokumen)
+                .pasang_bayang(host, mode)
+                .map_err(|e| e.to_string())?;
+            Ok(json!(id))
+        }
+        // `element.shadowRoot`: hanya mode terbuka. Root tertutup tetap ada di
+        // pohon dan tetap bisa ditembus otomasi, tapi jalur ini yang dipakai
+        // skrip halaman, jadi ia harus menghormati mode.
+        "shadowRoot" => {
+            let host = nomor(a)?;
+            let dok = kunci(dokumen);
+            Ok(json!(
+                dok.bayang_terbuka(host).map_or(-1i64, |id| id as i64)
+            ))
+        }
+        "bayangHost" => {
+            let id = nomor(a)?;
+            let dok = kunci(dokumen);
+            let host = dok.node(id).and_then(|n| n.parent);
+            Ok(json!(host.map_or(-1i64, |p| p as i64)))
+        }
+        "bayangMode" => {
+            let id = nomor(a)?;
+            let dok = kunci(dokumen);
+            let mode = dok.mode_bayang(id).map_or("", |m| m.nama());
+            Ok(json!(mode))
         }
         "select" => {
             let dok = kunci(dokumen);

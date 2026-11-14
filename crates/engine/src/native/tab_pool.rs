@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use super::NativeError;
 use super::ambil::{Pengambil, PengambilTolak};
 use super::css::LembarLuar;
-use super::dom::Document;
+use super::dom::{Document, NodeId};
 use super::js::{Isolat, PaguIsolat};
 
 /// Biaya PSS marginal satu tab hidup, dalam MB.
@@ -339,6 +339,73 @@ impl<C: ColdStore> TabPool<C> {
         let panas = self.bangun(id, url, html, lembar, font)?;
         self.panas.push(panas);
         Ok(id)
+    }
+
+    /// Memasang dokumen `<iframe>` ke tab yang sudah terbuka.
+    ///
+    /// Dipisah dari [`Self::buka_dengan`] karena byte dokumen anak baru bisa
+    /// diambil **sesudah** HTML induk diurai: URL iframe baru diketahui di
+    /// titik itu. Pemanggil mengambil byte-nya lebih dulu (jaringan berjalan
+    /// tanpa memegang kunci tab), lalu menyerahkan daftar `(url, html)` ke
+    /// sini.
+    ///
+    /// `dasar` adalah URL dokumen induk. Tanpa itu, asal anak tidak bisa
+    /// dibandingkan dengan apa pun dan `bingkai::rencana` menolak semua `src`,
+    /// yang memang perilaku yang diinginkan: menebak "pasti same-origin"
+    /// berarti membuka batas yang seharusnya dijaga.
+    ///
+    /// Tidak pernah mengembalikan galat: satu iframe yang gagal dipasang tidak
+    /// boleh menggagalkan navigasi induknya. Semua yang dilewati masuk daftar
+    /// catatan beserta alasannya.
+    pub fn pasang_bingkai_dari(
+        &mut self,
+        id: TabId,
+        dasar: &str,
+        daftar: &[(String, String)],
+    ) -> Vec<String> {
+        let Some(tab) = self.panas.iter().find(|t| t.id == id) else {
+            return vec![format!("tab {} tidak panas, iframe tidak dipasang", id.0)];
+        };
+        let mut dokumen = kunci(&tab.dokumen);
+        let iframe: Vec<NodeId> = dokumen
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.tag() == Some("iframe") && n.bingkai.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        let mut catatan = Vec::new();
+        for simpul in iframe {
+            match super::bingkai::rencana(&dokumen, simpul, Some(dasar)) {
+                super::bingkai::Muatan::Kosong => {}
+                super::bingkai::Muatan::LintasAsal(alasan) => {
+                    catatan.push(format!("iframe {simpul}: {alasan}"));
+                }
+                super::bingkai::Muatan::Srcdoc(html) => {
+                    if let Err(err) = dokumen.pasang_bingkai(simpul, &html) {
+                        catatan.push(format!("iframe {simpul}: srcdoc gagal dipasang: {err}"));
+                    }
+                }
+                super::bingkai::Muatan::Ambil(url) => {
+                    match daftar.iter().find(|(u, _)| *u == url) {
+                        Some((_, html)) => {
+                            if let Err(err) = dokumen.pasang_bingkai(simpul, html) {
+                                catatan.push(format!(
+                                    "iframe {simpul} `{url}`: gagal dipasang: {err}"
+                                ));
+                            }
+                        }
+                        // Isinya tidak sampai ke pemanggil. Dicatat, bukan
+                        // didiamkan: iframe kosong yang tidak dijelaskan
+                        // terlihat seperti halaman yang kehilangan isinya.
+                        None => catatan.push(format!(
+                            "iframe {simpul} `{url}`: byte-nya tidak diserahkan pemanggil"
+                        )),
+                    }
+                }
+            }
+        }
+        catatan
     }
 
     fn bangun(
