@@ -146,6 +146,10 @@ fn celah_dinyatakan_bukan_disembunyikan() {
         // belum ada. Kalau baris ini hilang, daftar mengklaim screenshot
         // melayani semua format yang diminta Chrome.
         "`webp` (dan",
+        // Batas AX yang masih terbuka: isi `<iframe>`. Kalau baris ini hilang,
+        // daftar mengklaim pohon aksesibilitas sudah mencakup dokumen anak,
+        // padahal iframe belum dimuat sama sekali.
+        "pohon aksesibilitas belum mencakup konten di dalam `<iframe>`",
     ] {
         assert!(
             semua.contains(wajib),
@@ -196,5 +200,13 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("<link rel=stylesheet>` tidak diambil"),
         "stylesheet eksternal sudah diambil, jangan kembalikan kalimat lamanya: {semua}"
+    );
+    // Klausa lama "`aria-labelledby` berantai, status focusable/selected/
+    // expanded belum dihitung" sudah tidak benar sejak W7: ketiganya dibaca
+    // dari atribut dokumen di `native::axtree`. Kalau klausa itu kembali,
+    // pembaca mengira pohon AX masih mengirim konstanta.
+    assert!(
+        !semua.contains("belum menghitung `aria-labelledby`"),
+        "detail AX sudah dihitung, jangan kembalikan kalimat lamanya: {semua}"
     );
 }

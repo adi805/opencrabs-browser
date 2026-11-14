@@ -88,8 +88,12 @@ pub const CELAH: &[&str] = &[
      itu, bukan pembesaran gambar hasil), `captureBeyondViewport`, dan \
      `fromSurface` (dicatat, hasilnya sama karena mesin software cuma punya \
      satu permukaan)",
-    "pohon aksesibilitas belum menghitung `aria-labelledby` berantai, status \
-     *focusable*/*selected*/*expanded*, dan konten di dalam `<iframe>`",
+    "pohon aksesibilitas belum mencakup konten di dalam `<iframe>`: iframe \
+     belum dimuat sama sekali (`html5ever` hanya mem-parse dokumen induk), \
+     jadi tidak ada dokumen anak yang bisa dijadikan pohon. `aria-labelledby` \
+     berantai dan status *focusable*/*selected*/*expanded* sudah dihitung dari \
+     atribut dokumen sejak W7; yang belum adalah *focused*, karena mesin ini \
+     belum punya state fokus",
     "`fetch()` di dalam isolat hanya bisa lewat jalur yang dipasang pemanggil \
      (`native::ambil::Pengambil`); tanpa hook ia menolak semua. Jawabannya \
      objek biasa, bukan `Promise`: `await fetch(...)` dan `await r.text()` \
