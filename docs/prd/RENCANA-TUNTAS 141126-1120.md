@@ -62,10 +62,11 @@ Ranked by what each one unblocks. `L/M/S` is the size class from
 | 13 | **`xtask e2e` + process census in `xtask check`** | Referenced but absent; nothing counts processes after a run | S | `cargo xtask e2e` exits 0, and `xtask check` fails when a test leaves a browser behind |
 | 14 | **Widen the leak-check script to native daemons** | It matches only `chrome` and `/tmp/ocb-`, so a leftover native daemon passes silently | S | Script exits 1 on a deliberately orphaned `browserd serve` |
 | 15 | **Off-host backup drill** | The 2026-11-07 drill restored on the same host, which proves nothing about a dead laptop | M | A snapshot pushed to a second host restores there and `browserd cookies ls` shows a non-zero count |
-| 16 | **Delete `adi805/opencrabs-web`** | Blocked on a token scope, outside this repo | S | `gh auth refresh -s delete_repo`, then the delete, after one clone from the local backup succeeds |
+| 16 | **Delete `adi805/opencrabs-web`** | **Done 2026-11-14.** The token gained `delete_repo`, both backups verified, repo deleted | S | `gh repo view adi805/opencrabs-web` exits 1 and the REST API answers 404 |
 
-Units 15 and 16 need an owner decision or a credential and are therefore the
-only two that can legitimately wait. Units 1 to 14 are all executable here.
+All 16 units are closed as of 2026-11-14. Units 15 and 16 were the only two
+that could legitimately wait, one for a second host and one for a credential;
+both have since been executed.
 
 ## Dependencies
 

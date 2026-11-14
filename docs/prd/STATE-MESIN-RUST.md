@@ -23,10 +23,10 @@ Task 9 (font) **tuntas**: ketiga bagiannya (`@font-face` unduh, fallback per aks
 | 10 | `@media` benar-benar dijalankan | **selesai**, tes `native::css::tests::test_media_query_dievaluasi_terhadap_viewport` |
 | 11 | encoder `webp` | **selesai**, tes `native::paint::tests::webp_lossless_bolak_balik` + `cdp` tes WebP |
 | 12 | traversal `iframe` + closed shadow root | **selesai**, tes `native::dom::tests::bingkai_iframe_menggeser_nomor_tanpa_menggeser_nomor_lama`, `shadow_root_tidak_masuk_pohon_terang_tapi_tercapai_otomasi`, `cdp` tes `iframe_same_origin_dimuat_oleh_navigasi` + `shadow_root_tertutup_terbaca_otomasi_tapi_tidak_oleh_skrip` |
-| 13 | `cargo xtask e2e` + census proses di `xtask check` | belum |
-| 14 | leak-check daemon native | belum |
-| 15 | gladi bersih backup ke host kedua | belum |
-| 16 | hapus `adi805/opencrabs-web` permanen | belum (butuh `gh auth refresh -s delete_repo`) |
+| 13 | `cargo xtask e2e` + census proses di `xtask check` | **selesai**, `xtask/src/e2e.rs` jalan tanpa Chrome dan menghitung pid sebelum/sesudah |
+| 14 | leak-check daemon native | **selesai**, skrip sekarang mengenali `browserd` ber-penanda `/tmp/ocb-` dan `--self-test` membuktikan pemeriksanya bisa gagal |
+| 15 | gladi bersih backup ke host kedua | **selesai**, drill ke `joyboy` dengan 5 cookie dan sha256 identik (`docs/prd/BUKTI-DRILL-HOST2 141126-1650.md`) |
+| 16 | hapus `adi805/opencrabs-web` permanen | **selesai 2026-11-14**, dua backup terverifikasi lalu `gh repo view` exit 1 dan API 404 |
 
 ## Celah yang masih dinyatakan `CELAH`
 

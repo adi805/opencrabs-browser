@@ -15,21 +15,25 @@ dibuka `browserd cookies ls` di dalam container `ubuntu:24.04` (`--network none`
 
 Bukti: `docs/prd/BUKTI-DRILL-HOST2 141126-1650.md`
 
-## Unit 16 — TERBLOKIR pada satu aksi owner
+## Unit 16: SELESAI 2026-11-14
 
-Yang sudah diverifikasi:
-- Repo `adi805/opencrabs-web` ADA: private, 83 KB, branch cuma `main`, HEAD `2f227149ddffc71d2c2eac59e7130c353636d98b`
-- Backup lokal `~/oc-archive/opencrabs-web.git` HEAD `2f22714` = SHA yang sama, 6 commit, fsck exit 0
-- Clone dari backup BERHASIL ke `/mnt/hdd/OpenCrabs/projects/opencrabs-web-restore-test` (636K, isi utuh: index.html, src/, public/, package.json, README.md)
-- **Jadi penghapusan remote tidak menghilangkan apa pun**
+Repo `adi805/opencrabs-web` sudah dihapus permanen. Tidak ada yang hilang, karena dua backup independen diverifikasi lebih dulu.
 
-Yang menghalangi:
-- `gh auth status` → token scopes: `gist, read:org, repo, workflow`. **`delete_repo` TIDAK ADA.**
-- `gh auth refresh -s delete_repo` butuh browser + device code = interaktif, tidak bisa dari sesi ini.
-- Blast radius: menjalankannya non-TTY berisiko merusak token yang dipakai sesi lain. Tidak gue jalankan.
+Yang diverifikasi SEBELUM hapus:
 
-Aksi owner (pilih satu):
-1. `gh auth refresh -s delete_repo` di terminal sendiri, lalu `gh repo delete adi805/opencrabs-web --yes`
-2. Hapus lewat web UI: Settings → Danger Zone → Delete this repository
+| Cek | Hasil |
+|---|---|
+| Bare clone `~/oc-archive/opencrabs-web.git` | 212K, `fsck` tanpa keluaran (bersih), `refs/heads/main` = `2f227149ddffc71d2c2eac59e7130c353636d98b`, 6 commit, 0 tag |
+| Remote HEAD saat itu | `2f227149ddffc71d2c2eac59e7130c353636d98b`, SHA sama persis |
+| Bundle `~/oc-archive/opencrabs-web-141126-1707.bundle` | 80K, `bundle verify` = "records a complete history", sha256 `570f678f360acf2fd2c50f45f3ac6ef758b0dd27c2cc457e1277daa8b76de1ab` |
+| Clone dari backup | pernah BERHASIL ke `/mnt/hdd/OpenCrabs/projects/opencrabs-web-restore-test` (636K, isi utuh: index.html, src/, public/, package.json, README.md) |
 
-Sesudah itu `gh repo view adi805/opencrabs-web` harus exit non-zero = kriteria unit 16.
+Bukti hapus:
+
+| Perintah | Keluaran |
+|---|---|
+| `gh repo delete adi805/opencrabs-web --yes` | RC=0 |
+| `gh repo view adi805/opencrabs-web` | `GraphQL: Could not resolve to a Repository with the name 'adi805/opencrabs-web'.` RC=1 |
+| `gh api repos/adi805/opencrabs-web` | HTTP 404 `Not Found` |
+
+Kriteria unit 16 (`gh repo view adi805/opencrabs-web` exit non-zero) terpenuhi. Token sekarang membawa scope `delete_repo`, jadi aksi owner yang dulu menghalangi sudah dilakukan.
