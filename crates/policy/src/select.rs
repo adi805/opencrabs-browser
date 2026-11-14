@@ -253,7 +253,11 @@ pub const TERUKUR_OXI: Capabilities = Capabilities {
 ///   mesin yang tidak bisa mencetak.
 /// - `cookies`: belum ada cookie jar; tidak ada satu pun tes yang membuktikan
 ///   cookie ditulis dan terbaca lagi.
-/// - `input`: `Input.dispatchMouseEvent` belum ada; `hands` belum dibangun.
+/// - `input`: `Input.dispatchMouseEvent` sudah dijawab mesin dan menjalankan
+///   pendengar halaman (`crates/cdp/tests/native_events.rs`: klik di dalam
+///   kotak memanggil pendengar, klik di luarnya tidak). Yang **belum** ada dan
+///   tetap tercatat: `Input.dispatchKeyEvent` dan `Input.dispatchTouchEvent`,
+///   jadi kemampuan ini hanya mencakup pointer, bukan papan ketik.
 ///
 /// Yang juga **belum** ada dan tidak diklaim di sini: tumpukan jaringan
 /// (mesin hanya memuat `about:blank` dan `data:text/html`), batas waktu/gas
@@ -264,7 +268,10 @@ pub const TERUKUR_NATIVE: Capabilities = Capabilities {
     layout: false,
     script: true,
     cookies: false,
-    input: false,
+    // Pointer: ya, dengan tes. Papan ketik dan sentuh: belum, tercatat di
+    // `engine::native::CELAH`. Menaikkan ini ke `true` berarti router boleh
+    // mengirim klik ke mesin ini, dan itu memang sudah terbukti jalan.
+    input: true,
 };
 
 /// Satu permintaan yang butuh mesin.
@@ -1083,7 +1090,10 @@ cooldown_secs = 120
             "printToPDF belum ada, jadi layout belum penuh"
         );
         assert!(!caps.cookies, "cookie jar belum ada");
-        assert!(!caps.input, "hands belum dibangun");
+        assert!(
+            caps.input,
+            "pointer sudah dijawab mesin dan terbukti memanggil pendengar halaman"
+        );
     }
 
     #[test]

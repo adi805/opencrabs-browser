@@ -7,11 +7,12 @@
 //! mengembalikan pid daemon akan membuat reaper mengirim SIGKILL ke daemon itu
 //! sendiri.
 //!
-//! Yang dijual di sini hanya yang benar-benar jalan. Mesin ini tidak mengirim
-//! peristiwa CDP (tidak ada `Runtime.consoleAPICalled` atau `Network.*`), dan
-//! raster yang ada hanya melukis latar kotak. Yang belum ada dijawab dengan
-//! galat yang menyebut lapisannya, bukan dengan jawaban kosong yang terlihat
-//! seperti sukses.
+//! Yang dijual di sini hanya yang benar-benar jalan. Mesin ini **menerima**
+//! `Input.dispatchMouseEvent` dan menjalankan pendengar halaman yang
+//! didaftarkan skrip lewat `addEventListener`, tapi belum **mengirim**
+//! peristiwa CDP ke klien (tidak ada `Runtime.consoleAPICalled` atau
+//! `Network.*`). Yang belum ada dijawab dengan galat yang menyebut lapisannya,
+//! bukan dengan jawaban kosong yang terlihat seperti sukses.
 //!
 //! Dokumen `http`/`https` diambil lewat [`jaringan`] **sebelum** kunci state
 //! dipegang: satu navigasi yang lambat tidak boleh membekukan tab lain.
@@ -389,6 +390,9 @@ async fn protokol() -> Json<Value> {
                 { "name": "evaluate" },
                 { "name": "enable" },
                 { "name": "disable" }
+            ]},
+            { "domain": "Input", "commands": [
+                { "name": "dispatchMouseEvent" }
             ]},
             { "domain": "Log", "commands": [{ "name": "enable" }, { "name": "clear" }]},
             { "domain": "Accessibility", "commands": [
