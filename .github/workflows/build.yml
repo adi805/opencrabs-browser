@@ -110,17 +110,29 @@ jobs:
           # jalur yang SELALU dieksekusi mati "Illegal instruction" di CPU
           # pemakai (run 43531270141 mati tepat di `sarx`).
           #
-          # Satu pengecualian yang SAH dan bisa diaudit: ring 0.17.14 merakit
-          # asm ADX untuk x25519 dan p256, lalu memilihnya saat RUNTIME lewat
-          # CPUID. Rantainya: src/ec/curve25519/x25519.rs:127
-          # `if ops::has_fe25519_adx(cpu_features)` -> ops.rs:161
-          # `matches!(cpu.get_feature(), Some((Adx, Bmi1, Bmi2)))`. Di CPU tanpa
-          # BMI2 cabang itu tidak pernah diambil, jadi instruksinya ada di
-          # biner tapi tidak pernah dieksekusi.
+          # Sisa BMI2 di biner ini berasal dari asm ring 0.17.14 yang dipilih
+          # saat RUNTIME lewat CPUID, jadi tidak pernah dieksekusi di CPU tanpa
+          # BMI2. Daftar putih di bawah eksplisit per simbol; tiap entri punya
+          # jalur dispatch yang bisa dibaca di sumber crate:
+          #   x25519_scalar_mult_adx, fiat_curve25519_adx_{mul,square}
+          #     src/ec/curve25519/x25519.rs:127 if ops::has_fe25519_adx(cpu_features)
+          #     -> ops.rs:161 matches!(cpu.get_feature(), Some((Adx, Bmi1, Bmi2)))
+          #   ecp_nistz256_ord_{mul,sqr}_mont_adx, __ecp_nistz256_{mul,sqr}_montx
+          #     crypto/fipsmodule/ec/p256-nistz.c:133 if (adx_bmi2_available);
+          #     __ecp_nistz256_*x hanya dipanggil dari *_adx (p256-x86_64-asm.pl:1751)
+          #   bn_mulx4x_mont, mulx4x_internal, bn_sqrx8x_internal
+          #     src/arithmetic/limbs/x86_64/mont.rs:213
+          #     if maybe_adx_bmi1_bmi2.is_some() { bn_mulx4x_mont_gather5 }
+          #   chacha20_poly1305_{seal,open}_avx2
+          #     src/aead/chacha20_poly1305/integrated.rs:122
+          #     if matches!(optional_cpu_features, Some((Avx2, Bmi2)))
           #
-          # Karena itu yang dihitung sebagai pelanggaran hanya BMI2 di luar
-          # simbol `ring_core_*...adx*`. Simbol tak dikenal dihitung
-          # pelanggaran, bukan diampuni: gate ini harus gagal-tertutup.
+          # Nama simbol memuat versi crate, jadi upgrade ring otomatis
+          # menggugurkan daftar ini dan gate gagal sampai jalur barunya
+          # diaudit. Simbol yang tidak dikenal SELALU dihitung pelanggaran:
+          # gate ini gagal-tertutup.
+          IZIN="ring_core_0_17_14__x25519_scalar_mult_adx ring_core_0_17_14__fiat_curve25519_adx_mul ring_core_0_17_14__fiat_curve25519_adx_square ring_core_0_17_14__ecp_nistz256_ord_mul_mont_adx ring_core_0_17_14__ecp_nistz256_ord_sqr_mont_adx __ecp_nistz256_mul_montx __ecp_nistz256_sqr_montx ring_core_0_17_14__bn_mulx4x_mont mulx4x_internal ring_core_0_17_14__bn_sqrx8x_internal ring_core_0_17_14__chacha20_poly1305_seal_avx2 ring_core_0_17_14__chacha20_poly1305_open_avx2"
+
           objdump -d "$BIN" \
             | grep -E '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx)\b' \
             | sed -E 's/^ *([0-9a-f]+):.*/\1/' > /tmp/hits.txt || true
@@ -134,14 +146,15 @@ jobs:
           echo "BMI2 total: ${TOTAL}"
           echo "--- sebaran per simbol ---"
           sort /tmp/syms.txt | uniq -c | sort -rn | head -20
-          ILEGAL=$(grep -vcE '^ring_core_.*adx' /tmp/syms.txt || true)
-          echo "BMI2 di luar jalur runtime-dispatch: ${ILEGAL}"
+          for s in $IZIN; do echo "$s"; done > /tmp/izin.txt
+          ILEGAL=$(grep -vxF -f /tmp/izin.txt /tmp/syms.txt | wc -l || true)
+          echo "BMI2 di luar daftar putih: ${ILEGAL}"
           if [ "${ILEGAL}" -ne 0 ]; then
-            echo "artefak tidak portabel: ${ILEGAL} instruksi BMI2 di jalur yang selalu dieksekusi" >&2
-            grep -vE '^ring_core_.*adx' /tmp/syms.txt | sort | uniq -c | sort -rn >&2
+            echo "artefak tidak portabel: ${ILEGAL} instruksi BMI2 di simbol yang tidak diaudit" >&2
+            grep -vxF -f /tmp/izin.txt /tmp/syms.txt | sort | uniq -c | sort -rn >&2
             exit 1
           fi
-          echo "semua BMI2 berada di ring ADX yang dipilih lewat CPUID, baseline aman"
+          echo "semua BMI2 ada di jalur ring yang dipilih lewat CPUID, baseline aman"
 
       - name: Ukuran target sebelum dibersihkan
         if: always()
