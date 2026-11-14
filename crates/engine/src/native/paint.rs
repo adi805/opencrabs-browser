@@ -372,12 +372,14 @@ fn lukis_penuh(
         let potong = potong_teks(doc, &laporan, *node);
         let (baris, glyph) = lukis_teks(
             &mut pixmap,
-            isi,
-            &gaya,
-            &kotak,
-            warna,
-            transform,
-            potong,
+            &BlokTeks {
+                isi,
+                gaya: &gaya,
+                kotak: &kotak,
+                warna,
+                transform,
+                potong,
+            },
             &font,
         );
         baris_dilukis += baris;
@@ -522,27 +524,43 @@ impl ttf_parser::OutlineBuilder for PembangunGlyph {
     }
 }
 
-/// Melukis satu blok teks di dalam kotaknya.
-///
-/// Pembungkusan memakai [`super::teks::bungkus`] pada lebar kotak, jadi baris
-/// yang dilukis adalah baris yang menghasilkan tinggi kotak itu. Perataan
-/// mengikuti `text-align` warisan; `justify` benar-benar meregangkan spasi pada
-/// semua baris kecuali baris terakhir, sama seperti CSS. `font-weight` 600 ke
-/// atas ditebalkan secara sintetis, karena mesin ini hanya menanam satu face:
-/// glyph yang sama dilukis dua kali dengan geseran kecil. Kalau `potong` benar,
-/// glyph dipotong ke kotak elemen lewat mask, jadi `overflow: hidden` benar
-/// benar menyembunyikan bagian yang keluar, bukan sekadar diterima.
-/// Mengembalikan `(baris, glyph)` yang benar-benar dilukis.
-fn lukis_teks(
-    pixmap: &mut Pixmap,
-    isi: &str,
-    gaya: &GayaTerhitung,
-    kotak: &Kotak,
+/// Satu blok teks yang siap dilukis, beserta semua yang menentukan rupanya.
+/// Dikumpulkan jadi satu nilai supaya tanda tangan [`lukis_teks`] tidak
+/// menumpuk delapan parameter yang semuanya berasal dari node yang sama.
+struct BlokTeks<'a> {
+    isi: &'a str,
+    gaya: &'a GayaTerhitung,
+    kotak: &'a Kotak,
     warna: Color,
     transform: Transform,
     potong: bool,
+}
+
+/// Melukis satu blok teks di dalam kotaknya.
+///
+/// Pembungkusan memakai [`super::teks::bungkus_dengan`] pada lebar kotak, jadi
+/// baris yang dilukis adalah baris yang menghasilkan tinggi kotak itu.
+/// Perataan mengikuti `text-align` warisan; `justify` benar-benar meregangkan
+/// spasi pada semua baris kecuali baris terakhir, sama seperti CSS.
+/// `font-weight` 600 ke atas ditebalkan secara sintetis, karena satu keluarga
+/// hanya menyediakan satu face yang dipakai: glyph yang sama dilukis dua kali
+/// dengan geseran kecil. Kalau `potong` benar, glyph dipotong ke kotak elemen
+/// lewat mask, jadi `overflow: hidden` benar-benar menyembunyikan bagian yang
+/// keluar, bukan sekadar diterima. Mengembalikan `(baris, glyph)` yang
+/// benar-benar dilukis.
+fn lukis_teks(
+    pixmap: &mut Pixmap,
+    blok: &BlokTeks<'_>,
     font: &super::teks::KumpulanFont,
 ) -> (usize, usize) {
+    let BlokTeks {
+        isi,
+        gaya,
+        kotak,
+        warna,
+        transform,
+        potong,
+    } = *blok;
     if !super::teks::tersedia() || warna.alpha() == 0.0 || kotak.width <= 0.0 {
         return (0, 0);
     }
