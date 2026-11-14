@@ -23,7 +23,7 @@ use taffy::prelude::{
 };
 
 use super::NativeError;
-use super::css::Kaskade;
+use super::css::{Kaskade, LembarLuar};
 use super::dom::{Document, NodeId, NodeKind};
 use super::gaya::{GayaTerhitung, Konteks, PohonGaya, dimensi, panjang};
 
@@ -162,7 +162,21 @@ fn taffy_style_teks() -> Style {
 }
 
 /// Menghitung layout seluruh dokumen untuk satu viewport.
+///
+/// Lembar gaya eksternal tidak ikut: pemanggil yang sudah mengambil CSS dari
+/// jaringan memakai [`hitung_dengan`]. Versi ini yang dipakai tes dan jalur
+/// tanpa jaringan, jadi halaman dengan `<link rel=stylesheet>` di sini
+/// dilaporkan tanpa lembar itu, bukan diterapkan sebagian.
 pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, NativeError> {
+    hitung_dengan(doc, viewport, &[])
+}
+
+/// Menghitung layout dengan lembar gaya eksternal yang sudah diambil.
+pub fn hitung_dengan(
+    doc: &Document,
+    viewport: Viewport,
+    eksternal: &[LembarLuar],
+) -> Result<LaporanLayout, NativeError> {
     let mut taffy: TaffyTree<KonteksTeks> = TaffyTree::new();
     let mut peta: HashMap<NodeId, taffy::NodeId> = HashMap::new();
     let mut laporan = LaporanLayout::default();
@@ -170,7 +184,7 @@ pub fn hitung(doc: &Document, viewport: Viewport) -> Result<LaporanLayout, Nativ
     let akar_dokumen = doc.root();
     // Kaskade dibangun SEKALI per dokumen. Mengurai stylesheet per elemen
     // akan mengulang pekerjaan yang sama sebanyak jumlah node.
-    let kaskade = Kaskade::kumpulkan(doc);
+    let kaskade = Kaskade::kumpulkan_dengan(doc, eksternal);
     laporan.catatan_kaskade = kaskade.diabaikan().to_vec();
     // Gaya terhitung juga dibangun sekali: pewarisan turun dari akar, dan
     // `em`/`rem` butuh ukuran font induk yang baru diketahui setelah induk
@@ -590,6 +604,44 @@ mod tests {
             laporan.properti(d.cari_id("a").unwrap(), "width"),
             Some("70px"),
             "gaya pemenang disimpan untuk lapisan lukis"
+        );
+    }
+
+    #[test]
+    fn lembar_eksternal_menentukan_lebar_kotak() {
+        let d = doc(
+            "<html><head><link rel=\"stylesheet\" href=\"kartu.css\"></head>\
+             <body><div id=\"a\" class=\"kartu\"></div></body></html>",
+        );
+        let lembar = [LembarLuar::baru(
+            "kartu.css",
+            ".kartu{width:70px;height:25px}",
+        )];
+        let laporan = hitung_dengan(&d, Viewport::new(800.0, 600.0), &lembar).unwrap();
+        let a = laporan.kotak_untuk(d.cari_id("a").unwrap()).unwrap();
+        assert_eq!(a.width, 70.0, "lebar dari lembar eksternal harus terpakai");
+        assert_eq!(
+            a.height, 25.0,
+            "tinggi dari lembar eksternal harus terpakai"
+        );
+        let catatan = laporan.catatan_kaskade.join(" | ");
+        assert!(
+            !catatan.contains("tidak diambil"),
+            "lembar yang disertakan tidak boleh dilaporkan terlewat: {catatan}"
+        );
+    }
+
+    #[test]
+    fn tanpa_lembar_eksternal_lebar_tidak_terpakai_dan_tercatat() {
+        let d = doc(
+            "<html><head><link rel=\"stylesheet\" href=\"kartu.css\"></head>\
+             <body><div id=\"a\" class=\"kartu\"></div></body></html>",
+        );
+        let laporan = hitung(&d, Viewport::new(800.0, 600.0)).unwrap();
+        let catatan = laporan.catatan_kaskade.join(" | ");
+        assert!(
+            catatan.contains("kartu.css") && catatan.contains("tidak diambil"),
+            "tautan yang tidak diambil harus tercatat: {catatan}"
         );
     }
 

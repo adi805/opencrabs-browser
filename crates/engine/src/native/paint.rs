@@ -13,6 +13,7 @@
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
 
 use super::NativeError;
+use super::css::LembarLuar;
 use super::dom::{Document, NodeId};
 use super::gaya::GayaTerhitung;
 use super::layout::{self, Kotak, Viewport};
@@ -150,7 +151,22 @@ pub fn lukis_dengan(
     klip: Option<Klip>,
     format: Format,
 ) -> Result<Raster, NativeError> {
-    let laporan = layout::hitung(doc, viewport)?;
+    lukis_dengan_lembar(doc, viewport, klip, format, &[])
+}
+
+/// Melukis dokumen dengan lembar gaya eksternal yang sudah diambil dari
+/// jaringan.
+///
+/// Lembar itu diteruskan ke layout, bukan diurai di sini: warna yang dilukis
+/// harus berasal dari kaskade yang sama dengan yang menghasilkan kotak.
+pub fn lukis_dengan_lembar(
+    doc: &Document,
+    viewport: Viewport,
+    klip: Option<Klip>,
+    format: Format,
+    eksternal: &[LembarLuar],
+) -> Result<Raster, NativeError> {
+    let laporan = layout::hitung_dengan(doc, viewport, eksternal)?;
     let kerapatan = klip.map_or(1.0, |k| k.kerapatan());
     let (lebar, tinggi, geser) = match klip {
         Some(k) => (
@@ -631,6 +647,32 @@ mod tests {
         assert_eq!(
             raster.kotak_dilukis, 1,
             "warna dari <style> harus ikut dilukis"
+        );
+        assert_eq!(raster.piksel(5, 5), Some([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn warna_dari_lembar_eksternal_terlukis() {
+        let doc = Document::parse_html(
+            "<html><head><link rel=\"stylesheet\" href=\"warna.css\"></head>\
+             <body><div id=\"kotak\"></div></body></html>",
+        )
+        .unwrap();
+        let lembar = [LembarLuar::baru(
+            "warna.css",
+            "#kotak{width:30px;height:30px;background-color:#0000ff}",
+        )];
+        let raster = lukis_dengan_lembar(
+            &doc,
+            Viewport::new(60.0, 60.0),
+            None,
+            Format::Png { cepat: false },
+            &lembar,
+        )
+        .unwrap();
+        assert_eq!(
+            raster.kotak_dilukis, 1,
+            "warna dari lembar eksternal harus ikut dilukis"
         );
         assert_eq!(raster.piksel(5, 5), Some([0, 0, 255, 255]));
     }

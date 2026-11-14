@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::NativeError;
+use super::css::LembarLuar;
 use super::dom::Document;
 use super::js::{Isolat, PaguIsolat};
 
@@ -71,6 +72,13 @@ pub struct Snapshot {
     pub jumlah_node: usize,
     /// Unix epoch milidetik saat tab disingkirkan.
     pub disingkirkan_pada: u64,
+    /// Lembar gaya eksternal yang sudah diambil untuk dokumen ini.
+    ///
+    /// Ikut disimpan karena tab yang dihidupkan kembali tanpa CSS-nya akan
+    /// tampil dan terukur berbeda dari sebelum disingkirkan, padahal HTML-nya
+    /// sama. Yang disimpan hanya teks yang sudah diambil; pengambilan ulang
+    /// tetap keputusan lapisan jaringan.
+    pub lembar: Vec<LembarLuar>,
 }
 
 /// Penyimpanan tab dingin.
@@ -136,6 +144,12 @@ pub struct TabPanas {
     pub dokumen: Document,
     pub isolat: Isolat,
     pub terakhir_dipakai: Instant,
+    /// Lembar gaya eksternal milik dokumen ini, urut sesuai `<link>`-nya.
+    ///
+    /// Disimpan di tab, bukan dihitung ulang saat melukis, karena teks CSS
+    /// hanya bisa didapat dari jaringan: menghitung ulang berarti mengambil
+    /// ulang setiap tangkapan layar.
+    pub lembar: Vec<LembarLuar>,
 }
 
 /// Alasan tab disingkirkan. Dicatat supaya tes bisa membedakan penyingkiran
@@ -227,6 +241,17 @@ impl<C: ColdStore> TabPool<C> {
     /// Membuka tab baru. Kalau anggaran tab panas penuh, tab paling lama tidak
     /// dipakai disingkirkan lebih dulu, bukan tab baru ditolak.
     pub fn buka(&mut self, url: &str, html: &str) -> Result<TabId, PoolError> {
+        self.buka_dengan(url, html, Vec::new())
+    }
+
+    /// Sama dengan [`Self::buka`], tapi dengan lembar gaya eksternal yang
+    /// sudah diambil untuk dokumen itu.
+    pub fn buka_dengan(
+        &mut self,
+        url: &str,
+        html: &str,
+        lembar: Vec<LembarLuar>,
+    ) -> Result<TabId, PoolError> {
         if self.jumlah_dialamat() >= self.maks_total {
             return Err(PoolError::KapasitasPenuh {
                 maks: self.maks_total,
@@ -238,12 +263,18 @@ impl<C: ColdStore> TabPool<C> {
 
         let id = TabId(self.berikutnya);
         self.berikutnya += 1;
-        let panas = self.bangun(id, url, html)?;
+        let panas = self.bangun(id, url, html, lembar)?;
         self.panas.push(panas);
         Ok(id)
     }
 
-    fn bangun(&self, id: TabId, url: &str, html: &str) -> Result<TabPanas, PoolError> {
+    fn bangun(
+        &self,
+        id: TabId,
+        url: &str,
+        html: &str,
+        lembar: Vec<LembarLuar>,
+    ) -> Result<TabPanas, PoolError> {
         // Layout sengaja tidak dihitung di sini: lihat catatan di `TabPanas`.
         let dokumen = Document::parse_html(html)?;
         let isolat = Isolat::new(self.pagu_isolat)?;
@@ -256,6 +287,7 @@ impl<C: ColdStore> TabPool<C> {
             dokumen,
             isolat,
             terakhir_dipakai: Instant::now(),
+            lembar,
         })
     }
 
@@ -280,6 +312,7 @@ impl<C: ColdStore> TabPool<C> {
             html: tab.dokumen.to_html(),
             jumlah_node: tab.dokumen.jumlah_node(),
             disingkirkan_pada: epoch_millis(),
+            lembar: tab.lembar.clone(),
         };
         self.dingin
             .simpan(&snapshot)
@@ -309,7 +342,12 @@ impl<C: ColdStore> TabPool<C> {
             self.singkirkan_lru(AlasanSingkir::Anggaran)?;
         }
 
-        let panas = self.bangun(snapshot.id, &snapshot.url, &snapshot.html)?;
+        let panas = self.bangun(
+            snapshot.id,
+            &snapshot.url,
+            &snapshot.html,
+            snapshot.lembar.clone(),
+        )?;
         self.dingin
             .hapus(id)
             .map_err(|e| PoolError::Dingin(format!("{e:?}")))?;
@@ -338,10 +376,24 @@ impl<C: ColdStore> TabPool<C> {
     /// `url` disimpan apa adanya. Fungsi ini tidak mengambil apa pun dari
     /// jaringan; pemanggil yang menyediakan HTML-nya.
     pub fn ganti_dokumen(&mut self, id: TabId, url: &str, html: &str) -> Result<(), PoolError> {
+        self.ganti_dokumen_dengan(id, url, html, Vec::new())
+    }
+
+    /// Sama dengan [`Self::ganti_dokumen`], tapi dengan lembar gaya eksternal
+    /// milik dokumen baru. Lembar lama tidak diwarisi: dokumen baru punya
+    /// tautannya sendiri, dan menyisakan lembar lama berarti menerapkan CSS
+    /// halaman sebelumnya ke halaman sekarang.
+    pub fn ganti_dokumen_dengan(
+        &mut self,
+        id: TabId,
+        url: &str,
+        html: &str,
+        lembar: Vec<LembarLuar>,
+    ) -> Result<(), PoolError> {
         if !self.panas.iter().any(|t| t.id == id) {
             self.hidupkan(id)?;
         }
-        let baru = self.bangun(id, url, html)?;
+        let baru = self.bangun(id, url, html, lembar)?;
         match self.panas.iter_mut().find(|t| t.id == id) {
             Some(t) => {
                 *t = baru;
@@ -538,6 +590,84 @@ mod tests {
             .unwrap();
         let sisa = p.tab(a).unwrap().isolat.eval("typeof globalThis.__sisa");
         assert_eq!(sisa.unwrap(), "undefined", "state JS tidak ikut pindah");
+    }
+
+    fn lembar(href: &str, teks: &str) -> Vec<LembarLuar> {
+        vec![LembarLuar::baru(href, teks)]
+    }
+
+    #[test]
+    fn ganti_dokumen_dengan_menyimpan_lembar_baru() {
+        let mut p = pool(2, 99);
+        let a = p
+            .buka_dengan(
+                "https://a.test",
+                &halaman(1),
+                lembar("/lama.css", "div { height: 11px }"),
+            )
+            .unwrap();
+        assert_eq!(p.tab(a).unwrap().lembar.len(), 1, "lembar awal tersimpan");
+
+        p.ganti_dokumen_dengan(
+            a,
+            "https://a.test/kedua",
+            &halaman(1),
+            lembar("/baru.css", "div { height: 33px }"),
+        )
+        .unwrap();
+
+        let tab = p.tab(a).expect("tab panas setelah ganti dokumen");
+        assert_eq!(tab.lembar.len(), 1, "lembar lama tidak menumpuk");
+        assert_eq!(tab.lembar[0].href, "/baru.css");
+        assert_eq!(tab.lembar[0].teks, "div { height: 33px }");
+    }
+
+    #[test]
+    fn ganti_dokumen_tanpa_lembar_membuang_lembar_lama() {
+        // Dokumen baru punya tautannya sendiri. Mewarisi lembar lama berarti
+        // menerapkan CSS halaman sebelumnya ke halaman sekarang, dan itu bug
+        // yang tidak kelihatan sampai warnanya salah.
+        let mut p = pool(2, 99);
+        let a = p
+            .buka_dengan(
+                "https://a.test",
+                &halaman(1),
+                lembar("/a.css", "p { color: red }"),
+            )
+            .unwrap();
+
+        p.ganti_dokumen(a, "https://b.test", &halaman(1)).unwrap();
+
+        let tab = p.tab(a).expect("tab panas");
+        assert!(
+            tab.lembar.is_empty(),
+            "lembar lama masih menempel: {:?}",
+            tab.lembar
+        );
+    }
+
+    #[test]
+    fn lembar_selamat_lewat_penyingkiran_dan_dihidupkan_lagi() {
+        let mut p = pool(1, 99);
+        let a = p
+            .buka_dengan(
+                "https://a.test",
+                &halaman(2),
+                lembar("/a.css", "div { color: #ff0000 }"),
+            )
+            .unwrap();
+        let _b = p.buka("https://b.test", &halaman(1)).unwrap();
+        assert!(p.tab(a).is_none(), "a tersingkir ke dingin");
+
+        let dingin = p.dingin.muat(a).unwrap().unwrap();
+        assert_eq!(dingin.lembar.len(), 1, "lembar ikut ke tab dingin");
+        assert_eq!(dingin.lembar[0].href, "/a.css");
+
+        p.hidupkan(a).unwrap();
+        let tab = p.tab(a).expect("tab hidup lagi");
+        assert_eq!(tab.lembar.len(), 1, "lembar kembali saat dihidupkan");
+        assert_eq!(tab.lembar[0].href, "/a.css");
+        assert_eq!(tab.lembar[0].teks, "div { color: #ff0000 }");
     }
 
     #[test]

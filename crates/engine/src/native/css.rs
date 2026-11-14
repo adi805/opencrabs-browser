@@ -3,17 +3,129 @@
 //! Yang diurai di sini adalah subset CSS yang benar-benar dipakai halaman
 //! biasa: blok aturan `selektor { deklarasi }`, daftar selektor dipisah koma,
 //! `!important`, dan shorthand `padding`/`margin`. At-rule (`@media`,
-//! `@import`, `@font-face`) **tidak** dijalankan: setiap at-rule dicatat di
-//! [`Kaskade::diabaikan`], bukan diterapkan dengan arti lain.
+//! `@font-face`, `@supports`) **tidak** dijalankan: setiap at-rule dicatat di
+//! [`Kaskade::diabaikan`], bukan diterapkan dengan arti lain. `@import`
+//! diselesaikan lebih dulu oleh lapisan yang mengenal jaringan
+//! (`cdp::native_wire::gaya`), jadi yang sampai ke sini sudah berupa teks
+//! sisipan; `@import` yang masih tersisa di teks tetap dicatat sebagai at-rule
+//! yang tidak dijalankan, bukan ditebak isinya.
 //!
-//! `<link rel="stylesheet">` juga tidak diambil dari jaringan oleh crate ini.
-//! URL-nya dicatat sebagai diabaikan supaya lapisan CDP bisa mengambilnya dan
-//! menambahkannya lewat [`Kaskade::tambah_lembar`] kalau mau.
+//! `<link rel="stylesheet">` **tidak** diambil dari jaringan oleh crate ini:
+//! crate mesin sengaja nol pengetahuan jaringan. [`tautan_eksternal`] memberi
+//! tahu tautan mana yang layak diambil, dan [`Kaskade::kumpulkan_dengan`]
+//! menerima teks CSS-nya dari lapisan yang mengambil. Lembar itu dipasang **di
+//! posisi `<link>`-nya** di pohon, bukan ditempel di akhir, supaya `<style>`
+//! yang datang sesudahnya tetap menang sesuai urutan sumber. Tautan yang tidak
+//! disertai teksnya tetap dicatat di [`Kaskade::diabaikan`], bukan diterapkan
+//! dengan arti lain.
 
 use std::collections::HashMap;
 
-use super::dom::{Document, NodeId, NodeKind};
+use super::dom::{Document, Node, NodeId, NodeKind};
 use super::selectors::{Kompleks, urai};
+
+/// Satu lembar gaya dari luar dokumen, mis. hasil pengambilan
+/// `<link rel="stylesheet" href="...">`.
+///
+/// `href` adalah teks atribut `href` **apa adanya**, bukan URL absolut:
+/// kaskade mencocokkannya dengan node `<link>` di pohon, sementara penyelesaian
+/// URL relatif (termasuk `<base href>`) adalah tugas lapisan yang mengenal
+/// jaringan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LembarLuar {
+    pub href: String,
+    pub teks: String,
+}
+
+impl LembarLuar {
+    #[must_use]
+    pub fn baru(href: impl Into<String>, teks: impl Into<String>) -> Self {
+        Self {
+            href: href.into(),
+            teks: teks.into(),
+        }
+    }
+}
+
+/// Satu tautan stylesheet yang layak diambil dari jaringan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tautan {
+    /// Teks atribut `href` apa adanya; kunci yang dipakai [`LembarLuar`].
+    pub href: String,
+}
+
+/// Keputusan untuk satu node `<link rel="stylesheet">`.
+enum StatusTautan {
+    Ambil,
+    Lewati(String),
+}
+
+/// Membaca `rel`, `media`, dan `disabled` satu node `<link>`.
+///
+/// Aturannya sama dengan yang dipakai [`Kaskade::kumpulkan_dengan`], jadi
+/// tautan yang dilewati di sini tidak mungkin tiba-tiba diterapkan di sana.
+fn status_tautan(node: &Node) -> StatusTautan {
+    let rel = node.attr("rel").unwrap_or_default().to_ascii_lowercase();
+    let rel: Vec<&str> = rel.split_whitespace().collect();
+    if rel.contains(&"alternate") {
+        return StatusTautan::Lewati(
+            "`rel=alternate` adalah stylesheet alternatif, bukan yang berlaku".to_owned(),
+        );
+    }
+    if node.attr("disabled").is_some() {
+        return StatusTautan::Lewati("atribut `disabled` membuat lembar tidak berlaku".to_owned());
+    }
+    let media = node.attr("media").unwrap_or("").trim().to_ascii_lowercase();
+    // Media yang bisa diputuskan tanpa mesin media query: kosong, `all`, atau
+    // `screen`. `print`, `speech`, dan query berparameter (`screen and
+    // (min-width: 600px)`) tidak dievaluasi; menerapkannya akan membuat halaman
+    // memakai aturan yang seharusnya tidak berlaku, jadi dilewati dan dicatat.
+    let layak_media = media.is_empty()
+        || media
+            .split(',')
+            .map(str::trim)
+            .all(|m| m == "all" || m == "screen");
+    if !layak_media {
+        return StatusTautan::Lewati(format!("`media=\"{media}\"` tidak dievaluasi mesin ini"));
+    }
+    StatusTautan::Ambil
+}
+
+/// Mengumpulkan `<link rel="stylesheet">` yang layak diambil dari jaringan.
+///
+/// Yang dilewati dikembalikan sebagai catatan beserta alasannya, supaya halaman
+/// yang tampak tanpa gaya bisa dijelaskan tanpa menebak.
+#[must_use]
+pub fn tautan_eksternal(doc: &Document) -> (Vec<Tautan>, Vec<String>) {
+    let mut ambil = Vec::new();
+    let mut lewati = Vec::new();
+    for (id, node) in doc.nodes().iter().enumerate() {
+        if node.tag() != Some("link") {
+            continue;
+        }
+        let rel = node.attr("rel").unwrap_or_default().to_ascii_lowercase();
+        if !rel.split_whitespace().any(|r| r == "stylesheet") {
+            continue;
+        }
+        match status_tautan(node) {
+            StatusTautan::Ambil => match node.attr("href") {
+                Some(href) if !href.trim().is_empty() => {
+                    ambil.push(Tautan {
+                        href: href.to_owned(),
+                    });
+                }
+                _ => lewati.push(format!("node {id}: `<link rel=stylesheet>` tanpa `href`")),
+            },
+            StatusTautan::Lewati(alasan) => {
+                let href = node.attr("href").unwrap_or("(tanpa href)");
+                lewati.push(format!(
+                    "node {id}: `<link rel=stylesheet href=\"{href}\">` dilewati: {alasan}"
+                ));
+            }
+        }
+    }
+    (ambil, lewati)
+}
 
 /// Satu deklarasi `nama: nilai` di dalam blok aturan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +169,18 @@ impl Kaskade {
     /// `<link rel="stylesheet">` sebagai tidak diambil.
     #[must_use]
     pub fn kumpulkan(doc: &Document) -> Self {
+        Self::kumpulkan_dengan(doc, &[])
+    }
+
+    /// Sama dengan [`Self::kumpulkan`], tapi lembar eksternal yang sudah
+    /// diambil dari jaringan ikut dipasang **di posisi `<link>`-nya**.
+    ///
+    /// Urutan itu yang membuat kaskade benar: lembar eksternal yang muncul
+    /// sebelum `<style>` kalah oleh `<style>` itu, dan yang muncul sesudahnya
+    /// menang. Menambahkan semua lembar di akhir akan membalik prioritas
+    /// halaman yang menaruh `<link>` di atas blok `<style>`.
+    #[must_use]
+    pub fn kumpulkan_dengan(doc: &Document, eksternal: &[LembarLuar]) -> Self {
         let mut k = Self::default();
         for (id, node) in doc.nodes().iter().enumerate() {
             let Some(tag) = node.tag() else {
@@ -69,11 +193,26 @@ impl Kaskade {
                 }
                 "link" => {
                     let rel = node.attr("rel").unwrap_or_default().to_ascii_lowercase();
-                    if rel.split_whitespace().any(|r| r == "stylesheet") {
-                        let href = node.attr("href").unwrap_or("(tanpa href)");
-                        k.diabaikan.push(format!(
-                            "node {id}: `<link rel=stylesheet>` tidak diambil dari jaringan: {href}"
-                        ));
+                    if !rel.split_whitespace().any(|r| r == "stylesheet") {
+                        continue;
+                    }
+                    match status_tautan(node) {
+                        StatusTautan::Lewati(alasan) => k.diabaikan.push(format!(
+                            "node {id}: `<link rel=stylesheet>` dilewati: {alasan}"
+                        )),
+                        StatusTautan::Ambil => {
+                            let href = node.attr("href").unwrap_or("(tanpa href)");
+                            match eksternal.iter().find(|l| l.href == href) {
+                                Some(lembar) => k.tambah_lembar(
+                                    &lembar.teks,
+                                    &format!("<link> node {id}: {href}"),
+                                ),
+                                None => k.diabaikan.push(format!(
+                                    "node {id}: `<link rel=stylesheet>` tidak diambil dari \
+                                     jaringan: {href}"
+                                )),
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -550,6 +689,103 @@ mod tests {
         assert!(
             catatan.contains("@media"),
             "at-rule harus tercatat: {catatan}"
+        );
+    }
+
+    fn dengan_lembar(html: &str, selektor: &str, lembar: &[LembarLuar]) -> HashMap<String, String> {
+        let doc = dokumen(html);
+        let k = Kaskade::kumpulkan_dengan(&doc, lembar);
+        let id = doc
+            .pilih_satu(selektor)
+            .expect("selektor sah")
+            .expect("elemen ada");
+        peta(&k, &doc, id)
+    }
+
+    #[test]
+    fn lembar_eksternal_dipasang_di_posisi_linknya() {
+        let lembar = [LembarLuar::baru("a.css", "#a{width:10px;height:10px}")];
+        let g = dengan_lembar(
+            "<html><head>\
+             <link rel=\"stylesheet\" href=\"a.css\">\
+             <style>#a{width:20px}</style>\
+             </head><body><div id=\"a\"></div></body></html>",
+            "#a",
+            &lembar,
+        );
+        assert_eq!(
+            g.get("height").map(String::as_str),
+            Some("10px"),
+            "lembar eksternal harus dipakai, bukan dilewati"
+        );
+        assert_eq!(
+            g.get("width").map(String::as_str),
+            Some("20px"),
+            "`<style>` sesudah `<link>` menang atas lembar eksternal"
+        );
+    }
+
+    #[test]
+    fn lembar_eksternal_sesudah_style_menang() {
+        let lembar = [LembarLuar::baru("a.css", "#a{width:10px}")];
+        let g = dengan_lembar(
+            "<html><head><style>#a{width:20px}</style>\
+             <link rel=\"stylesheet\" href=\"a.css\"></head>\
+             <body><div id=\"a\"></div></body></html>",
+            "#a",
+            &lembar,
+        );
+        assert_eq!(
+            g.get("width").map(String::as_str),
+            Some("10px"),
+            "lembar eksternal sesudah `<style>` harus menang"
+        );
+    }
+
+    #[test]
+    fn tautan_media_print_dan_alternate_dilewati_dengan_alasan() {
+        let doc = dokumen(
+            "<html><head>\
+             <link rel=\"stylesheet\" href=\"cetak.css\" media=\"print\">\
+             <link rel=\"alternate stylesheet\" href=\"lain.css\">\
+             <link rel=\"stylesheet\" href=\"nonaktif.css\" disabled>\
+             <link rel=\"stylesheet\" href=\"layar.css\" media=\"screen\">\
+             </head><body></body></html>",
+        );
+        let (ambil, lewati) = tautan_eksternal(&doc);
+        assert_eq!(
+            ambil,
+            vec![Tautan {
+                href: "layar.css".to_owned()
+            }],
+            "hanya stylesheet layar yang layak diambil"
+        );
+        let catatan = lewati.join(" | ");
+        for nama in ["cetak.css", "lain.css", "nonaktif.css"] {
+            assert!(catatan.contains(nama), "{nama} harus tercatat: {catatan}");
+        }
+        assert!(catatan.contains("media"), "alasan media hilang: {catatan}");
+        assert!(
+            catatan.contains("alternate"),
+            "alasan alternate hilang: {catatan}"
+        );
+    }
+
+    #[test]
+    fn tautan_tanpa_teks_lembar_tetap_dicatat() {
+        let doc = dokumen(
+            "<html><head><link rel=\"stylesheet\" href=\"belum.css\"></head>\
+             <body><div id=\"a\"></div></body></html>",
+        );
+        let k = Kaskade::kumpulkan(&doc);
+        let catatan = k.diabaikan().join(" | ");
+        assert!(
+            catatan.contains("belum.css"),
+            "tautan yang tidak diambil harus tercatat: {catatan}"
+        );
+        assert!(
+            catatan.contains("tidak diambil"),
+            "catatan harus menyebut tidak diambil: {catatan}"
         );
     }
 }
