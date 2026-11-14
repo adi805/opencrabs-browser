@@ -5,7 +5,7 @@ prd: "PRD-MESIN-RUST 071126-1413.md"
 status: in-progress
 current_milestone: 3
 total_milestones: 5
-last_updated: "2026-11-14 08:35"
+last_updated: "2026-11-14 08:47"
 ---
 
 # OpenCrabs Browser Progress
@@ -1137,6 +1137,31 @@ necessary condition, not a sufficient one; the native leftovers were verified
 separately through `/proc` and `ss`. Widening that script is open work.
 
 Full receipts: `docs/prd/BUKTI-AC013-AC014-GH 141126-0835.md`.
+
+### PRD contracts completed: cost and privacy, 2026-11-14
+
+`prd.mjs validate` on `docs/prd/PRD-MESIN-RUST 071126-1413.md` used to exit 0
+with three warnings: `COST_MISSING`, `PRIVACY_MISSING`, and
+`SYNTHETIC_AS_EVIDENCE` on the milestone 2 row. The first two were real gaps:
+the template asks every PRD for a Cost & Capacity Contract and a Privacy &
+Data Lifecycle Contract, and this document had neither.
+
+Both are now written into section 3, next to the other contracts, with the ten
+fields each gate expects. The content is a measurement of this product, not
+boilerplate: the monthly cost is 0 USD because there is no vendor in the path,
+the largest driver is host RAM, the ceiling is 99 tabs and 100 MB PSS with the
+`budget` CI job as the alarm, and the degradation path is the LRU eviction plus
+a rejected 100th tab. On the privacy side, the rows that exist are named
+(`cookie`, `otp_event`, `captcha_event`, `engine_run`, plus DOM snapshots), the
+absence of telemetry is a grep result rather than a promise, and the missing
+TTL on snapshots is written down as a gap instead of dressed up as policy.
+
+The third warning was a false positive and is recorded as one: the phrase
+"synthetic event dispatcher" is the standard name for `Input.dispatchMouseEvent`
+in CDP, not a citation of a synthetic source. Reworded to "input event
+dispatcher", which changes no claim.
+
+Current result: `blockers=0; errors=0; warnings=0`, exit 0.
 
 ## Not built, not claimed
 
