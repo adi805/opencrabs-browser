@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use cdp::native_wire::{gaya, jaringan};
+use cdp::native_wire::{KebijakanJaringan, gaya, jaringan};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -19,8 +19,22 @@ async fn main() {
         std::process::exit(2);
     };
 
+    // Alat ukur ini dijalankan operator dengan URL di baris perintah, dan yang
+    // diukur justru sering server lokal. Gerbang jaringan tetap berlaku: host
+    // yang diminta dibuka secara eksplisit di sini, bukan dimatikan diam-diam.
+    // Loopback dan jaringan privat tetap harus disebut dengan nama, dan
+    // link-local tetap ditolak gerbang walaupun disebut.
+    let Some(host) = url::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    else {
+        eprintln!("'{url}' bukan URL yang bisa diurai");
+        std::process::exit(2);
+    };
+    let kebijakan = KebijakanJaringan::baru(vec![host], Vec::new(), Vec::new());
+
     let mulai = Instant::now();
-    let dokumen = match jaringan::muat(&url, jaringan::Batas::default()).await {
+    let dokumen = match jaringan::muat(&url, jaringan::Batas::default(), &kebijakan).await {
         Ok(dokumen) => dokumen,
         Err(galat) => {
             eprintln!("dokumen gagal: {} ({})", galat.pesan, galat.kode);
@@ -30,7 +44,7 @@ async fn main() {
     let waktu_dokumen = mulai.elapsed();
 
     let mulai = Instant::now();
-    let hasil = gaya::ambil(&dokumen.url, &dokumen.html).await;
+    let hasil = gaya::ambil(&dokumen.url, &dokumen.html, &kebijakan).await;
     let waktu_gaya = mulai.elapsed();
 
     let total_byte: usize = hasil.lembar.iter().map(|l| l.teks.len()).sum();

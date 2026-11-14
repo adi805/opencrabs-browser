@@ -85,14 +85,16 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
             "bagian [fetch] kosong: fetch() dari halaman akan ditolak semua dengan alasan"
         );
     }
-    let ambil: Arc<dyn engine::native::ambil::Pengambil> =
-        Arc::new(cdp::native_wire::PengambilJaringan::baru(kebijakan_fetch));
+    let ambil: Arc<dyn engine::native::ambil::Pengambil> = Arc::new(
+        cdp::native_wire::PengambilJaringan::baru(kebijakan_fetch.clone()),
+    );
 
     let engines = launch_all(
         &resolved.machines,
         args.ready_timeout_ms,
         Some(&dingin),
         Some(Arc::clone(&ambil)),
+        kebijakan_fetch,
     )
     .await?;
     let pool = EnginePool::new(resolved.default_id.clone(), engines)
@@ -434,6 +436,7 @@ async fn nyalakan(
     timeout_ms: u64,
     dingin: Option<&tabstore::SumberDingin>,
     ambil: Option<Arc<dyn engine::native::ambil::Pengambil>>,
+    kebijakan: &cdp::native_wire::KebijakanJaringan,
 ) -> Result<Arc<dyn Engine>> {
     let spec = engine::LaunchSpec::new(mesin.binary.clone(), mesin.user_data_dir.clone())
         .with_port(mesin.port)
@@ -454,12 +457,14 @@ async fn nyalakan(
     // Sesi penyimpanan dingin memakai id mesin: dua mesin native tidak boleh
     // berbagi ruang tab.
     let pabrik = dingin.map(|sumber| sumber.pabrik(mesin.id.clone()));
-    let penggerak = penggerak_kind_dengan(&mesin.kind, pabrik, ambil).with_context(|| {
-        format!(
-            "mesin '{}': jenis '{}' belum punya adapter",
-            mesin.id, mesin.kind
-        )
-    })?;
+    let kebijakan = kebijakan.clone();
+    let penggerak = penggerak_kind_dengan(&mesin.kind, pabrik, ambil, Some(kebijakan))
+        .with_context(|| {
+            format!(
+                "mesin '{}': jenis '{}' belum punya adapter",
+                mesin.id, mesin.kind
+            )
+        })?;
 
     // Spawn proses dan polling port adalah kerja blocking. Menjalankannya
     // langsung di runtime akan menahan worker tokio selama mesin boot.
@@ -479,10 +484,11 @@ async fn launch_all(
     timeout_ms: u64,
     dingin: Option<&tabstore::SumberDingin>,
     ambil: Option<Arc<dyn engine::native::ambil::Pengambil>>,
+    kebijakan: cdp::native_wire::KebijakanJaringan,
 ) -> Result<BTreeMap<String, Arc<dyn Engine>>> {
     let mut engines: BTreeMap<String, Arc<dyn Engine>> = BTreeMap::new();
     for mesin in machines {
-        match nyalakan(mesin, timeout_ms, dingin, ambil.clone()).await {
+        match nyalakan(mesin, timeout_ms, dingin, ambil.clone(), &kebijakan).await {
             Ok(engine) => {
                 engines.insert(mesin.id.clone(), engine);
             }
@@ -1076,7 +1082,7 @@ fn wajib_absolut(path: &Path, apa: &str) -> Result<()> {
 /// sebaliknya, `cdp` yang memakai `engine`). Karena itu penggabungan dua daftar
 /// ini hidup di daemon, satu-satunya tempat yang melihat keduanya.
 fn penggerak_kind(kind: &str) -> Option<Arc<dyn Penggerak>> {
-    penggerak_kind_dengan(kind, None, None)
+    penggerak_kind_dengan(kind, None, None, None)
 }
 
 /// Sama dengan [`penggerak_kind`], tapi mesin native diberi penyimpanan dingin
@@ -1089,12 +1095,17 @@ fn penggerak_kind_dengan(
     kind: &str,
     dingin: Option<cdp::native_wire::PabrikDingin>,
     ambil: Option<Arc<dyn engine::native::ambil::Pengambil>>,
+    kebijakan: Option<cdp::native_wire::KebijakanJaringan>,
 ) -> Option<Arc<dyn Penggerak>> {
     if kind == NATIVE_KIND {
         let penggerak = match (dingin, ambil) {
             (Some(pabrik), Some(ambil)) => PenggerakNative::dengan_ambil(pabrik, ambil),
             (Some(pabrik), None) => PenggerakNative::baru(pabrik),
             (None, _) => PenggerakNative::default(),
+        };
+        let penggerak = match kebijakan {
+            Some(kebijakan) => penggerak.dengan_kebijakan(kebijakan),
+            None => penggerak,
         };
         return Some(Arc::new(penggerak));
     }

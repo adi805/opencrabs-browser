@@ -26,13 +26,19 @@
 //!   sama, jadi `izin = ["a.test"]` tidak bisa dipakai melompat ke host lain
 //!   lewat `302`.
 //!
-//! Yang **belum** dijaga di sini, dan tidak disembunyikan: nama host yang
-//! diizinkan masih bisa resolve ke alamat internal (DNS rebinding). Pertahanan
-//! untuk itu ada di tingkat jaringan host (egress filter), bukan di proses ini.
+//! Yang **belum** dijaga di sini, dan tidak disembunyikan: pada jalur
+//! `fetch()` daftar izin host sudah menutup nama yang menyelesaikan ke alamat
+//! internal (hanya host yang ditulis operator yang boleh), sedangkan pada jalur
+//! dokumen nama itu **diselesaikan** dan ditolak kalau mendarat di alamat
+//! internal (lihat `putuskan_dokumen`). Yang tetap tersisa di kedua jalur
+//! adalah DNS rebinding yang mengubah jawaban di antara resolusi di sini dan
+//! resolusi klien HTTP; pertahanan untuk itu ada di tingkat jaringan host
+//! (egress filter), bukan di proses ini.
 //! Badan jawaban didekode sebagai UTF-8 lossy; `content-type` charset tidak
 //! dipakai, karena `fetch` dari halaman menerima teks, bukan byte.
 
 use std::io::Read;
+use std::net::ToSocketAddrs;
 
 use engine::native::ambil::{JawabanAmbil, Pengambil, PermintaanAmbil};
 use policy::select::host_matches;
@@ -127,7 +133,7 @@ impl KebijakanJaringan {
         !self.izin.is_empty()
     }
 
-    /// Memutuskan satu permintaan, tanpa menyentuh jaringan.
+    /// Memutuskan satu permintaan `fetch()`, tanpa menyentuh jaringan.
     #[must_use]
     pub fn putuskan(&self, permintaan: &PermintaanAmbil) -> Keputusan {
         let metode = permintaan.metode.to_ascii_uppercase();
@@ -138,45 +144,11 @@ impl KebijakanJaringan {
             ));
         }
 
-        let url = match Url::parse(permintaan.url.trim()) {
-            Ok(url) => url,
-            Err(err) => {
-                return Keputusan::Tolak(format!(
-                    "'{}' bukan URL yang bisa diurai: {err}",
-                    permintaan.url
-                ));
-            }
+        let (host, disebut) = match self.urai_host(&permintaan.url) {
+            Ok(hasil) => hasil,
+            Err(alasan) => return Keputusan::Tolak(alasan),
         };
-        let skema = url.scheme().to_ascii_lowercase();
-        if skema != "http" && skema != "https" {
-            return Keputusan::Tolak(format!(
-                "skema '{skema}' tidak diizinkan gerbang jaringan; hanya http dan https"
-            ));
-        }
-        let Some(host) = url.host_str() else {
-            return Keputusan::Tolak(format!("'{}' tidak punya host", permintaan.url));
-        };
-        let host = host.to_ascii_lowercase();
-        // `Url::host_str` mengembalikan IPv6 dalam bentuk ber-kurung siku
-        // (`[::1]`), sedangkan operator menulis alamatnya tanpa kurung dan
-        // `IpAddr::from_str` menolak bentuk ber-kurung. Tanpa penyamaan ini dua
-        // hal bocor bersamaan: `[::1]` tidak pernah dikenali sebagai alamat
-        // loopback (alasannya jadi "tidak ada di daftar izin", bukan "jaringan
-        // internal"), dan entri `::1` di `izin_host` tidak pernah cocok
-        // sehingga operator tidak punya cara membukanya secara sadar.
-        let host = host
-            .strip_prefix('[')
-            .and_then(|tanpa_buka| tanpa_buka.strip_suffix(']'))
-            .unwrap_or(&host);
-
-        if self.tolak.iter().any(|pola| host_matches(pola, host)) {
-            return Keputusan::Tolak(format!(
-                "host '{host}' ada di daftar tolak gerbang jaringan"
-            ));
-        }
-
-        let disebut = self.izin.iter().any(|pola| host_matches(pola, host));
-        if let Some(alasan) = alamat_internal(host, disebut) {
+        if let Some(alasan) = alamat_internal(&host, disebut) {
             return Keputusan::Tolak(alasan);
         }
 
@@ -191,6 +163,79 @@ impl KebijakanJaringan {
             ));
         }
         Keputusan::Izinkan
+    }
+
+    /// Memutuskan satu URL **dokumen**: `Page.navigate`, `Target.createTarget`,
+    /// dan sub-sumber yang diambil mesin untuk dokumen itu (stylesheet, font,
+    /// `iframe`).
+    ///
+    /// Beda dengan [`Self::putuskan`], dan bedanya disengaja. `fetch()` dari
+    /// skrip halaman hanya boleh menghubungi host di `izin_host`, karena tidak
+    /// ada alasan sah bagi halaman untuk keluar sendiri. Navigasi tidak bisa
+    /// memakai aturan itu tanpa memaksa operator menuliskan seluruh web di
+    /// `izin_host`, jadi yang diberlakukan di sini adalah bagian **SSRF**-nya
+    /// saja: skema `http`/`https`, daftar tolak, dan alamat internal host ini.
+    /// Host publik lain diizinkan.
+    ///
+    /// Gerbang ini wajib ada karena tanpanya `Page.navigate` menjadi jalur
+    /// keliling yang tidak diperiksa sama sekali: `fetch()` ke `127.0.0.1`
+    /// ditolak, sedangkan navigasi ke alamat yang sama berhasil dan isinya
+    /// masuk ke pohon DOM yang dibaca agen.
+    #[must_use]
+    pub fn putuskan_dokumen(&self, url: &str) -> Keputusan {
+        let (host, disebut) = match self.urai_host(url) {
+            Ok(hasil) => hasil,
+            Err(alasan) => return Keputusan::Tolak(alasan),
+        };
+        if let Some(alasan) =
+            alamat_internal(&host, disebut).or_else(|| alamat_setelah_resolusi(&host, disebut))
+        {
+            return Keputusan::Tolak(alasan);
+        }
+        Keputusan::Izinkan
+    }
+
+    /// Urai URL lalu kembalikan host yang sudah dinormalkan, beserta apakah ia
+    /// disebut di daftar izin. Galatnya adalah alasan penolakan siap kirim.
+    ///
+    /// Dipisah supaya jalur `fetch` dan jalur dokumen memakai aturan skema,
+    /// host, dan daftar tolak yang **sama persis**: dua salinan aturan yang
+    /// sama pasti menyimpang, dan yang tertinggal selalu yang lebih jarang
+    /// dibaca.
+    fn urai_host(&self, url: &str) -> Result<(String, bool), String> {
+        let teks = url.trim();
+        let url = Url::parse(teks)
+            .map_err(|err| format!("'{teks}' bukan URL yang bisa diurai: {err}"))?;
+        let skema = url.scheme().to_ascii_lowercase();
+        if skema != "http" && skema != "https" {
+            return Err(format!(
+                "skema '{skema}' tidak diizinkan gerbang jaringan; hanya http dan https"
+            ));
+        }
+        let Some(host) = url.host_str() else {
+            return Err(format!("'{teks}' tidak punya host"));
+        };
+        let host = host.to_ascii_lowercase();
+        // `Url::host_str` mengembalikan IPv6 dalam bentuk ber-kurung siku
+        // (`[::1]`), sedangkan operator menulis alamatnya tanpa kurung dan
+        // `IpAddr::from_str` menolak bentuk ber-kurung. Tanpa penyamaan ini dua
+        // hal bocor bersamaan: `[::1]` tidak pernah dikenali sebagai alamat
+        // loopback (alasannya jadi "tidak ada di daftar izin", bukan "jaringan
+        // internal"), dan entri `::1` di `izin_host` tidak pernah cocok
+        // sehingga operator tidak punya cara membukanya secara sadar.
+        let host = host
+            .strip_prefix('[')
+            .and_then(|tanpa_buka| tanpa_buka.strip_suffix(']'))
+            .unwrap_or(&host)
+            .to_owned();
+
+        if self.tolak.iter().any(|pola| host_matches(pola, &host)) {
+            return Err(format!(
+                "host '{host}' ada di daftar tolak gerbang jaringan"
+            ));
+        }
+        let disebut = self.izin.iter().any(|pola| host_matches(pola, &host));
+        Ok((host, disebut))
     }
 }
 
@@ -238,6 +283,45 @@ fn alamat_internal(host: &str, disebut: bool) -> Option<String> {
              [fetch] izin_host kalau memang itu yang dimaksud"
         )
     })
+}
+
+/// Menolak **nama host** yang menyelesaikan ke alamat internal.
+///
+/// Pemeriksaan IP literal saja tidak cukup: `localhost`, `nas.local`, atau nama
+/// apa pun yang diarahkan ke `127.0.0.1` lolos sebagai "bukan alamat internal"
+/// lalu disambungkan oleh klien HTTP-nya sendiri, dan dari sisi gerbang
+/// akibatnya sama dengan navigasi langsung ke alamat itu.
+///
+/// Resolusinya diulang oleh klien HTTP, jadi ini bukan penjagaan sempurna
+/// terhadap DNS rebinding yang mengubah jawaban di antara dua kueri. Yang
+/// ditutup di sini adalah kasus yang jelas dan murah ditutup; sisanya tetap
+/// tugas egress filter di host.
+fn alamat_setelah_resolusi(host: &str, disebut: bool) -> Option<String> {
+    // `localhost` dan `*.localhost` adalah loopback menurut RFC 6761, jadi
+    // tidak perlu ditanyakan ke resolver.
+    if host == "localhost" || host.ends_with(".localhost") {
+        return (!disebut).then(|| {
+            format!(
+                "host '{host}' adalah loopback; tulis namanya sendiri di [fetch] izin_host \
+                 kalau memang itu yang dimaksud"
+            )
+        });
+    }
+    // Alamat IP literal sudah diperiksa `alamat_internal`, dan nama yang tidak
+    // bisa diselesaikan tidak punya alamat untuk diperiksa: klien HTTP-nya
+    // sendiri yang akan gagal, dengan galat yang lebih jelas.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    for alamat in (host, 0_u16).to_socket_addrs().ok()? {
+        if let Some(alasan) = alamat_internal(&alamat.ip().to_string(), disebut) {
+            return Some(format!(
+                "host '{host}' menyelesaikan ke {}: {alasan}",
+                alamat.ip()
+            ));
+        }
+    }
+    None
 }
 
 /// Pengambil yang menegakkan [`KebijakanJaringan`].
@@ -528,5 +612,86 @@ mod tests {
             KebijakanJaringan::baru(vec!["contoh.test".to_owned()], Vec::new(), Vec::new());
         let alasan = tolak(&kebijakan, "bukan url");
         assert!(alasan.contains("bukan URL"), "{alasan}");
+    }
+
+    /// Alasan penolakan satu URL dokumen, dengan pesan yang gagal keras kalau
+    /// URL itu ternyata diizinkan.
+    fn tolak_dokumen(kebijakan: &KebijakanJaringan, url: &str) -> String {
+        kebijakan
+            .putuskan_dokumen(url)
+            .alasan()
+            .unwrap_or_else(|| panic!("'{url}' seharusnya ditolak"))
+            .to_owned()
+    }
+
+    #[test]
+    fn dokumen_loopback_ditolak_dengan_kebijakan_bawaan() {
+        // Inti lubang SSRF: `Page.navigate` dulu tidak membaca kebijakan sama
+        // sekali, jadi alamat ini masuk walaupun `izin_host` tidak
+        // menyebutkannya. Kebijakan bawaan (izin kosong) harus menolaknya
+        // sebagai alamat internal, bukan sebagai "tidak ada di daftar izin":
+        // kalimatnya yang membedakan sebabnya bagi operator.
+        let bawaan = KebijakanJaringan::default();
+        let alasan = tolak_dokumen(&bawaan, "http://127.0.0.1:8099/tes.html");
+        assert!(alasan.contains("jaringan internal"), "{alasan}");
+    }
+
+    #[test]
+    fn dokumen_loopback_boleh_kalau_ditulis_operator() {
+        // Tanpa pengecualian ini, halaman uji di host sendiri mustahil dibuka
+        // dan operator tidak punya cara memperbaikinya selain mematikan
+        // gerbang.
+        let kebijakan =
+            KebijakanJaringan::baru(vec!["127.0.0.1".to_owned()], Vec::new(), Vec::new());
+        assert_eq!(
+            kebijakan.putuskan_dokumen("http://127.0.0.1:8099/tes.html"),
+            Keputusan::Izinkan
+        );
+    }
+
+    #[test]
+    fn dokumen_link_local_ditolak_sekalipun_disebut() {
+        // Sama seperti jalur `fetch`: tidak ada halaman sah di
+        // `169.254.0.0/16`, dan di banyak host justru layanan metadata awan.
+        let kebijakan =
+            KebijakanJaringan::baru(vec!["169.254.169.254".to_owned()], Vec::new(), Vec::new());
+        let alasan = tolak_dokumen(&kebijakan, "http://169.254.169.254/latest/meta-data/");
+        assert!(alasan.contains("link-local"), "{alasan}");
+    }
+
+    #[test]
+    fn dokumen_host_publik_diizinkan_tanpa_daftar_izin() {
+        // Aturan "daftar izin kosong = tolak semua" milik `fetch`, bukan milik
+        // navigasi: kalau diberlakukan di sini, browser hanya bisa membuka host
+        // yang ditulis operator dan itu bukan browser.
+        let bawaan = KebijakanJaringan::default();
+        assert_eq!(
+            bawaan.putuskan_dokumen("https://contoh.invalid/artikel"),
+            Keputusan::Izinkan
+        );
+    }
+
+    #[test]
+    fn dokumen_nama_localhost_ditolak_tanpa_izin() {
+        // Pemeriksaan IP literal saja akan meloloskan nama ini, lalu klien
+        // HTTP-nya sendiri yang menyambung ke loopback.
+        let kebijakan =
+            KebijakanJaringan::baru(vec!["contoh.invalid".to_owned()], Vec::new(), Vec::new());
+        let alasan = tolak_dokumen(&kebijakan, "http://localhost:8099/tes.html");
+        assert!(alasan.contains("loopback"), "{alasan}");
+
+        let dibuka = KebijakanJaringan::baru(vec!["localhost".to_owned()], Vec::new(), Vec::new());
+        assert_eq!(
+            dibuka.putuskan_dokumen("http://localhost:8099/tes.html"),
+            Keputusan::Izinkan
+        );
+    }
+
+    #[test]
+    fn dokumen_menolak_skema_di_luar_http() {
+        let kebijakan =
+            KebijakanJaringan::baru(vec!["contoh.invalid".to_owned()], Vec::new(), Vec::new());
+        let alasan = tolak_dokumen(&kebijakan, "file:///etc/passwd");
+        assert!(alasan.contains("skema 'file'"), "{alasan}");
     }
 }

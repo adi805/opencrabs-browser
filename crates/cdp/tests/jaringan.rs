@@ -8,8 +8,26 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
+use cdp::native_wire::KebijakanJaringan;
 use cdp::native_wire::gaya;
 use cdp::native_wire::jaringan::{self, Batas};
+
+/// Gerbang jaringan untuk tes: hanya loopback yang dibuka.
+///
+/// Servernya dijalankan tes ini sendiri di `127.0.0.1`, jadi alamat itu harus
+/// disebut eksplisit. Membuka seluruh alamat internal di sini akan membuat
+/// gerbang yang justru sedang diuji tidak pernah teruji.
+fn gerbang() -> KebijakanJaringan {
+    KebijakanJaringan::baru(
+        vec![
+            "127.0.0.1".to_owned(),
+            "localhost".to_owned(),
+            "::1".to_owned(),
+        ],
+        Vec::new(),
+        Vec::new(),
+    )
+}
 
 /// Server HTTP satu pakai. Menerima `n` koneksi lalu berhenti.
 fn server(n: usize, jawab: impl Fn(&str) -> Vec<u8> + Send + 'static) -> String {
@@ -79,7 +97,8 @@ fn muat_mengambil_html_dari_server_lokal() {
     let isi = "<html><head><title>Halo</title></head><body><p>isi</p></body></html>";
     let alamat = server(1, move |_| html(isi));
     let url = format!("http://{alamat}/halaman");
-    let ambil = jaringan::muat_blokir(&url, Batas::default()).expect("dokumen terambil");
+    let ambil =
+        jaringan::muat_blokir(&url, Batas::default(), &gerbang()).expect("dokumen terambil");
     assert_eq!(ambil.status, 200);
     assert_eq!(ambil.url, url);
     assert_eq!(ambil.html, isi);
@@ -92,7 +111,7 @@ fn muat_mengambil_html_dari_server_lokal() {
 async fn muat_async_mengembalikan_dokumen_yang_sama() {
     let alamat = server(1, |_| html("<p>async</p>"));
     let url = format!("http://{alamat}/");
-    let ambil = jaringan::muat(&url, Batas::default())
+    let ambil = jaringan::muat(&url, Batas::default(), &gerbang())
         .await
         .expect("dokumen terambil");
     assert_eq!(ambil.html, "<p>async</p>");
@@ -108,14 +127,15 @@ fn muat_mengikuti_pengalihan_dan_melaporkan_url_akhir() {
         }
     });
     let url = format!("http://{alamat}/awal");
-    let ambil = jaringan::muat_blokir(&url, Batas::default()).expect("dokumen terambil");
+    let ambil =
+        jaringan::muat_blokir(&url, Batas::default(), &gerbang()).expect("dokumen terambil");
     assert_eq!(ambil.url, format!("http://{alamat}/akhir"));
     assert_eq!(ambil.html, "<p>akhir</p>");
 }
 
 #[test]
 fn muat_menolak_skema_di_luar_http() {
-    let galat = jaringan::muat_blokir("ftp://contoh.test/berkas", Batas::default())
+    let galat = jaringan::muat_blokir("ftp://contoh.test/berkas", Batas::default(), &gerbang())
         .expect_err("ftp harus ditolak");
     assert!(
         galat.pesan.contains("bukan URL http/https"),
@@ -134,7 +154,8 @@ fn muat_menolak_content_type_bukan_html() {
         )
     });
     let url = format!("http://{alamat}/berkas.pdf");
-    let galat = jaringan::muat_blokir(&url, Batas::default()).expect_err("pdf harus ditolak");
+    let galat =
+        jaringan::muat_blokir(&url, Batas::default(), &gerbang()).expect_err("pdf harus ditolak");
     assert!(
         galat.pesan.contains("application/pdf"),
         "pesan: {}",
@@ -151,7 +172,8 @@ fn muat_membatasi_ukuran_badan() {
         byte: 64,
         ..Batas::default()
     };
-    let galat = jaringan::muat_blokir(&url, batas).expect_err("badan besar harus ditolak");
+    let galat =
+        jaringan::muat_blokir(&url, batas, &gerbang()).expect_err("badan besar harus ditolak");
     assert!(
         galat.pesan.contains("melebihi batas 64 byte"),
         "pesan: {}",
@@ -171,7 +193,8 @@ fn muat_mendekode_charset_dari_header() {
         )
     });
     let url = format!("http://{alamat}/latin");
-    let ambil = jaringan::muat_blokir(&url, Batas::default()).expect("dokumen terambil");
+    let ambil =
+        jaringan::muat_blokir(&url, Batas::default(), &gerbang()).expect("dokumen terambil");
     assert_eq!(ambil.charset, "iso-8859-1");
     assert_eq!(ambil.html, "<p>café</p>");
 }
@@ -186,7 +209,8 @@ fn muat_melaporkan_status_galat_tanpa_membuang_badannya() {
         )
     });
     let url = format!("http://{alamat}/hilang");
-    let ambil = jaringan::muat_blokir(&url, Batas::default()).expect("badan 404 tetap diambil");
+    let ambil =
+        jaringan::muat_blokir(&url, Batas::default(), &gerbang()).expect("badan 404 tetap diambil");
     assert_eq!(ambil.status, 404);
     assert_eq!(ambil.html, "<h1>tidak ada</h1>");
 }
@@ -199,7 +223,8 @@ fn muat_menyebut_url_saat_koneksi_ditolak() {
         l.local_addr().expect("alamat").to_string()
     };
     let url = format!("http://{alamat}/tidak-ada");
-    let galat = jaringan::muat_blokir(&url, Batas::default()).expect_err("koneksi harus gagal");
+    let galat =
+        jaringan::muat_blokir(&url, Batas::default(), &gerbang()).expect_err("koneksi harus gagal");
     assert!(galat.pesan.contains(&url), "pesan: {}", galat.pesan);
 }
 
@@ -218,7 +243,8 @@ fn muat_berhenti_saat_server_tidak_menjawab() {
         connect: Duration::from_millis(400),
         ..Batas::default()
     };
-    let galat = jaringan::muat_blokir(&url, batas).expect_err("batas waktu harus berlaku");
+    let galat =
+        jaringan::muat_blokir(&url, batas, &gerbang()).expect_err("batas waktu harus berlaku");
     assert!(galat.pesan.contains(&url), "pesan: {}", galat.pesan);
 }
 
@@ -255,7 +281,7 @@ fn muat_css_menerima_text_css_dan_menolak_html() {
         }
     });
     let url = format!("http://{alamat}/gaya.css");
-    let gaya = jaringan::muat_css_blokir(&url, Batas::default()).expect("css terambil");
+    let gaya = jaringan::muat_css_blokir(&url, Batas::default(), &gerbang()).expect("css terambil");
     assert_eq!(gaya.teks, "body { margin: 0 }");
     assert_eq!(gaya.status, 200);
     assert_eq!(gaya.url, url);
@@ -264,7 +290,8 @@ fn muat_css_menerima_text_css_dan_menolak_html() {
     // bukan gaya. Mengurainya sebagai CSS akan menghasilkan kaskade kosong
     // tanpa satu pun galat.
     let url = format!("http://{alamat}/salah.css");
-    let galat = jaringan::muat_css_blokir(&url, Batas::default()).expect_err("html harus ditolak");
+    let galat = jaringan::muat_css_blokir(&url, Batas::default(), &gerbang())
+        .expect_err("html harus ditolak");
     assert!(
         galat.pesan.contains("text/html"),
         "pesan harus menyebut mime yang diterima: {}",
@@ -286,7 +313,8 @@ fn muat_css_membatasi_ukuran_lembar() {
         byte: 64,
         ..Batas::default()
     };
-    let galat = jaringan::muat_css_blokir(&url, batas).expect_err("lembar besar harus ditolak");
+    let galat =
+        jaringan::muat_css_blokir(&url, batas, &gerbang()).expect_err("lembar besar harus ditolak");
     assert!(
         galat.pesan.contains("melebihi batas 64 byte"),
         "pesan: {}",
@@ -310,7 +338,7 @@ async fn gaya_jaringan_mengambil_tautan_relatif_dan_melewati_media_print() {
         <link rel="alternate stylesheet" href="https://cdn.test/luar.css">
         </head><body><div id="k">isi</div></body></html>"#;
 
-    let hasil = gaya::ambil(&url, dokumen).await;
+    let hasil = gaya::ambil(&url, dokumen, &gerbang()).await;
     assert_eq!(hasil.lembar.len(), 1, "hanya satu yang layak diambil");
     // `href` disimpan apa adanya: kaskade mencocokkannya dengan node `<link>`
     // di pohon, dan URL absolut tidak akan pernah cocok.
@@ -346,12 +374,12 @@ async fn gaya_jaringan_menyelesaikan_href_relatif_terhadap_url_akhir_pengalihan(
     });
 
     let url = format!("http://{alamat}/awal");
-    let ambil = jaringan::muat(&url, Batas::default())
+    let ambil = jaringan::muat(&url, Batas::default(), &gerbang())
         .await
         .expect("dokumen");
     assert_eq!(ambil.url, format!("http://{alamat}/artikel/"), "url akhir");
 
-    let hasil = gaya::ambil(&ambil.url, &ambil.html).await;
+    let hasil = gaya::ambil(&ambil.url, &ambil.html, &gerbang()).await;
     assert_eq!(hasil.lembar.len(), 1, "catatan: {:?}", hasil.catatan);
     assert_eq!(hasil.lembar[0].teks, "p { color: #0000ff }");
 }
@@ -371,10 +399,10 @@ async fn gaya_jaringan_ikut_sampai_ke_layar() {
         ),
     });
     let url = format!("http://{alamat}/halaman");
-    let ambil = jaringan::muat(&url, Batas::default())
+    let ambil = jaringan::muat(&url, Batas::default(), &gerbang())
         .await
         .expect("dokumen");
-    let hasil = gaya::ambil(&ambil.url, &ambil.html).await;
+    let hasil = gaya::ambil(&ambil.url, &ambil.html, &gerbang()).await;
     assert_eq!(hasil.lembar.len(), 1, "catatan: {:?}", hasil.catatan);
 
     let potret = |lembar: Vec<engine::native::LembarLuar>| {
@@ -466,7 +494,7 @@ async fn impor_relatif_diambil_dan_ditaruh_di_depan_aturan_induk() {
         _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
     });
     let dokumen = r#"<html><head><link rel="stylesheet" href="dasar.css"></head><body><p>x</p></body></html>"#;
-    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen, &gerbang()).await;
     assert_eq!(hasil.lembar.len(), 1, "catatan: {:?}", hasil.catatan);
     let teks = &hasil.lembar[0].teks;
     let posisi_anak = teks.find("height: 7px").expect("isi impor ikut");
@@ -487,7 +515,7 @@ async fn impor_siklus_berhenti_dan_dicatat() {
         _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
     });
     let dokumen = r#"<html><head><link rel="stylesheet" href="a.css"></head><body></body></html>"#;
-    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen, &gerbang()).await;
     assert_eq!(hasil.lembar.len(), 1);
     let catatan = hasil.catatan.join(" | ");
     assert!(
@@ -512,7 +540,7 @@ async fn impor_kedalaman_berlebih_dicatat_bukan_diambil() {
         _ => respons("404 Not Found", &[("content-type", "text/plain")], b"-"),
     });
     let dokumen = r#"<html><head><link rel="stylesheet" href="1.css"></head><body></body></html>"#;
-    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen, &gerbang()).await;
     let teks = &hasil.lembar[0].teks;
     assert!(teks.contains("height:4px"), "impor ketiga ikut: {teks:?}");
     assert!(
@@ -534,7 +562,7 @@ async fn impor_berkondisi_media_dicatat_tidak_dijalankan() {
     });
     let dokumen =
         r#"<html><head><link rel="stylesheet" href="dasar.css"></head><body></body></html>"#;
-    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen).await;
+    let hasil = gaya::ambil(&format!("http://{alamat}/"), dokumen, &gerbang()).await;
     let catatan = hasil.catatan.join(" | ");
     assert!(
         catatan.contains("print"),
@@ -582,7 +610,7 @@ async fn font_face_diunduh_dan_bisa_dipasang() {
     assert_eq!(face[0].keluarga, "WebDeva", "nama keluarga tanpa kutip");
     assert_eq!(face[0].sumber, vec!["web.ttf".to_string()]);
 
-    let hasil = gaya::ambil_font(&format!("http://{alamat}/"), &face).await;
+    let hasil = gaya::ambil_font(&format!("http://{alamat}/"), &face, &gerbang()).await;
     assert!(
         hasil.catatan.is_empty(),
         "tidak ada face yang dilewati: {:?}",
@@ -624,7 +652,7 @@ async fn font_face_yang_menjawab_html_dilewati_dengan_alasan() {
     </style></head><body></body></html>"#;
     let doc = engine::native::Document::parse_html(dokumen).expect("dokumen");
     let face = engine::native::css::font_face_dokumen(&doc, &[]);
-    let hasil = gaya::ambil_font(&format!("http://{alamat}/"), &face).await;
+    let hasil = gaya::ambil_font(&format!("http://{alamat}/"), &face, &gerbang()).await;
     assert!(hasil.face.is_empty(), "HTML tidak boleh jadi face");
     let catatan = hasil.catatan.join(" | ");
     assert!(
@@ -644,5 +672,140 @@ async fn font_face_tanpa_url_tidak_diunduh() {
     assert!(
         engine::native::css::font_face_dokumen(&doc, &[]).is_empty(),
         "blok tanpa url() tidak jadi face"
+    );
+}
+
+// --- Gerbang berlaku untuk dokumen, bukan cuma `fetch()` ---
+
+/// Dokumen di alamat loopback ditolak sebelum soket dibuka.
+///
+/// Kebijakan bawaan tidak menyebut satu host pun, dan `127.0.0.1` yang hidup di
+/// sini seharusnya tidak pernah dihubungi. Pemeriksaan `accept` yang
+/// mengembalikan `WouldBlock` itulah buktinya: kalau penolakan terjadi setelah
+/// koneksi, server ini sudah menerima satu sambungan.
+#[test]
+fn gerbang_menolak_dokumen_loopback_sebelum_soket_dibuka() {
+    let pendengar = TcpListener::bind("127.0.0.1:0").expect("port bebas");
+    pendengar
+        .set_nonblocking(true)
+        .expect("pendengar nonblocking");
+    let alamat = pendengar.local_addr().expect("alamat lokal").to_string();
+    let galat = jaringan::muat_blokir(
+        &format!("http://{alamat}/"),
+        Batas::default(),
+        &KebijakanJaringan::default(),
+    )
+    .expect_err("loopback harus ditolak kebijakan bawaan");
+    assert!(
+        galat.pesan.contains("jaringan internal"),
+        "alasan harus menyebut jaringan internal: {}",
+        galat.pesan
+    );
+    assert!(
+        matches!(pendengar.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+        "tidak boleh ada satu koneksi pun ke server yang ditolak"
+    );
+}
+
+/// Loopback boleh diambil saat operator menyebut alamatnya sendiri.
+///
+/// Tanpa tes ini, gerbang yang menolak segalanya akan terlihat benar.
+#[test]
+fn loopback_diizinkan_saat_alamatnya_disebut() {
+    let alamat = server(1, |_| html("<html><body><p>isi</p></body></html>"));
+    let izin = KebijakanJaringan::baru(vec!["127.0.0.1".to_owned()], Vec::new(), Vec::new());
+    let ambil = jaringan::muat_blokir(&format!("http://{alamat}/"), Batas::default(), &izin)
+        .expect("loopback yang disebut harus diambil");
+    assert_eq!(ambil.status, 200);
+}
+
+/// Nama yang menyelesaikan ke loopback ikut ditolak.
+///
+/// Pemeriksaan IP literal saja tidak cukup: `localhost` lolos sebagai "bukan
+/// alamat internal", lalu disambungkan oleh klien HTTP-nya sendiri.
+#[test]
+fn nama_loopback_yang_tidak_disebut_ditolak() {
+    let izin = KebijakanJaringan::baru(vec!["contoh.test".to_owned()], Vec::new(), Vec::new());
+    let galat = jaringan::muat_blokir("http://localhost:9/", Batas::default(), &izin)
+        .expect_err("localhost harus ditolak");
+    assert!(
+        galat.pesan.contains("loopback"),
+        "alasan harus menyebut loopback: {}",
+        galat.pesan
+    );
+}
+
+/// Alamat metadata cloud tetap ditolak walaupun operator menuliskannya.
+///
+/// `169.254.169.254` adalah link-local, bukan loopback: menyebutkannya di
+/// `izin_host` tidak boleh membukanya, karena kredensial instans ada di sana.
+#[test]
+fn alamat_link_local_ditolak_walau_disebut_di_izin() {
+    let izin = KebijakanJaringan::baru(
+        vec!["127.0.0.1".to_owned(), "169.254.169.254".to_owned()],
+        Vec::new(),
+        Vec::new(),
+    );
+    let alasan = izin
+        .putuskan_dokumen("http://169.254.169.254/latest/meta-data/")
+        .alasan()
+        .expect("link-local harus ditolak")
+        .to_owned();
+    assert!(
+        alasan.contains("link-local"),
+        "alasan harus menyebut link-local: {alasan}"
+    );
+}
+
+/// Pengalihan ke nama loopback yang tidak disebut ditolak di hop kedua.
+///
+/// Hop pertama sah dan harus tetap diambil; yang diperiksa adalah tujuan
+/// pengalihannya. Kalau gerbang hanya diperiksa sekali di awal, satu `302`
+/// cukup untuk keliling ke alamat internal: itulah bentuk serangan yang ditutup
+/// di sini.
+#[test]
+fn pengalihan_ke_nama_loopback_yang_tidak_disebut_ditolak_di_hop_kedua() {
+    let tujuan = TcpListener::bind("127.0.0.1:0").expect("port tujuan bebas");
+    tujuan.set_nonblocking(true).expect("tujuan nonblocking");
+    let port_tujuan = tujuan.local_addr().expect("alamat tujuan").port();
+    let alamat = server(1, move |_| {
+        let lokasi = format!("http://localhost:{port_tujuan}/dalam");
+        respons("302 Found", &[("location", lokasi.as_str())], b"")
+    });
+    let izin = KebijakanJaringan::baru(vec!["127.0.0.1".to_owned()], Vec::new(), Vec::new());
+    let galat = jaringan::muat_blokir(&format!("http://{alamat}/awal"), Batas::default(), &izin)
+        .expect_err("pengalihan ke nama loopback yang tidak disebut harus ditolak");
+    assert!(
+        galat.pesan.contains("loopback"),
+        "alasan harus menyebut loopback: {}",
+        galat.pesan
+    );
+    assert!(
+        matches!(tujuan.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+        "tujuan pengalihan tidak boleh menerima koneksi"
+    );
+}
+
+/// Pengalihan ke alamat link-local ditolak walaupun disebut di izin.
+#[test]
+fn pengalihan_ke_alamat_link_local_ditolak() {
+    let alamat = server(1, |_| {
+        respons(
+            "302 Found",
+            &[("location", "http://169.254.169.254/latest/meta-data/")],
+            b"",
+        )
+    });
+    let izin = KebijakanJaringan::baru(
+        vec!["127.0.0.1".to_owned(), "169.254.169.254".to_owned()],
+        Vec::new(),
+        Vec::new(),
+    );
+    let galat = jaringan::muat_blokir(&format!("http://{alamat}/awal"), Batas::default(), &izin)
+        .expect_err("pengalihan ke link-local harus ditolak");
+    assert!(
+        galat.pesan.contains("link-local"),
+        "alasan harus menyebut link-local: {}",
+        galat.pesan
     );
 }

@@ -24,6 +24,7 @@ use engine::native::css::{FontFace, LembarLuar, tautan_eksternal};
 use futures_util::future::join_all;
 use url::Url;
 
+use super::ambil::KebijakanJaringan;
 use super::jaringan::{
     self, BATAS_BYTE_CSS, BATAS_BYTE_FONT, BATAS_TOTAL_CSS, BATAS_TOTAL_FONT, BATAS_WAKTU_CSS,
     BATAS_WAKTU_FONT, Batas, MAKS_FONT, MAKS_LEMBAR,
@@ -43,7 +44,7 @@ pub struct Hasil {
 ///
 /// Tidak pernah mengembalikan galat: satu stylesheet yang gagal diambil tidak
 /// boleh menggagalkan navigasi. Yang gagal masuk `catatan`.
-pub async fn ambil(url_dokumen: &str, html: &str) -> Hasil {
+pub async fn ambil(url_dokumen: &str, html: &str, kebijakan: &KebijakanJaringan) -> Hasil {
     let dokumen = match Document::parse_html(html) {
         Ok(dok) => dok,
         Err(err) => {
@@ -53,11 +54,15 @@ pub async fn ambil(url_dokumen: &str, html: &str) -> Hasil {
             };
         }
     };
-    ambil_dari(url_dokumen, &dokumen).await
+    ambil_dari(url_dokumen, &dokumen, kebijakan).await
 }
 
 /// Sama dengan [`ambil`], tapi pohon dokumennya sudah ada.
-pub async fn ambil_dari(url_dokumen: &str, dokumen: &Document) -> Hasil {
+pub async fn ambil_dari(
+    url_dokumen: &str,
+    dokumen: &Document,
+    kebijakan: &KebijakanJaringan,
+) -> Hasil {
     let (tautan, catatan_tautan) = tautan_eksternal(dokumen);
     if tautan.is_empty() {
         return Hasil {
@@ -104,7 +109,7 @@ pub async fn ambil_dari(url_dokumen: &str, dokumen: &Document) -> Hasil {
     let hasil = join_all(
         sasaran
             .iter()
-            .map(|(_, url)| jaringan::muat_css(url, batas)),
+            .map(|(_, url)| jaringan::muat_css(url, batas, kebijakan)),
     )
     .await;
 
@@ -124,7 +129,7 @@ pub async fn ambil_dari(url_dokumen: &str, dokumen: &Document) -> Hasil {
                 // induk: aturan impor harus mendahului aturan lain di lembar
                 // yang mengimpornya, jadi lembar yang diimpor kalah oleh
                 // aturan induknya, bukan menang.
-                let teks = kembangkan(url, gaya.teks, 0, &mut ktx, batas).await;
+                let teks = kembangkan(url, gaya.teks, 0, &mut ktx, batas, kebijakan).await;
                 lembar.push(LembarLuar::baru(href.clone(), teks));
             }
             Err(galat) => ktx
@@ -158,7 +163,11 @@ pub struct HasilFont {
 ///
 /// Tidak pernah mengembalikan galat. Satu webfont yang gagal tidak boleh
 /// menggagalkan navigasi; yang gagal masuk `catatan`.
-pub async fn ambil_font(dasar: &str, faces: &[FontFace]) -> HasilFont {
+pub async fn ambil_font(
+    dasar: &str,
+    faces: &[FontFace],
+    kebijakan: &KebijakanJaringan,
+) -> HasilFont {
     let mut hasil = HasilFont::default();
     let mut sasaran = Vec::new();
     for face in faces {
@@ -196,7 +205,7 @@ pub async fn ambil_font(dasar: &str, faces: &[FontFace]) -> HasilFont {
     let jawaban = join_all(
         sasaran
             .iter()
-            .map(|(_, url)| jaringan::muat_font(url, batas)),
+            .map(|(_, url)| jaringan::muat_font(url, batas, kebijakan)),
     )
     .await;
 
@@ -408,6 +417,7 @@ fn kembangkan<'a>(
     kedalaman: usize,
     ktx: &'a mut Konteks,
     batas: jaringan::Batas,
+    kebijakan: &'a KebijakanJaringan,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
     Box::pin(async move {
         let (impor, sisa) = impor_dari(&teks);
@@ -445,7 +455,7 @@ fn kembangkan<'a>(
                 ));
                 continue;
             }
-            let gaya = match jaringan::muat_css(&absolut, batas).await {
+            let gaya = match jaringan::muat_css(&absolut, batas, kebijakan).await {
                 Ok(g) => g,
                 Err(galat) => {
                     ktx.catatan.push(format!(
@@ -463,7 +473,7 @@ fn kembangkan<'a>(
                 continue;
             }
             ktx.total += gaya.byte;
-            let dalam = kembangkan(&absolut, gaya.teks, kedalaman + 1, ktx, batas).await;
+            let dalam = kembangkan(&absolut, gaya.teks, kedalaman + 1, ktx, batas, kebijakan).await;
             depan.push_str(&dalam);
             if !dalam.ends_with('\n') {
                 depan.push('\n');

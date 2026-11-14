@@ -6,8 +6,26 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 
+use cdp::native_wire::KebijakanJaringan;
 use cdp::native_wire::bingkai;
 use engine::native::Document;
+
+/// Gerbang jaringan untuk tes: hanya loopback yang dibuka.
+///
+/// Servernya dijalankan tes ini sendiri di `127.0.0.1`, jadi alamat itu harus
+/// disebut eksplisit. Membuka seluruh alamat internal di sini akan membuat
+/// gerbang yang justru sedang diuji tidak pernah teruji.
+fn gerbang() -> KebijakanJaringan {
+    KebijakanJaringan::baru(
+        vec![
+            "127.0.0.1".to_owned(),
+            "localhost".to_owned(),
+            "::1".to_owned(),
+        ],
+        Vec::new(),
+        Vec::new(),
+    )
+}
 
 /// Server HTTP satu pakai. Menerima `n` koneksi lalu berhenti.
 fn server(n: usize, jawab: impl Fn(&str) -> Vec<u8> + Send + 'static) -> String {
@@ -71,7 +89,7 @@ async fn iframe_same_origin_diambil_dan_lintas_asal_dilewati() {
         port = asal.rsplit(':').next().unwrap()
     );
     let dokumen = Document::parse_html(&isi).expect("HTML induk harus terurai");
-    let hasil = bingkai::ambil(&induk, &dokumen).await;
+    let hasil = bingkai::ambil(&induk, &dokumen, &gerbang()).await;
 
     // Hanya satu iframe yang butuh jaringan, jadi hanya satu yang diambil.
     assert_eq!(hasil.dokumen.len(), 1, "catatan: {:?}", hasil.catatan);
@@ -103,7 +121,7 @@ async fn iframe_tanpa_dasar_ditolak_bukan_ditebak() {
     // membuka batas yang seharusnya dijaga.
     let dokumen = Document::parse_html(r#"<iframe src="http://contoh.test/anak"></iframe>"#)
         .expect("HTML harus terurai");
-    let hasil = bingkai::ambil("about:blank", &dokumen).await;
+    let hasil = bingkai::ambil("about:blank", &dokumen, &gerbang()).await;
     assert!(hasil.dokumen.is_empty());
     assert_eq!(hasil.catatan.len(), 1, "{:?}", hasil.catatan);
     assert!(hasil.catatan[0].contains("asal"), "{:?}", hasil.catatan);
@@ -120,7 +138,7 @@ async fn batas_jumlah_iframe_dilaporkan() {
     }
     isi.push_str("</body>");
     let dokumen = Document::parse_html(&isi).expect("HTML harus terurai");
-    let hasil = bingkai::ambil("http://127.0.0.1:1/induk", &dokumen).await;
+    let hasil = bingkai::ambil("http://127.0.0.1:1/induk", &dokumen, &gerbang()).await;
     assert!(
         hasil.catatan.iter().any(|c| c.contains("melewati batas")),
         "batas iframe harus dilaporkan: {:?}",

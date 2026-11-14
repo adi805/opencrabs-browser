@@ -29,6 +29,7 @@ use engine::native::Document;
 use engine::native::bingkai::{Muatan, rencana};
 use futures_util::future::join_all;
 
+use super::ambil::KebijakanJaringan;
 use super::jaringan::{self, Batas};
 
 /// Jumlah iframe yang diambil untuk satu dokumen induk.
@@ -59,7 +60,7 @@ pub struct Hasil {
 /// menggagalkan navigasi induknya. `srcdoc` tidak melewati jaringan sama
 /// sekali, jadi ia tidak muncul di sini: pemasangannya diputuskan
 /// `TabPool::pasang_bingkai_dari` dari pohonnya sendiri.
-pub async fn ambil(url_dokumen: &str, dokumen: &Document) -> Hasil {
+pub async fn ambil(url_dokumen: &str, dokumen: &Document, kebijakan: &KebijakanJaringan) -> Hasil {
     let mut catatan = Vec::new();
     let mut target: Vec<(usize, String)> = Vec::new();
     for (simpul, node) in dokumen.nodes().iter().enumerate() {
@@ -92,7 +93,12 @@ pub async fn ambil(url_dokumen: &str, dokumen: &Document) -> Hasil {
         waktu: BATAS_WAKTU_BINGKAI,
         ..Batas::default()
     };
-    let hasil = join_all(target.iter().map(|(_, url)| jaringan::muat(url, batas))).await;
+    let hasil = join_all(
+        target
+            .iter()
+            .map(|(_, url)| jaringan::muat(url, batas, kebijakan)),
+    )
+    .await;
 
     let mut dokumen_anak = Vec::new();
     let mut total = 0usize;

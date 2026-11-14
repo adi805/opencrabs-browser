@@ -17,8 +17,11 @@
 //!   HTML yang perlu dibaca agen, dan statusnya dilaporkan apa adanya
 
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use url::Url;
+
+use super::ambil::KebijakanJaringan;
 use super::state::Galat;
 
 /// Batas badan yang diterima. Delapan mebibyte cukup untuk halaman artikel
@@ -177,10 +180,15 @@ pub fn butuh_jaringan(url: &str) -> bool {
 /// Galat dari thread pengambilan diteruskan sebagai galat protokol, bukan
 /// `panic`: satu halaman yang tidak bisa diambil tidak boleh menjatuhkan
 /// daemon yang sedang melayani tab lain.
-pub async fn muat(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
+pub async fn muat(
+    url: &str,
+    batas: Batas,
+    kebijakan: &KebijakanJaringan,
+) -> Result<Ambilan, Galat> {
     let url = url.to_owned();
     let untuk_galat = url.clone();
-    tokio::task::spawn_blocking(move || muat_blokir(&url, batas))
+    let kebijakan = kebijakan.clone();
+    tokio::task::spawn_blocking(move || muat_blokir(&url, batas, &kebijakan))
         .await
         .map_err(|err| {
             Galat::baru(
@@ -191,8 +199,12 @@ pub async fn muat(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
 }
 
 /// Versi blocking, dipakai tes dan `spawn_blocking`.
-pub fn muat_blokir(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
-    let jawaban = ambil_badan(url, batas)?;
+pub fn muat_blokir(
+    url: &str,
+    batas: Batas,
+    kebijakan: &KebijakanJaringan,
+) -> Result<Ambilan, Galat> {
+    let jawaban = ambil_badan(url, batas, kebijakan)?;
     let mime = mime_dari(&jawaban.content_type);
     if !mime.is_empty() && mime != "text/html" && mime != "application/xhtml+xml" {
         return Err(Galat::baru(
@@ -218,10 +230,15 @@ pub fn muat_blokir(url: &str, batas: Batas) -> Result<Ambilan, Galat> {
 }
 
 /// Mengambil satu berkas font di `spawn_blocking`.
-pub async fn muat_font(url: &str, batas: Batas) -> Result<Font, Galat> {
+pub async fn muat_font(
+    url: &str,
+    batas: Batas,
+    kebijakan: &KebijakanJaringan,
+) -> Result<Font, Galat> {
     let url = url.to_owned();
     let untuk_galat = url.clone();
-    tokio::task::spawn_blocking(move || muat_font_blokir(&url, batas))
+    let kebijakan = kebijakan.clone();
+    tokio::task::spawn_blocking(move || muat_font_blokir(&url, batas, &kebijakan))
         .await
         .map_err(|err| {
             Galat::baru(
@@ -239,8 +256,12 @@ pub async fn muat_font(url: &str, batas: Batas) -> Result<Font, Galat> {
 /// menyajikan halaman galat di URL `.woff2` akan menghasilkan byte yang bukan
 /// font, dan memasangnya sebagai face berarti melaporkan "font rusak" untuk
 /// masalah yang sebenarnya 404.
-pub fn muat_font_blokir(url: &str, batas: Batas) -> Result<Font, Galat> {
-    let jawaban = ambil_badan(url, batas)?;
+pub fn muat_font_blokir(
+    url: &str,
+    batas: Batas,
+    kebijakan: &KebijakanJaringan,
+) -> Result<Font, Galat> {
+    let jawaban = ambil_badan(url, batas, kebijakan)?;
     let mime = mime_dari(&jawaban.content_type);
     let diterima = mime.is_empty()
         || mime.starts_with("font/")
@@ -267,10 +288,15 @@ pub fn muat_font_blokir(url: &str, batas: Batas) -> Result<Font, Galat> {
 }
 
 /// Mengambil satu lembar gaya di `spawn_blocking`.
-pub async fn muat_css(url: &str, batas: Batas) -> Result<Gaya, Galat> {
+pub async fn muat_css(
+    url: &str,
+    batas: Batas,
+    kebijakan: &KebijakanJaringan,
+) -> Result<Gaya, Galat> {
     let url = url.to_owned();
     let untuk_galat = url.clone();
-    tokio::task::spawn_blocking(move || muat_css_blokir(&url, batas))
+    let kebijakan = kebijakan.clone();
+    tokio::task::spawn_blocking(move || muat_css_blokir(&url, batas, &kebijakan))
         .await
         .map_err(|err| {
             Galat::baru(
@@ -287,8 +313,12 @@ pub async fn muat_css(url: &str, batas: Batas) -> Result<Gaya, Galat> {
 /// akan dilewati dengan nama mime-nya, bukan ditebak: menebak berarti
 /// menjalankan apa pun yang kebetulan berakhiran `.css` sebagai CSS, dan
 /// `text/html` yang disajikan di URL `.css` adalah halaman galat, bukan gaya.
-pub fn muat_css_blokir(url: &str, batas: Batas) -> Result<Gaya, Galat> {
-    let jawaban = ambil_badan(url, batas)?;
+pub fn muat_css_blokir(
+    url: &str,
+    batas: Batas,
+    kebijakan: &KebijakanJaringan,
+) -> Result<Gaya, Galat> {
+    let jawaban = ambil_badan(url, batas, kebijakan)?;
     let mime = mime_dari(&jawaban.content_type);
     if !mime.is_empty() && mime != "text/css" {
         return Err(Galat::baru(
@@ -327,56 +357,119 @@ struct Jawaban {
 /// Status 4xx/5xx tetap diambil badannya, seperti browser: halaman 404 punya
 /// HTML yang perlu dibaca agen, dan stylesheet 404 tetap dilaporkan statusnya
 /// alih-alih diperlakukan sebagai "tidak ada gaya".
-fn ambil_badan(url: &str, batas: Batas) -> Result<Jawaban, Galat> {
+///
+/// Pengalihan **tidak** diserahkan ke `ureq`. `redirects(0)` dipasang dan tiap
+/// lompatan diperiksa gerbang yang sama **sebelum** soketnya dibuka: satu `302`
+/// dari host publik cukup untuk mendarat di `127.0.0.1`, dan gerbang yang cuma
+/// memeriksa URL pertama tidak akan pernah melihat hop kedua.
+fn ambil_badan(url: &str, batas: Batas, kebijakan: &KebijakanJaringan) -> Result<Jawaban, Galat> {
     if !butuh_jaringan(url) {
         return Err(Galat::baru(
             -32000,
             format!("'{url}' bukan URL http/https, jadi tidak ada yang bisa diambil dari jaringan"),
         ));
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(batas.connect)
-        .timeout(batas.waktu)
-        .redirects(batas.redirect)
-        .user_agent(super::USER_AGENT)
-        .build();
-    let resp = match agent.get(url).call() {
-        Ok(resp) => resp,
-        Err(ureq::Error::Status(_, resp)) => resp,
-        Err(ureq::Error::Transport(t)) => {
+    let mulai = Instant::now();
+    let mut url = url.trim().to_owned();
+    let mut sisa_lompatan = batas.redirect;
+    loop {
+        // Diperiksa di setiap hop, termasuk hop pertama. Penolakan yang baru
+        // terjadi setelah koneksi berarti permintaannya sudah terkirim.
+        if let Some(alasan) = kebijakan.putuskan_dokumen(&url).alasan() {
             return Err(Galat::baru(
                 -32000,
-                format!("'{url}' tidak bisa diambil: {t}"),
+                format!("'{url}' ditolak gerbang jaringan: {alasan}"),
             ));
         }
-    };
-    let status = resp.status();
-    let url_akhir = resp.get_url().to_owned();
-    let content_type = resp.header("content-type").unwrap_or("").to_owned();
-    let mut buf = Vec::new();
-    let batas_baca = u64::try_from(batas.byte)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    resp.into_reader()
-        .take(batas_baca)
-        .read_to_end(&mut buf)
-        .map_err(|err| Galat::baru(-32000, format!("badan '{url_akhir}' gagal dibaca: {err}")))?;
-    if buf.len() > batas.byte {
-        return Err(Galat::baru(
-            -32000,
-            format!(
-                "badan '{url_akhir}' melebihi batas {} byte; permintaan dihentikan alih-alih \
-                 memakan RAM daemon",
-                batas.byte
-            ),
-        ));
+        let sisa = batas.waktu.saturating_sub(mulai.elapsed());
+        if sisa.is_zero() {
+            return Err(Galat::baru(
+                -32000,
+                format!(
+                    "pengambilan '{url}' melewati batas waktu {} detik",
+                    batas.waktu.as_secs()
+                ),
+            ));
+        }
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(batas.connect.min(sisa))
+            .timeout(sisa)
+            .redirects(0)
+            .user_agent(super::USER_AGENT)
+            .build();
+        let resp = match agent.get(&url).call() {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(_, resp)) => resp,
+            Err(ureq::Error::Transport(t)) => {
+                return Err(Galat::baru(
+                    -32000,
+                    format!("'{url}' tidak bisa diambil: {t}"),
+                ));
+            }
+        };
+        let status = resp.status();
+        if (300..400).contains(&status)
+            && let Some(lokasi) = resp.header("location")
+        {
+            if sisa_lompatan == 0 {
+                return Err(Galat::baru(
+                    -32000,
+                    format!(
+                        "pengalihan '{url}' melebihi batas {} lompatan",
+                        batas.redirect
+                    ),
+                ));
+            }
+            let tujuan = Url::parse(&url)
+                .and_then(|dasar| dasar.join(lokasi))
+                .map_err(|err| {
+                    Galat::baru(
+                        -32000,
+                        format!("pengalihan '{url}' ke '{lokasi}' tidak bisa diurai: {err}"),
+                    )
+                })?;
+            if !butuh_jaringan(tujuan.as_str()) {
+                return Err(Galat::baru(
+                    -32000,
+                    format!(
+                        "'{url}' mengalihkan ke '{tujuan}'; mesin ini hanya mengikuti \
+                         pengalihan http/https"
+                    ),
+                ));
+            }
+            sisa_lompatan -= 1;
+            url = tujuan.to_string();
+            continue;
+        }
+        let url_akhir = url.clone();
+        let content_type = resp.header("content-type").unwrap_or("").to_owned();
+        let mut buf = Vec::new();
+        let batas_baca = u64::try_from(batas.byte)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        resp.into_reader()
+            .take(batas_baca)
+            .read_to_end(&mut buf)
+            .map_err(|err| {
+                Galat::baru(-32000, format!("badan '{url_akhir}' gagal dibaca: {err}"))
+            })?;
+        if buf.len() > batas.byte {
+            return Err(Galat::baru(
+                -32000,
+                format!(
+                    "badan '{url_akhir}' melebihi batas {} byte; permintaan dihentikan alih-alih \
+                     memakan RAM daemon",
+                    batas.byte
+                ),
+            ));
+        }
+        return Ok(Jawaban {
+            url: url_akhir,
+            status,
+            content_type,
+            badan: buf,
+        });
     }
-    Ok(Jawaban {
-        url: url_akhir,
-        status,
-        content_type,
-        badan: buf,
-    })
 }
 
 /// Mime telanjang dari header `content-type`, tanpa parameter.

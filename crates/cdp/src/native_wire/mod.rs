@@ -73,6 +73,11 @@ struct App {
     ws_browser: String,
     /// `host:port` milik server ini, untuk menyusun URL soket per halaman.
     authority: String,
+    /// Gerbang jaringan untuk navigasi dan sub-sumber yang diambil mesin:
+    /// stylesheet, font, `iframe`. Dibawa di sini karena `Page.navigate` dan
+    /// `Target.createTarget` sama-sama butuh, dan keduanya tidak lewat
+    /// `fetch()` di dalam isolat.
+    kebijakan: KebijakanJaringan,
 }
 
 /// Mesin native: state tab di memori, server CDP di task tokio.
@@ -93,8 +98,14 @@ impl NativeEngine {
     /// Sinkron, seperti penggerak lain, tapi butuh runtime tokio yang sedang
     /// aktif karena servernya hidup di dalam proses daemon. Dipanggil dari
     /// `spawn_blocking`, `Handle::current()` tetap tersedia.
+    ///
+    /// Gerbang jaringannya [`KebijakanJaringan::default`]: `fetch()` menolak
+    /// semua, sedangkan navigasi ke host publik diizinkan dan alamat internal
+    /// (loopback, privat, link-local, metadata) ditolak. Pemanggil yang butuh
+    /// alamat internal memakai [`Self::start_dengan`] dengan kebijakan eksplisit,
+    /// bukan mengandalkan bawaan yang longgar.
     pub fn start(spec: LaunchSpec) -> Result<Self, EngineError> {
-        Self::start_dengan(spec, pabrik_memori(), None)
+        Self::start_dengan(spec, pabrik_memori(), None, KebijakanJaringan::default())
     }
 
     /// Sama dengan [`Self::start`], tapi penyimpanan dingin dan gerbang
@@ -104,10 +115,17 @@ impl NativeEngine {
     /// `fetch()` di dalam isolat lewat kebijakannya. Tanpa `pengambil`, setiap
     /// tab memakai [`engine::native::ambil::PengambilTolak`]: `fetch` menolak
     /// semua dengan alasan, bukan diam-diam mengizinkan.
+    ///
+    /// `kebijakan` berlaku untuk **dua** jalur sekaligus: `fetch()` di dalam
+    /// isolat (lewat `pengambil`, kalau ada) dan navigasi dokumen beserta
+    /// sub-sumbernya. Sebelum ini navigasi tidak diperiksa sama sekali, jadi
+    /// `Page.navigate` ke `127.0.0.1` berhasil walaupun `fetch()` ke alamat
+    /// yang sama ditolak.
     pub fn start_dengan(
         spec: LaunchSpec,
         pabrik: PabrikDingin,
         pengambil: Option<Arc<dyn Pengambil>>,
+        kebijakan: KebijakanJaringan,
     ) -> Result<Self, EngineError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             EngineError::Io(std::io::Error::other(
@@ -130,6 +148,7 @@ impl NativeEngine {
             state: state.clone(),
             ws_browser: ws.clone(),
             authority,
+            kebijakan,
         });
 
         let (tutup, tunggu) = oneshot::channel();
@@ -243,6 +262,7 @@ impl NativeEngine {
 pub struct PenggerakNative {
     dingin: PabrikDingin,
     pengambil: Option<Arc<dyn Pengambil>>,
+    kebijakan: KebijakanJaringan,
 }
 
 impl Default for PenggerakNative {
@@ -262,6 +282,7 @@ impl PenggerakNative {
         Self {
             dingin,
             pengambil: None,
+            kebijakan: KebijakanJaringan::default(),
         }
     }
 
@@ -271,7 +292,21 @@ impl PenggerakNative {
         Self {
             dingin,
             pengambil: Some(pengambil),
+            kebijakan: KebijakanJaringan::default(),
         }
+    }
+
+    /// Memasang kebijakan jaringan yang juga berlaku untuk navigasi.
+    ///
+    /// Dipisah dari konstruktor karena kebijakan ini dipakai dua jalur:
+    /// `fetch()` di dalam isolat dan `Page.navigate` beserta sub-sumbernya.
+    /// Daemon yang punya `[fetch]` memasangnya di sini, dan daemon yang tidak
+    /// punya pun tetap memakai [`KebijakanJaringan::default`] yang menolak
+    /// alamat internal.
+    #[must_use]
+    pub fn dengan_kebijakan(mut self, kebijakan: KebijakanJaringan) -> Self {
+        self.kebijakan = kebijakan;
+        self
     }
 }
 
@@ -294,6 +329,7 @@ impl Penggerak for PenggerakNative {
             spec.clone(),
             Arc::clone(&self.dingin),
             self.pengambil.as_ref().map(Arc::clone),
+            self.kebijakan.clone(),
         )
         .map(|engine| Arc::new(engine) as Arc<dyn Engine>)
     }
@@ -361,7 +397,7 @@ async fn target_baru(State(app): State<App>, uri: Uri) -> Response {
         Some(query) => percent_decode(query),
         None => String::new(),
     };
-    let (ambilan, gaya) = match ambil_untuk_url(&url).await {
+    let (ambilan, gaya) = match ambil_untuk_url(&url, &app.kebijakan).await {
         Some(j) => (Some(j.ambilan), j.gaya),
         None => (None, LembarJaringan::default()),
     };
@@ -456,7 +492,7 @@ async fn sehat(State(app): State<App>) -> Json<Value> {
 }
 
 async fn ws_browser(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
-    ws.on_upgrade(move |socket| layani(socket, app.state, None))
+    ws.on_upgrade(move |socket| layani(socket, app.state, app.kebijakan, None))
 }
 
 async fn ws_halaman(
@@ -465,13 +501,20 @@ async fn ws_halaman(
     Path(id): Path<String>,
 ) -> Response {
     match app.state.sesi_halaman(&id) {
-        Ok(sesi) => ws.on_upgrade(move |socket| layani(socket, app.state, Some(sesi))),
+        Ok(sesi) => {
+            ws.on_upgrade(move |socket| layani(socket, app.state, app.kebijakan, Some(sesi)))
+        }
         Err(galat) => jawab_galat(galat),
     }
 }
 
 /// Satu sesi websocket: satu frame masuk, satu jawaban keluar.
-async fn layani(socket: WebSocket, state: NativeState, sesi: Option<String>) {
+async fn layani(
+    socket: WebSocket,
+    state: NativeState,
+    kebijakan: KebijakanJaringan,
+    sesi: Option<String>,
+) {
     let (mut tx, mut rx) = socket.split();
     while let Some(pesan) = rx.next().await {
         let teks = match pesan {
@@ -481,7 +524,7 @@ async fn layani(socket: WebSocket, state: NativeState, sesi: Option<String>) {
         };
         // Jaringan diambil di sini, sebelum kunci state: frame yang tidak
         // menavigasi ke `http`/`https` tidak menyentuh jaringan sama sekali.
-        let ambilan = ambil_untuk_frame(&teks).await;
+        let ambilan = ambil_untuk_frame(&teks, &kebijakan).await;
         let (dokumen, gaya) = match ambilan {
             Some(j) => (Some(j.ambilan), j.gaya),
             None => (None, LembarJaringan::default()),
@@ -514,28 +557,28 @@ struct JaringanDokumen {
 }
 
 /// Mengambil dokumen untuk satu URL kalau URL itu memang butuh jaringan.
-async fn ambil_untuk_url(url: &str) -> Option<JaringanDokumen> {
+async fn ambil_untuk_url(url: &str, kebijakan: &KebijakanJaringan) -> Option<JaringanDokumen> {
     if !jaringan::butuh_jaringan(url) {
         return None;
     }
-    Some(ambil_dokumen(url).await)
+    Some(ambil_dokumen(url, kebijakan).await)
 }
 
 /// Mengambil dokumen lalu stylesheet-nya.
 ///
 /// Kalau dokumennya gagal diambil, tidak ada HTML untuk diurai, jadi tidak ada
 /// tautan yang bisa diambil: `gaya` dibiarkan kosong alih-alih menebak URL.
-async fn ambil_dokumen(url: &str) -> JaringanDokumen {
-    let ambilan = jaringan::muat(url, jaringan::Batas::default()).await;
+async fn ambil_dokumen(url: &str, kebijakan: &KebijakanJaringan) -> JaringanDokumen {
+    let ambilan = jaringan::muat(url, jaringan::Batas::default(), kebijakan).await;
     let gaya = match &ambilan {
         Ok(a) => {
-            let hasil = gaya::ambil(&a.url, &a.html).await;
+            let hasil = gaya::ambil(&a.url, &a.html, kebijakan).await;
             let mut catatan = hasil.catatan;
-            let font = unduh_font(&a.url, &a.html, &hasil.lembar, &mut catatan).await;
+            let font = unduh_font(&a.url, &a.html, &hasil.lembar, &mut catatan, kebijakan).await;
             // Dokumen `<iframe>` diambil setelah stylesheet: iframe bukan
             // prasyarat tampilan induk, jadi induk tidak menunggu anaknya
             // lebih lama dari yang perlu.
-            let (bingkai, catatan_bingkai) = ambil_bingkai(&a.url, &a.html).await;
+            let (bingkai, catatan_bingkai) = ambil_bingkai(&a.url, &a.html, kebijakan).await;
             LembarJaringan {
                 lembar: hasil.lembar,
                 catatan,
@@ -556,7 +599,11 @@ async fn ambil_dokumen(url: &str) -> JaringanDokumen {
 /// yang dipakai kaskade belum ada saat pengambilan ini berjalan. Kalau HTML
 /// tidak bisa diurai, tidak ada iframe yang bisa dipanggil, jadi hasilnya
 /// kosong.
-async fn ambil_bingkai(dasar: &str, html: &str) -> (Vec<(String, String)>, Vec<String>) {
+async fn ambil_bingkai(
+    dasar: &str,
+    html: &str,
+    kebijakan: &KebijakanJaringan,
+) -> (Vec<(String, String)>, Vec<String>) {
     let dokumen = match Document::parse_html(html) {
         Ok(dok) => dok,
         Err(err) => {
@@ -568,7 +615,7 @@ async fn ambil_bingkai(dasar: &str, html: &str) -> (Vec<(String, String)>, Vec<S
             );
         }
     };
-    let hasil = bingkai::ambil(dasar, &dokumen).await;
+    let hasil = bingkai::ambil(dasar, &dokumen, kebijakan).await;
     (hasil.dokumen, hasil.catatan)
 }
 
@@ -582,6 +629,7 @@ async fn unduh_font(
     html: &str,
     lembar: &[engine::native::css::LembarLuar],
     catatan: &mut Vec<String>,
+    kebijakan: &KebijakanJaringan,
 ) -> std::sync::Arc<engine::native::teks::KumpulanFont> {
     // Dokumen diurai ulang di sini, bukan diserahkan pemanggil: `@font-face`
     // boleh datang dari `<style>` sebaris, dan pohon yang dipakai kaskade belum
@@ -597,7 +645,7 @@ async fn unduh_font(
     if face.is_empty() {
         return std::sync::Arc::new(engine::native::teks::KumpulanFont::baru());
     }
-    let hasil = gaya::ambil_font(dasar, &face).await;
+    let hasil = gaya::ambil_font(dasar, &face, kebijakan).await;
     catatan.extend(hasil.catatan);
     let mut kumpulan = engine::native::teks::KumpulanFont::baru();
     for (keluarga, byte) in hasil.face {
@@ -616,7 +664,7 @@ async fn unduh_font(
 ///
 /// Frame yang bukan navigasi jaringan mengembalikan `None`, termasuk frame
 /// yang bukan JSON: frame rusak dijawab oleh penerjemah, bukan di sini.
-async fn ambil_untuk_frame(teks: &str) -> Option<JaringanDokumen> {
+async fn ambil_untuk_frame(teks: &str, kebijakan: &KebijakanJaringan) -> Option<JaringanDokumen> {
     let frame: Value = serde_json::from_str(teks).ok()?;
     let url = match frame.get("method")?.as_str()? {
         "Page.navigate" | "Target.createTarget" => {
@@ -624,7 +672,7 @@ async fn ambil_untuk_frame(teks: &str) -> Option<JaringanDokumen> {
         }
         _ => return None,
     };
-    ambil_untuk_url(&url).await
+    ambil_untuk_url(&url, kebijakan).await
 }
 
 fn jawab_galat(galat: Galat) -> Response {

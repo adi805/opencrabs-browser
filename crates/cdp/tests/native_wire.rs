@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use cdp::native_wire::{KIND, NativeEngine, PRODUK, USER_AGENT};
+use cdp::native_wire::{KIND, KebijakanJaringan, NativeEngine, PRODUK, USER_AGENT, pabrik_memori};
 use engine::{Engine, LaunchSpec};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -29,6 +29,27 @@ fn spec() -> LaunchSpec {
 
 fn nyalakan() -> NativeEngine {
     NativeEngine::start(spec()).expect("mesin native menyala")
+}
+
+/// Gerbang yang membuka loopback secara sadar.
+///
+/// Tes di berkas ini menjalankan server-nya sendiri di `127.0.0.1`, sedangkan
+/// gerbang bawaan `NativeEngine::start` menolak alamat internal. Tanpa
+/// penyebutan eksplisit di sini, tes navigasi hanya membuktikan bahwa gerbang
+/// menolak, bukan bahwa jalurnya bekerja. Tes yang tidak menyentuh alamat
+/// internal tetap memakai `nyalakan()` supaya penolakan bawaannya ikut terjaga.
+fn nyalakan_terbuka() -> NativeEngine {
+    let kebijakan = KebijakanJaringan::baru(
+        vec![
+            "127.0.0.1".to_owned(),
+            "localhost".to_owned(),
+            "::1".to_owned(),
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+    NativeEngine::start_dengan(spec(), pabrik_memori(), None, kebijakan)
+        .expect("mesin native menyala")
 }
 
 /// Permintaan HTTP mentah. `Connection: close` supaya axum menutup soket dan
@@ -360,7 +381,7 @@ async fn runtime_evaluate_mempertahankan_tipe_dan_mengirim_boolean() {
 /// `NoObservableChange` (AC-020), karena tidak ada yang berubah.
 #[tokio::test]
 async fn navigasi_melaporkan_perubahan_dan_menolak_skema_tanpa_jaringan() {
-    let mesin = nyalakan();
+    let mesin = nyalakan_terbuka();
     let port = mesin.info().devtools_port;
     let mut soket = sambung(port, "/devtools/browser").await;
 
@@ -833,6 +854,76 @@ async fn page_capture_screenshot_melayani_png_jpeg_webp_dan_menolak_format_lain(
     mesin.stop().expect("berhenti");
 }
 
+/// Gerbang jaringan berlaku untuk navigasi, bukan cuma `fetch()`.
+///
+/// Sebelum ini `Page.navigate` ke alamat internal diterima dan isinya masuk ke
+/// pohon DOM yang dibaca agen, sedangkan `fetch()` ke alamat yang sama ditolak:
+/// satu lubang SSRF dengan dua pintu dan hanya satu yang dijaga. Tes ini
+/// memakai mesin dengan kebijakan bawaan (tanpa satu pun izin), menunjuk server
+/// yang benar-benar hidup di loopback, lalu memastikan dua hal sekaligus:
+/// navigasinya ditolak, **dan** server itu tidak menerima satu koneksi pun.
+/// Tanpa pemeriksaan kedua, penolakan yang terjadi setelah soket terbuka akan
+/// lolos sebagai "berhasil".
+#[tokio::test]
+async fn navigasi_ke_alamat_internal_ditolak_sebelum_koneksi() {
+    let pendengar = std::net::TcpListener::bind("127.0.0.1:0").expect("port bebas");
+    pendengar
+        .set_nonblocking(true)
+        .expect("pendengar nonblocking");
+    let alamat = pendengar.local_addr().expect("alamat lokal").to_string();
+
+    let mesin = nyalakan();
+    let port = mesin.info().devtools_port;
+    let mut soket = sambung(port, "/devtools/browser").await;
+
+    let buat = minta_cdp(
+        &mut soket,
+        1,
+        "Target.createTarget",
+        json!({"url": "about:blank"}),
+    )
+    .await;
+    let id = buat["result"]["targetId"]
+        .as_str()
+        .expect("targetId")
+        .to_owned();
+    let lekat = minta_cdp(
+        &mut soket,
+        2,
+        "Target.attachToTarget",
+        json!({"targetId": id, "flatten": true}),
+    )
+    .await;
+    let sesi = lekat["result"]["sessionId"]
+        .as_str()
+        .expect("sesi")
+        .to_owned();
+
+    let nav = json!({
+        "id": 3,
+        "sessionId": sesi,
+        "method": "Page.navigate",
+        "params": {"url": format!("http://{alamat}/rahasia")}
+    });
+    soket
+        .send(TsMessage::Text(nav.to_string().into()))
+        .await
+        .expect("mengirim navigate");
+    let jawab = tunggu_id(&mut soket, 3).await;
+    let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        pesan.contains("gerbang jaringan") && pesan.contains("jaringan internal"),
+        "navigasi ke loopback harus ditolak gerbang, bukan diambil: {jawab}"
+    );
+
+    assert!(
+        matches!(pendengar.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+        "server tidak boleh menerima satu koneksi pun: penolakan harus terjadi sebelum soket dibuka"
+    );
+
+    mesin.stop().expect("berhenti");
+}
+
 /// Server HTTP yang melayani dua jalur: halaman induk dan dokumen iframe.
 ///
 /// Satu server, dua jalur, karena iframe di mesin ini hanya dimuat kalau
@@ -888,7 +979,7 @@ fn server_induk_dan_anak() -> String {
 #[tokio::test]
 async fn iframe_same_origin_dimuat_oleh_navigasi() {
     let asal = server_induk_dan_anak();
-    let mesin = nyalakan();
+    let mesin = nyalakan_terbuka();
     let port = mesin.info().devtools_port;
 
     let mut a = sambung(port, "/devtools/browser").await;
@@ -1012,7 +1103,7 @@ fn server_lambat(tunda: Duration) -> (String, tokio::sync::oneshot::Receiver<()>
 /// selesai.
 #[tokio::test]
 async fn navigasi_lambat_tidak_menahan_kunci_state() {
-    let mesin = nyalakan();
+    let mesin = nyalakan_terbuka();
     let port = mesin.info().devtools_port;
 
     let mut a = sambung(port, "/devtools/browser").await;
