@@ -21,7 +21,7 @@ One read must be enough to continue without asking the owner anything.
 | Field | Value |
 |---|---|
 | Active milestone | PRD v0.2 milestone 1, parts 1, 2 and the eyes/read halves of 3 landed: native parse/layout/JS foundations, the tab pool plus the CDP surface the daemon serves (`crates/cdp/src/native_wire/`, `crates/engine/src/native/tab_pool.rs`), and as of 2026-11-11 an accessibility tree (`crates/engine/src/native/axtree.rs`, served as `Accessibility.getFullAXTree`) plus a real PNG rasteriser (`crates/engine/src/native/paint.rs`, served as `Page.captureScreenshot`), and as of 2026-11-12 real document fetching over `http`/`https` (`crates/cdp/src/native_wire/jaringan.rs`, so `Page.navigate` opens a live page and reports the final URL after redirects). What is still missing is named in code, `engine::native::CELAH` (`crates/engine/src/native/mod.rs:54`), twelve entries, not a document. CSS selectors, the stylesheet cascade, property inheritance and units, text measurement, "rasterisation does not exist", "no AX tree", "no document fetch", "`<link rel=stylesheet>` is never fetched" and "typed evaluate returns" are no longer among them: the entries that replaced them name the *limits* (the raster paints box backgrounds and text glyphs but no images, gradients, borders or radius, and `justify` still falls back to left; screenshot serves `png` and `jpeg` with a working `clip.scale` and `captureBeyondViewport` but no `webp` encoder; the AX tree does not compute chained `aria-labelledby`, focus/selected state, or iframe content; text measurement uses the one embedded face, no webfonts, no shaping). PRD v0.2: `docs/prd/PRD-MESIN-RUST 071126-1413.md` |
-| Next exact command | `cd ~/src/opencrabs-browser && cargo xtask check` for the gate (`xtask` is an alias in this repo's `.cargo/config.toml`, so from any other directory cargo answers `no such command: xtask` and exits 101; that is a wrong-cwd error, not a red gate), `cargo test -p cdp --test native_state` for the surface, `cargo test -p engine --lib native` for the engine. The next work is one `CELAH` entry per capability, each behind a test that fails before the capability exists, and the order is already ranked in `docs/prd/URUTAN-KERJA-CELAH 121126-0700.md`: W3 (text measurement via `native::teks`, the raster that paints it, then the screenshot parameters) left the queue on 2026-11-13, so the next item is W4 (G10, a real DOM inside the isolate), which is also what unblocks W5 (G4, `Input.dispatchMouseEvent`) and with it the last half of PRD milestone 2. W2 (the stylesheet cascade, then inheritance and units) left that queue on 2026-11-12: `crates/engine/src/native/css.rs` resolves `<style>` blocks and inline `style` by origin, `!important`, inline, specificity and source order, and `crates/engine/src/native/gaya.rs` carries the inherited properties down the tree and resolves `em`, `rem` and percent. G9 (typed `Runtime.evaluate`) left the queue earlier the same day |
+| Next exact command | `cd ~/src/opencrabs-browser && cargo xtask check` for the gate (`xtask` is an alias in this repo's `.cargo/config.toml`, so from any other directory cargo answers `no such command: xtask` and exits 101; that is a wrong-cwd error, not a red gate), `cargo test -p cdp --test native_state` for the surface, `cargo test -p engine --lib native` for the engine. The next work is one `CELAH` entry per capability, each behind a test that fails before the capability exists, and the order is already ranked in `docs/prd/URUTAN-KERJA-CELAH 121126-0700.md`: W3 (text measurement via `native::teks`, the raster that paints it, then the screenshot parameters) left the queue on 2026-11-13, so W4 (G10, a real DOM inside the isolate) and W5 (G4, `Input.dispatchMouseEvent`) left that queue on 2026-11-14 (commits `6a7f202` and `4f83377`, evidence in the W4/W5 section below), and W6 (G8, `fetch()` inside the isolate through the daemon's policy gate) left that queue on 2026-11-14 as well (evidence in the W6 section below), so the next items are W7 (G7, AX details) and W8 (G11, CDP events). W2 (the stylesheet cascade, then inheritance and units) left that queue on 2026-11-12: `crates/engine/src/native/css.rs` resolves `<style>` blocks and inline `style` by origin, `!important`, inline, specificity and source order, and `crates/engine/src/native/gaya.rs` carries the inherited properties down the tree and resolves `em`, `rem` and percent. G9 (typed `Runtime.evaluate`) left the queue earlier the same day |
 | Bootstrap command | `git clone https://github.com/adi805/opencrabs-browser.git && cd opencrabs-browser && cargo build --release --locked` |
 | Smoke check | `curl -s http://127.0.0.1:9224/json/version` returns JSON with a non-empty `Browser` field, then `node bench/cdp-smoke.mjs --endpoint http://127.0.0.1:9224` prints 6/6 |
 | Last passing check | `cargo xtask check` on the working tree that became `259bbea`, the commit that adds the `Page.captureScreenshot` parameter set: `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-g6.log`, run 2026-11-13 17:32-17:40 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). Re-run once more at `1e55054`, the record commit that follows it: `fmt ok`, `clippy ok`, `test ok` (log `/tmp/xtask-g6-final.log`, started 2026-11-13 17:49:27 and finished 18:04:48 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). That run has no `EXIT:` line in the log because the tool call that launched it was capped at 600 s while the test phase was still going and the wrapper was killed with it; xtask itself completed, its pid was gone and no `cargo test` remained. Three `ok` lines are an exit 0 for this gate: `xtask/src/check.rs:50` prints `ok` only when that step's `status.success()` is true, `:56` prints `GAGAL` otherwise, and `run()` returns `Err` when any step failed, which `xtask/src/main.rs:50` turns into `ExitCode::FAILURE`. Measured right after it exited: zero `chrome` / `chrome-headless-shell` processes on the host and no listener on 9222/9224/9225/9226/9234, so the suite left no browser and no daemon behind; the single `browserd serve` still alive was already 4.9 h old (pid `456926`, port 34217) when the gate started, so it is a pre-existing orphan rather than a product of this run. The previous receipt was `cargo xtask check` at `cd8442f` (the AC-011 record commit, one commit after the cold-store code at `ce6170c`): `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check-ac011b.log`, run 2026-11-12 22:12-22:21 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). That gate is the first one that includes the SQLite cold-store wiring and the new `crates/browserd/tests/native_rehydration_latency.rs`. It also caught two `tabstore` test helpers that registered session `s1` twice and died on `SudahAda("s1")`; both now open the database through a `buka()` helper instead of re-opening the session. The gate before it, `cargo xtask check` at `03822f1` (the AC-001 test commit), was: `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check-ac001b.log`, run 2026-11-12 20:50 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). The previous receipt was `c947a92` (the record-consistency series): `fmt ok`, `clippy ok`, `test ok`, **exit 0** (log `/tmp/xtask-check-head.log`, run 2026-11-12 05:40 WIB, target dir `/mnt/hdd/OpenCrabs/build/cargo`). The previous full-gate receipt was `6bce7d6`: `fmt ok`, `clippy ok`, `test ok`, exit 0 (log `/tmp/xtask-check.log`). The same tree counted by hand with `cargo test --workspace` = 44 suites, **597 passed, 0 failed** (log `/tmp/ws-test.log`), which is 40 more than the 557 recorded at `4292878`, a tree 10 commits behind this one that predates the selector engine, the accessibility tree and the rasteriser. The earlier `4292878` gate still stands as the last one that followed a GitHub-built binary; the `6bce7d6` gate was run locally, so its receipts are the local logs above. After that gate, measured on the same host: only 2 chrome processes carried a `remote-debugging-port` (the live daemon on 9224/9225 and the production instance on 9222), so the live suites inside the gate left no new debugging browser behind. The raw total drifts while the daemon runs (`pgrep -c -x chrome` read 12 on one sample and 13 on the next, with `chrome_crashpad_handler` helpers alongside), so the two debugging-port processes are the signal, not the total. An earlier note in this row cited 53 chrome processes and an `oc-browser-leak-check.sh` run; that script is not present at `~/.opencrabs/scripts/` any more, so the counts above are the evidence for this gate. The packaged binary from GitHub run `42445976171` (head `2633095`, `sha256sum -c` OK, and predating the AX tree and rasteriser, hence 24 of today's 30 commands) served a full CDP round trip on `127.0.0.1:9234` and exited 0: `RustNativeEngine/0.2.0` in `/json/version`, 24 commands in `/json/protocol`, `Page.setDocumentContent` receipt `node: 8`, `DOM.getDocument depth=-1` 12 nodes, `Runtime.evaluate 6*7` = `"42"`, then a clean SIGTERM. Receipts in `docs/prd/BUKTI-NATIVE-CDP 081126-1124.md`. HEAD then moved through `7d1626b` and `c947a92`, both record-consistency commits whose only source change is a doc comment in `crates/engine/src/native/tab_pool.rs`, and the gate was re-run at `c947a92`, which is the receipt at the top of this row. The most recent gate is CI itself: run `43460811394` on `21901cc` is **success** on both jobs, and its `budget` job is the green receipt for the memory fix, `PSS 62.9 MB (awal 9.3 MB) untuk 99 target, dokumen 3005 node, 99 tab dalam 0.7 detik, pagu 100 MB` (job log `132008038878`). The two allocation-counting tests behind that fix were re-run locally on 2026-11-13 23:0x WIB, dev profile, target dir `/mnt/hdd/OpenCrabs/build/cargo-ocbrowser`: `laporan_retensi` 1 passed printing `retensi laporan = 577930 byte (0.551 MB) per tab`, `dom_retensi` 1 passed printing `dom=677614 byte (0.646 MB)`, plus `native_99_tabs_trim` ok in `/tmp/ocb-trim.log` with `allocator mengembalikan 0.3 MB, trim=true` |
@@ -1163,13 +1163,135 @@ dispatcher", which changes no claim.
 
 Current result: `blockers=0; errors=0; warnings=0`, exit 0.
 
+### PRD v0.2, mutable DOM, the JS bridge, and pointer events (W4a, W4b, W4c, W5), 2026-11-14
+
+Four units from `docs/prd/RENCANA-TUNTAS 141126-1120.md`, landed as two commits:
+`6a7f202` (engine plus the CDP surface it needs) and `4f83377` (protocol listing,
+the integration test, and the capability flag).
+
+W4a made the arena mutable. `Document` gained `create_element`,
+`append_child`, `insert_before`, `remove_child`, text and attribute writes, and
+node ids that survive a mutation, so a handle taken before an insert still
+points at the same node after it.
+
+W4b put a real DOM inside the isolate. The tab keeps its tree in an
+`Arc<Mutex<Document>>` (`TabPanas::dokumen`, `TabPanas::pohon`) and the isolate
+holds the same `Arc`, so a write from page script reaches the tree that
+`DOM.getDocument` serialises and that the raster paints. Two copies would mean
+two truths that drift, and the drift only shows up when a screenshot disagrees
+with a `querySelector` result. The isolate surface covers `getElementById`,
+`querySelector`/`querySelectorAll`, `createElement`, `appendChild`,
+`insertBefore`, `removeChild`, `textContent`, `getAttribute`/`setAttribute`,
+`children`, `parentNode` and `title`.
+
+W4c wired that bridge to the CDP surface: `Page.setDocumentContent` followed by
+`Runtime.evaluate("document.getElementById('x').textContent")` returns the
+fixture text, and `DOM.getDocument` reflects a mutation made by script.
+
+W5 answered `Input.dispatchMouseEvent` from layout. `LaporanLayout::kotak_di`
+picks the deepest box under the point, with right and bottom edges exclusive,
+the same rule `elementFromPoint` uses. Press and release on the same node
+produce `click`; press on one node and release on another produce no click,
+which is what a real browser does. A point outside every box returns a receipt
+with a null target rather than an error, because "clicked nothing" and "you sent
+a bad command" are different answers for the client.
+
+Evidence:
+
+| Unit | Command | Result |
+|---|---|---|
+| W4a, W4b | `cargo test -p engine --lib native` | 182 passed, 0 failed |
+| W4c | `cargo test -p cdp --test native_wire` | 25 passed, 0 failed |
+| W5 | `cargo test -p cdp --test native_events` | 5 passed, 0 failed, exit 0 (log `/tmp/native-events.log`) |
+| the four together | `cargo test -p cdp -p engine --lib --test native_wire --test native_state --test native_foundations --test dom_retensi` | 284 passed, 0 failed, exit 0 (log `/tmp/evid.log`) |
+| formatting | `cargo fmt --all -- --check` | exit 0 |
+
+The five `native_events` tests are the ones that discriminate. The central one
+reads `window.__klik`, a counter that can only move if page script actually ran,
+so a CDP receipt alone cannot pass it while the listener never fires. The
+negative case, `klik_di_luar_kotak_tidak_memanggil_pendengar`, holds the counter
+at zero for a click outside the box, so an engine that calls every listener for
+every click fails the file instead of passing the positive test alone.
+`peristiwa_merambat_dan_remove_menghentikannya` proves bubbling (`[2, 1]` after
+two clicks on a nested span) and that `removeEventListener` really detaches.
+
+What the four units did not close, and what replaced them in `CELAH` (the count
+stays twelve, because two entries were narrowed rather than removed):
+`Input.dispatchKeyEvent` and `Input.dispatchTouchEvent` are still refused, so
+`keydown` can only be triggered by page script through `dispatchEvent`;
+`focus()`/`blur()` fire the events without a focus state, so
+`document.activeElement` does not move; capture phase, `once`/`passive` and
+`composedPath` are absent, so `addEventListener(tipe, fn, true)` behaves like
+`false`; the bridge covers the core DOM but not `classList`, the `innerHTML`
+setter, `dataset` or `insertAdjacentHTML`; and `navigator` is still a plain
+object rather than a `Navigator`.
+
+### W6: `fetch()` from page script through the daemon policy gate, 2026-11-14
+
+The isolate opens no socket of its own. `fetch()` is a thin layer over one Rust
+function, `__ambil(metode, url, badan)`, and that name is deleted from the global
+before page script runs, so a page cannot reach the gate directly. The gate
+itself is `native::ambil::Pengambil`, and the engine crate deliberately does not
+know what an allowlist is: the decision and the actual request belong to the
+daemon, which is the only place that holds the network policy. An isolate built
+without a hook gets `PengambilTolak`, which refuses every request with a readable
+reason instead of returning an empty answer that looks like a page with no
+content.
+
+`KebijakanJaringan` (in `crates/cdp/src/native_wire/ambil.rs`) decides without
+touching the network: method against the allowed set, scheme against
+`http`/`https`, then the deny list (which wins over the allow list), then literal
+internal addresses. Link-local and the unspecified address are refused with no
+exception, because there is no legitimate page at `169.254.0.0/16` and that is
+exactly where cloud metadata services answer. Loopback and private ranges are
+refused unless the operator wrote that address into `izin_host`, which is a
+deliberate act and therefore distinguishable from a too-wide pattern. The daemon
+reads `[fetch] izin_host / tolak_host / metode` once at startup and hands the
+same gate to every tab, so a tab cannot change the rules mid-flight.
+
+Verification found one real bug, which is why the gate is worth having a test
+for: `Url::host_str()` returns IPv6 in bracketed form (`[::1]`), while
+`IpAddr::from_str` rejects brackets and operators write `::1` without them. The
+address was therefore never recognised as loopback (the refusal named the
+missing allowlist entry instead of the internal address) and an `::1` entry in
+`izin_host` could never match, so the operator had no way to open it
+deliberately. Both halves are now covered by
+`alamat_ipv6_loopback_dikenali_dan_bisa_dibuka_operator`.
+
+Evidence:
+
+| Layer | Command | Result |
+|---|---|---|
+| isolate, `fetch` only | `cargo test -p engine --lib native::js::tests::fetch` | 6 passed, 0 failed, exit 0 (log `/tmp/w6-engine-fetch.log`) |
+| policy gate | `cargo test -p cdp --lib native_wire::ambil` | 12 passed, 0 failed, exit 0 (log `/tmp/w6-cdp-ambil.log`) |
+| whole chain, real HTTP server | `cargo test -p cdp --test native_fetch` | 3 passed, 0 failed, exit 0 (log `/tmp/w6-native-fetch2.log`) |
+| daemon wiring compiles | `cargo check -p browserd --all-targets` | exit 0, zero warnings (log `/tmp/w6-check.log`) |
+| formatting | `cargo fmt --all -- --check` | exit 0, zero output (log `/tmp/w6-fmt.log`) |
+
+The integration file is the one that discriminates, because it goes through
+`Runtime.evaluate` and a real `std::net` server rather than a stub: the allowed
+case asserts the body text reaches page script and that `status` is `200`, and
+the denied cases assert the refusal is a catchable `TypeError` whose message
+names the host and the rule that refused it. A gate that allowed everything
+would fail the two negative tests; a gate that refused everything would fail the
+positive one.
+
+What W6 did not close, and what the narrowed `CELAH` entry now says: the answer
+is a plain object, not a `Promise`, so `await fetch(...)` and `await
+r.text()` work (await on a non-thenable returns the value itself) while
+`.then()`, `Promise.all` and `AbortController` do not; and the body travels as
+lossy UTF-8 text, so `arrayBuffer()`, streams and cookies are absent. Running a
+promise machine inside the isolate would mean another engine state to test
+against the timeout, and that is a separate unit rather than a footnote.
+
+
 ## Not built, not claimed
 
 Open items, each with the reason it is still open and what would close it.
 
 | Item | Why it is open | What would close it |
 |---|---|---|
-| Native engine half that is still missing (PRD v0.2 milestone 1 and beyond) | Foundations landed: parse, box layout, sandboxed script, tab pool, CDP surface, accessibility tree, PNG rasteriser. Still not landed, twelve entries in `engine::native::CELAH` (re-counted 2026-11-14 by parsing the const): at-rules other than `@import` (`@media` recorded but its contents skipped, `@font-face` not downloaded); text measured from one face with no webfonts, no per-script fallback and no shaping; DOM events (click, input, focus); a raster that paints no image, gradient, shadow, `border`, `border-radius`, no synthetic bold, `justify` as left, no overflow clipping; no `webp` (and no other) screenshot encoder; the AX details (`aria-labelledby` chains, focus/selected/expanded, iframe content); no `fetch()` inside the isolate; `Runtime.evaluate` objects travel by value with no `objectId`/`callFunctionOn`/`awaitPromise`; `document` inside the isolate is a plain object rather than a DOM and `navigator` is not a `Navigator`; no CDP events; no `<iframe>` element traversal (AC-015); no closed shadow root piercing (AC-016). The stylesheet cascade and property inheritance left that list on 2026-11-12 (`crates/engine/src/native/css.rs`, `crates/engine/src/native/gaya.rs`): `<style>` blocks and inline `style` resolve by origin, `!important`, specificity and source order, and the inherited properties carry down the tree with `em`, `rem` and percent resolved against the right context. What the narrower replacement entry says now is that at-rules other than `@import` are recorded and not executed: `@media` contents are skipped, so a page that keeps its layout inside `@media` renders without it, and `@font-face` is not downloaded. External stylesheets themselves were closed on 2026-11-14 (`crates/cdp/src/native_wire/gaya.rs` plus `jaringan::muat_css`, wired through the cascade, layout, paint, tab pool and the v3 `sheets_enc` column), so the older sentence that said `<link rel=stylesheet>` is never fetched no longer describes the tree. Typed `Runtime.evaluate` returns were closed on 2026-11-12 (`NilaiJs` in `crates/engine/src/native/js.rs`, mapped to `Runtime.RemoteObject` in `crates/cdp/src/native_wire/state.rs`), and AC-017 plus AC-018 came with it; what remains of that gap is `objectId`/`callFunctionOn`/`awaitPromise`. CSS selectors were closed on 2026-11-11, and so were "no raster" and "no AX tree": `crates/engine/src/native/axtree.rs` + `paint.rs`, served as `Accessibility.getFullAXTree` and `Page.captureScreenshot`. Document fetching over `http`/`https` was closed on 2026-11-12: `crates/cdp/src/native_wire/jaringan.rs` fetches before the state lock is taken, and the narrower entry that replaced it is `fetch()` inside the isolate, which is script-level network rather than navigation. In each case the gap was removed from `CELAH` and the guard test asserts it cannot come back, while a *narrower* entry naming the real limit replaced it. The list is a `const` in code (`crates/engine/src/native/mod.rs:44`) so it cannot quietly shrink from a document edit. Budget enforcement exists as `browserd::anggaran`, but a config without `[budget]` logs `supervisor anggaran mati` (measured on the AC-013 instance) | One entry removed from `CELAH` per capability, each with a test that fails before the capability exists, then the v0.2 acceptance criteria that depend on it. The two that unblock the most are text measurement (without it the raster stays blank for text-only pages) and a real DOM inside the isolate (without it page script cannot query or mutate the document) |
+| Native engine half that is still missing (PRD v0.2 milestone 1 and beyond) | Foundations landed: parse, box layout, sandboxed script, tab pool, CDP surface, accessibility tree, PNG rasteriser. Still not landed, twelve entries in `engine::native::CELAH` (re-counted 2026-11-14 by parsing the const): at-rules other than `@import` (`@media` recorded but its contents skipped, `@font-face` not downloaded); text measured from one face with no webfonts, no per-script fallback and no shaping; pointer events are answered but keyboard and touch input are refused (`Input.dispatchKeyEvent`, `Input.dispatchTouchEvent`), `focus()`/`blur()` fire without a focus state, and capture phase, `once`/`passive` and `composedPath` are absent; a raster that paints no image, gradient, shadow, `border`, `border-radius`, no synthetic bold, `justify` as left, no overflow clipping; no `webp` (and no other) screenshot encoder; the AX details (`aria-labelledby` chains, focus/selected/expanded, iframe content); `fetch()` inside the isolate exists since W6 but its answer is a plain object rather than a `Promise`, so `.then()`/`Promise.all`/`AbortController` are absent and bodies travel as lossy UTF-8 text (no `arrayBuffer()`, streams or cookies); `Runtime.evaluate` objects travel by value with no `objectId`/`callFunctionOn`/`awaitPromise`; `document` inside the isolate is a real DOM since W4b, but the bridge covers the core surface only (`classList`, the `innerHTML` setter, `dataset` and `insertAdjacentHTML` are absent) and `navigator` is not a `Navigator`; no CDP events; no `<iframe>` element traversal (AC-015); no closed shadow root piercing (AC-016). The stylesheet cascade and property inheritance left that list on 2026-11-12 (`crates/engine/src/native/css.rs`, `crates/engine/src/native/gaya.rs`): `<style>` blocks and inline `style` resolve by origin, `!important`, specificity and source order, and the inherited properties carry down the tree with `em`, `rem` and percent resolved against the right context. What the narrower replacement entry says now is that at-rules other than `@import` are recorded and not executed: `@media` contents are skipped, so a page that keeps its layout inside `@media` renders without it, and `@font-face` is not downloaded. External stylesheets themselves were closed on 2026-11-14 (`crates/cdp/src/native_wire/gaya.rs` plus `jaringan::muat_css`, wired through the cascade, layout, paint, tab pool and the v3 `sheets_enc` column), so the older sentence that said `<link rel=stylesheet>` is never fetched no longer describes the tree. Typed `Runtime.evaluate` returns were closed on 2026-11-12 (`NilaiJs` in `crates/engine/src/native/js.rs`, mapped to `Runtime.RemoteObject` in `crates/cdp/src/native_wire/state.rs`), and AC-017 plus AC-018 came with it; what remains of that gap is `objectId`/`callFunctionOn`/`awaitPromise`. CSS selectors were closed on 2026-11-11, and so were "no raster" and "no AX tree": `crates/engine/src/native/axtree.rs` + `paint.rs`, served as `Accessibility.getFullAXTree` and `Page.captureScreenshot`. Document fetching over `http`/`https` was closed on 2026-11-12: `crates/cdp/src/native_wire/jaringan.rs` fetches before the state lock is taken, and the narrower entry that replaced it is `fetch()` inside the isolate, which is script-level network rather than navigation. In each case the gap was removed from `CELAH` and the guard test asserts it cannot come back, while a *narrower* entry naming the real limit replaced it. The list is a `const` in code (`crates/engine/src/native/mod.rs:44`) so it cannot quietly shrink from a document edit. Budget enforcement exists as `browserd::anggaran`, but a config without `[budget]` logs `supervisor anggaran mati` (measured on the AC-013 instance) | One entry removed from `CELAH` per capability, each with a test that fails before the capability exists, then the v0.2 acceptance criteria that depend on it. The order is already ranked in `docs/prd/RENCANA-TUNTAS 141126-1120.md`: W4 and W5 left that queue on 2026-11-14, so W6 (`fetch()` inside the isolate, behind the daemon policy gate) left that queue on 2026-11-14 too, so the next units are W7 (AX details) and W8 (CDP events) |
 | `cloakbrowser` artifact path (the cookie handoff named in `crates/policy/src/challenge.rs:304`) | It was never part of the `chrome-full` adapter, and no test drives it. A path that reads another browser's cookie store has to be measured against a real challenge, not written against a guess. | A probe that takes a cookie jar produced by a real challenge and proves the cookie is usable through the daemon, with the file format locked by a test |
 | Leaked browsers from the live test suites | 36 orphaned `chrome-headless-shell` processes were found alive during this milestone, 4.9 GB RSS between them, from `sesi_live`, `m4_proof`, `diagnostik`, and `idle_proof`. The serialisation lock in `tests/common` limits how many start at once, it does not stop them surviving a killed run. **Partly closed:** `impl Drop for Proc` reaps the group on panic and on normal exit, and the five live suites now close their daemon with SIGTERM so `matikan_semua` runs, both measured as zero leftovers after a full `cargo xtask check`. Measured again 2026-11-08 after a full gate at `4292878`: host `chrome` count 53 before and 53 after, and the leak script's only hit was an orphan from the previous evening. Still open: a test binary that is itself SIGKILLed from outside runs no destructor, and nothing counts processes in `xtask check` yet. | A teardown that is verified after a test is killed mid-run, not only after it returns, plus a check in `xtask check` that the process count returns to its starting value |
 | `xtask e2e` | The command is referenced in the task list but does not exist yet | An `e2e` subcommand that runs the live suites in the same serialised way `cargo test` does |
