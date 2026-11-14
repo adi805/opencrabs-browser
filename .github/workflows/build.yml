@@ -64,7 +64,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: build-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          # Tag ISA ikut di kunci. Tanpa itu cache `target/` dari build sebelum
+          # RUSTFLAGS dipin dipulihkan apa adanya, dan artefak lama yang memuat
+          # BMI2 ikut terpaket seolah-olah hasil build baru.
+          key: build-x86-64-baseline-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build
         run: |
