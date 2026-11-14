@@ -35,7 +35,7 @@ pub mod selectors;
 pub mod tab_pool;
 pub mod teks;
 
-pub use css::Kaskade;
+pub use css::{Kaskade, LembarLuar, Tautan};
 pub use dom::{Document, Node, NodeId, NodeKind};
 pub use js::{Isolat, NilaiJs, PaguIsolat};
 pub use layout::{Kotak, LaporanLayout, Viewport};
@@ -52,9 +52,11 @@ use std::fmt;
 /// Daftar ini adalah kontrak: menambah kemampuan berarti menghapus barisnya
 /// di sini dan menambah tesnya, bukan sekadar menambah kode.
 pub const CELAH: &[&str] = &[
-    "kaskade hanya membaca `<style>` di dalam dokumen dan atribut `style`; \
-     `<link rel=stylesheet>` tidak diambil dari jaringan, dan at-rule (`@media`, \
-     `@import`, `@font-face`) dicatat lalu tidak dijalankan",
+    "at-rule selain `@import` belum dijalankan: `@media` dicatat lalu isinya \
+     dilewati, jadi halaman yang menaruh aturan tata letaknya di dalam \
+     `@media` tampil tanpa aturan itu, dan `@font-face` tidak diunduh sehingga \
+     webfont jatuh ke face yang ditanam. `@import` sendiri sudah diselesaikan \
+     lapisan pengambil (`cdp::native_wire::gaya`) sampai kedalaman 3",
     "pengukuran teks hanya satu face (`DejaVuSans.ttf` yang ditanam di \
      `crates/engine/assets/`): tidak ada webfont (`@font-face` tidak diambil), \
      tidak ada font fallback per aksara (aksara di luar face diukur selebar \

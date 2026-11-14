@@ -126,12 +126,22 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     // melukis glyph dari outline TrueType; yang tersisa adalah batas yang
     // lebih sempit: tanpa gambar/gradien/border, tanpa tebal sintetis,
     // `justify` masih rata kiri, dan tidak ada pemotongan ke kotak.
+    // "stylesheet eksternal tidak diambil" dicabut setelah
+    // `cdp::native_wire::gaya` mengambil `<link rel=stylesheet>` beserta
+    // `@import` rekursif dan memasangnya di posisi `<link>`-nya; yang
+    // menggantikannya adalah batas at-rule yang lebih sempit: `@media` dan
+    // `@font-face` masih dicatat lalu tidak dijalankan.
     // Yang tersisa di daftar adalah celah yang masih benar-benar terbuka.
     for wajib in [
         "pengukuran teks hanya satu face",
         "raster melukis latar kotak dan glyph teks",
         "`fetch()` di dalam isolat",
         "peristiwa CDP",
+        // Batas at-rule yang masih terbuka. Kalau baris ini hilang, daftar
+        // mengklaim `@media` sudah dijalankan padahal isinya masih dilewati,
+        // dan halaman yang menaruh tata letaknya di dalam `@media` akan
+        // dilaporkan tampil benar.
+        "at-rule selain `@import` belum dijalankan",
         // Batas screenshot yang masih benar-benar terbuka: encoder `webp`
         // belum ada. Kalau baris ini hilang, daftar mengklaim screenshot
         // melayani semua format yang diminta Chrome.
@@ -178,5 +188,13 @@ fn celah_dinyatakan_bukan_disembunyikan() {
     assert!(
         !semua.contains("hanya PNG pada skala 1"),
         "screenshot sudah multi-format dan multi-skala: {semua}"
+    );
+    // Klausa lama "`<link rel=stylesheet>` tidak diambil" sudah tidak benar:
+    // `cdp::native_wire::gaya` mengambilnya beserta `@import`, dan raster
+    // memakainya. Kalau klausa itu kembali, pembaca mengira halaman bertaut
+    // gaya masih tampil tanpa CSS.
+    assert!(
+        !semua.contains("<link rel=stylesheet>` tidak diambil"),
+        "stylesheet eksternal sudah diambil, jangan kembalikan kalimat lamanya: {semua}"
     );
 }
