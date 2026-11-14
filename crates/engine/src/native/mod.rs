@@ -129,11 +129,11 @@ pub const CELAH: &[&str] = &[
      browser sungguhan. Buffer `console` hidup di global `__log` \
      (non-enumerable, jadi tidak muncul di `Object.keys(globalThis)`, tapi \
      namanya bisa ditebak). `document` sendiri sudah pohon sungguhan sejak \
-     jembatan W4b: mutasi dari skrip halaman terlihat oleh `DOM.getDocument` \
-     dan oleh raster (`native::js::tests::test_js_runtime_dom_mutations`), tapi \
-     cakupannya masih inti DOM (cari, buat, sisip, hapus, teks, atribut, \
-     `children`/`parentNode`, `title`), belum `classList`, `innerHTML` setter, \
-     `dataset`, maupun `insertAdjacentHTML`",
+     jembatan W4b, dan `<script>` di dokumen **dijalankan** sejak W5 \
+     (`native::js::tests::skrip_sebaris_berjalan_saat_halaman_dibuka`): mutasi \
+     yang ditulis JavaScript-nya terlihat oleh `DOM.getDocument` dan oleh \
+     raster. Yang belum dari permukaan DOM: `classList`, setter `innerHTML`, \
+     `dataset`, `insertAdjacentHTML`, dan `outerHTML`",
     "mesin mengirim peristiwa CDP untuk domain yang sudah di-`enable` \
      (`Runtime.consoleAPICalled`, `Runtime.executionContextCreated`, \
      `Page.loadEventFired`, `Network.requestWillBeSent`/`responseReceived`), \
@@ -154,6 +154,20 @@ pub const CELAH: &[&str] = &[
      belum: `sandbox`/`allow`/`csp` tidak dibaca, dan \
      `contentDocument`/`contentWindow` tidak ada di isolat, jadi skrip halaman \
      tidak bisa menyentuh dokumen anak",
+    "eksekusi `<script>` berjalan saat dokumen dipasang (navigasi dan \
+     `Page.setDocumentContent`), tapi semantiknya belum seperti browser: \
+     tidak ada `defer`/`async`, `document.write` tidak ada, dan tidak ada \
+     fase `DOMContentLoaded`/`load` yang memisahkan skrip dari pemuatan. \
+     `type=\"module\"` dilewati karena pemuat impor belum ada, dan tipe bukan \
+     JavaScript (`application/json`, `text/template`) juga dilewati; keduanya \
+     dilaporkan di kolom `skrip.dilewati` pada tanda terima, bukan didiamkan. \
+     Timer hanya berjalan saat mesin memompa (`Runtime.evaluate` atau sesudah \
+     pemuatan), jadi `setTimeout` tidak pernah menyala sendiri selama halaman \
+     menganggur. `getComputedStyle` hanya menjawab properti yang benar-benar \
+     dihitung kaskade; sisanya teks kosong, bukan angka karangan. `innerText` \
+     sama dengan `textContent` karena raster belum menyusun baris per elemen. \
+     Satu skrip yang melempar galat tidak menghentikan yang lain, dan galatnya \
+     dikumpulkan di `skrip.galat`",
     "shadow root tertutup tidak terlihat skrip halaman, dan itu memang \
      spesifikasinya, bukan celah: `selectors.rs` punya dua jalur, \
      `pilih_terang` untuk skrip halaman yang berhenti di batas pohon, dan \
@@ -288,6 +302,81 @@ mod tests {
         assert_eq!(
             kotak_baris.width, 300.0,
             "100% harus mengikuti lebar induk 300px"
+        );
+    }
+}
+
+/// Tes kontrak [`CELAH`].
+///
+/// Daftar itu bukan dokumentasi bebas: ia janji tentang apa yang **belum**
+/// ada, dan janji yang tidak bisa diperiksa akan basi tanpa ada yang tahu.
+/// Yang diuji di sini bentuknya, bukan isinya: entri tidak boleh kosong, tidak
+/// boleh duplikat, dan celah yang paling mahal (eksekusi `<script>`) harus
+/// disebut namanya beserta batasnya. Isi prosa tiap entri tetap urusan
+/// peninjau, bukan tes.
+#[cfg(test)]
+mod celah {
+    use super::CELAH;
+
+    #[test]
+    fn setiap_entri_celah_punya_isi_yang_bisa_dibaca() {
+        assert!(
+            CELAH.len() >= 10,
+            "daftar celah menyusut sampai {} entri; mesin ini belum selesai",
+            CELAH.len()
+        );
+        for (i, entri) in CELAH.iter().enumerate() {
+            assert!(
+                entri.trim().len() > 40,
+                "entri {i} terlalu pendek untuk menjelaskan batasnya: {entri:?}"
+            );
+            assert!(
+                !entri.trim().is_empty() && !entri.starts_with(' '),
+                "entri {i} punya spasi pembuka: {entri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tidak_ada_entri_celah_yang_duplikat() {
+        // Duplikat berarti satu batas dihitung dua kali dan satu lainnya
+        // hilang tanpa jejak: daftarnya jadi lebih panjang tanpa lebih jujur.
+        for (i, a) in CELAH.iter().enumerate() {
+            for b in CELAH.iter().skip(i + 1) {
+                assert_ne!(a, b, "entri celah duplikat");
+            }
+        }
+    }
+
+    #[test]
+    fn celah_eksekusi_skrip_disebut_beserta_batasnya() {
+        // Entri ini yang paling mudah basi: begitu `<script>` berjalan,
+        // menulis "skrip tidak pernah dijalankan" jadi bohong, dan menulis
+        // "skrip berjalan" tanpa batasnya jadi klaim berlebih. Tes ini
+        // menuntut keduanya ada.
+        let kandidat: Vec<&str> = CELAH
+            .iter()
+            .copied()
+            .filter(|e| e.contains("<script>"))
+            .collect();
+        assert!(
+            !kandidat.is_empty(),
+            "tidak ada entri CELAH yang menyebut <script>: {CELAH:#?}"
+        );
+        // Beberapa entri menyebut `<script>` sambil membicarakan hal lain.
+        // Yang dituntut di sini: minimal satu entri yang sekaligus memuat
+        // batas-batas eksekusinya, bukan sekadar menyebut namanya.
+        let lengkap = kandidat.iter().find(|e| {
+            let kecil = e.to_lowercase();
+            (e.contains("dijalankan") || e.contains("berjalan"))
+                && ["module", "defer", "timer"]
+                    .iter()
+                    .all(|b| kecil.contains(b))
+        });
+        assert!(
+            lengkap.is_some(),
+            "tidak ada entri CELAH yang menyebut eksekusi <script> beserta \
+             batas module/defer/timer. Kandidat: {kandidat:#?}"
         );
     }
 }

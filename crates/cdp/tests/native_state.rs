@@ -329,6 +329,89 @@ fn set_document_content_mengganti_isi_tab_yang_sama() {
     assert!(!teks.contains("pertama"), "isi lama harus hilang: {dok}");
 }
 
+/// Halaman yang mengisi dirinya sendiri lewat `<script>` harus terisi di
+/// mesin ini, dan hasilnya harus terlihat oleh `DOM.getDocument`.
+///
+/// Ini beda dari tes jembatan DOM di `engine`: di sana JavaScript dipanggil
+/// klien lewat `Runtime.evaluate`. Di sini tidak ada yang memanggil apa pun
+/// selain halaman itu sendiri, persis seperti situs sungguhan.
+#[test]
+fn skrip_halaman_berjalan_saat_dokumen_dipasang() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+
+    let terima = ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({"html": "<html><head><title>awal</title></head><body>\
+               <div id=\"isi\"></div>\
+               <script>document.getElementById('isi').textContent = 'dari skrip';\
+               document.title = 'judul dari skrip';</script>\
+               </body></html>"}),
+        &sesi,
+    );
+    assert_eq!(
+        terima["skrip"]["dijalankan"], 1,
+        "satu skrip sebaris harus dilaporkan berjalan: {terima}"
+    );
+    assert_eq!(
+        terima["skrip"]["galat"].as_array().map(|a| a.len()),
+        Some(0),
+        "skrip ini tidak boleh menghasilkan galat: {terima}"
+    );
+
+    // Sisi yang dibaca klien: pohon DOM sesudah skrip berjalan.
+    let dok = ok_sesi(&state, 4, "DOM.getDocument", json!({"depth": -1}), &sesi);
+    let teks = dok.to_string();
+    assert!(
+        teks.contains("dari skrip"),
+        "isi yang ditulis skrip harus terlihat di pohon: {dok}"
+    );
+    // Judul juga: itu yang dipakai `Target.targetInfo`, bukan string kosong.
+    let target = ok(&state, 5, "Target.getTargets", json!({}));
+    let info = target["targetInfos"]
+        .as_array()
+        .and_then(|a| a.iter().find(|t| t["targetId"] == json!(id)))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(info["title"], json!("judul dari skrip"), "{target}");
+}
+
+/// Skrip yang tidak bisa dijalankan dilaporkan, bukan didiamkan: halaman yang
+/// tampak kosong tanpa penjelasan adalah kegagalan yang paling mahal, karena
+/// tidak ada yang bisa ditindaklanjuti dari luar.
+#[test]
+fn skrip_yang_dilewati_terlihat_di_tanda_terima_navigasi() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+
+    let terima = ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({"html": "<html><body>\
+               <script type=\"application/json\">{\"a\":1}</script>\
+               </body></html>"}),
+        &sesi,
+    );
+    assert_eq!(terima["skrip"]["dijalankan"], 0, "{terima}");
+    let dilewati = terima["skrip"]["dilewati"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(dilewati.len(), 1, "{terima}");
+    assert!(
+        dilewati[0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("application/json"),
+        "alasan pelewatan harus menyebut tipenya: {dilewati:?}"
+    );
+}
+
 /// `DOM.querySelector` dan `querySelectorAll` menjawab node sungguhan, bukan
 /// galat "belum ada". Node yang dijawab harus bisa dipakai metode DOM lain,
 /// jadi tesnya merangkai: cari, baca HTML luar, lalu simpulkan.

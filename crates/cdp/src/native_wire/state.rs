@@ -277,7 +277,13 @@ impl NativeState {
     }
 
     fn bangun(pabrik: PabrikDingin, pengambil: Option<Arc<dyn Pengambil>>) -> Self {
-        let mut pool = TabPool::new(pabrik(), MAKS_TAB);
+        // Viewport pool disamakan dengan viewport lukis, bukan dibiarkan
+        // memakai bawaannya sendiri. Dua angka yang kebetulan sama hari ini
+        // akan menyimpang begitu salah satunya diubah, dan gejalanya halus:
+        // `getBoundingClientRect` di skrip halaman meleset dari tangkapan
+        // layar tanpa satu pun galat.
+        let mut pool = TabPool::new(pabrik(), MAKS_TAB)
+            .dengan_viewport(Viewport::new(VIEWPORT_BAWAAN.0, VIEWPORT_BAWAAN.1));
         if let Some(pengambil) = pengambil {
             pool = pool.dengan_pengambil(pengambil);
         }
@@ -747,6 +753,7 @@ impl Dalam {
         if let Some(meta) = self.tabs.get(&tab) {
             catatan_bingkai.extend(meta.catatan_bingkai.iter().cloned());
         }
+        let skrip = self.laporan_skrip(tab);
         let sesudah = self.sidik(tab)?;
         Ok(json!({
             "frameId": frame_id(tab),
@@ -768,7 +775,27 @@ impl Dalam {
             // Iframe yang dilewati atau gagal diambil. Halaman yang tampak
             // kehilangan isinya bisa dijelaskan dari sini tanpa menebak.
             "bingkaiCatatan": catatan_bingkai,
+            "skrip": skrip,
         }))
+    }
+
+    /// `<script>` yang dijalankan, dilewati, dan gagal saat dokumen dipasang.
+    ///
+    /// Dari luar, "halaman kosong" dan "halaman yang skripnya gagal" terlihat
+    /// sama. Kolom ini yang membedakannya tanpa klien harus membedah isolat,
+    /// dan ia ikut di **setiap** jalur yang memasang dokumen, bukan hanya
+    /// navigasi: `Page.setDocumentContent` juga bisa memuat halaman berskrip.
+    fn laporan_skrip(&self, tab: TabId) -> Value {
+        let laporan = self
+            .pool
+            .tab(tab)
+            .map(|t| t.skrip.clone())
+            .unwrap_or_default();
+        json!({
+            "dijalankan": laporan.dijalankan,
+            "dilewati": laporan.dilewati,
+            "galat": laporan.galat,
+        })
     }
 
     fn set_konten(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
@@ -797,8 +824,12 @@ impl Dalam {
                 peristiwa::muat_selesai(peristiwa::sekarang()),
             );
         }
+        let skrip = self.laporan_skrip(tab);
         let sesudah = self.sidik(tab)?;
-        Ok(json!({ "receipt": banding(&sebelum, &sesudah) }))
+        Ok(json!({
+            "receipt": banding(&sebelum, &sesudah),
+            "skrip": skrip,
+        }))
     }
 
     /// Memuat ulang dokumen yang sekarang, lewat serialisasi DOM-nya sendiri.
@@ -1277,16 +1308,26 @@ impl Dalam {
         if self.pool.tab(tab).is_none() {
             self.pool.hidupkan(tab).map_err(pool_galat)?;
         }
-        let (keluaran, baris_log) = {
+        let (keluaran, baris_log, timer) = {
             let t = self.pool.tab(tab).ok_or_else(|| tab_hilang(tab))?;
             let keluaran = t
                 .isolat
                 .eval_bertipe(&ekspresi)
                 .map_err(|err| Galat::baru(-32000, format!("skrip gagal: {err}")))?;
+            // Timer dikuras sesudah setiap evaluasi: mesin ini tidak punya
+            // event loop, jadi `setTimeout(fn, 0)` yang dipasang klien tidak
+            // akan pernah jalan kalau tidak diminta di sini. Galat timer
+            // dilaporkan sebagai kolom, bukan menggagalkan evaluasinya:
+            // ekspresinya sudah berhasil, dan menyembunyikan hasilnya karena
+            // callback yang rusak akan menyesatkan.
+            let timer = match t.isolat.kuras_timer() {
+                Ok(jumlah) => json!(jumlah),
+                Err(err) => json!({ "galat": err.to_string() }),
+            };
             // Buffer log dikuras di sini, bukan dibaca: `console.log` yang
             // sudah dilaporkan tidak boleh dikirim ulang di evaluasi
             // berikutnya, atau klien melihat baris yang sama berkali-kali.
-            (keluaran, t.isolat.ambil_log())
+            (keluaran, t.isolat.ambil_log(), timer)
         };
         if let Some(sesi) = sesi {
             let waktu = peristiwa::sekarang();
@@ -1301,6 +1342,10 @@ impl Dalam {
         let sesudah = self.sidik(tab)?;
         Ok(json!({
             "result": remote_object(keluaran),
+            // Jumlah callback timer yang dipanggil sesudah ekspresi ini.
+            // Klien yang memasang `setTimeout` perlu tahu apakah ia benar
+            // berjalan tanpa menebak dari efek sampingnya.
+            "timer": timer,
             "receipt": banding(&sebelum, &sesudah),
         }))
     }

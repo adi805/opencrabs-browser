@@ -267,6 +267,21 @@ impl Document {
         Some(out)
     }
 
+    /// Isi satu elemen, yaitu yang di browser disebut `innerHTML`.
+    ///
+    /// Berbeda dari [`Self::luar_html`] yang ikut menulis tag elemennya
+    /// sendiri. Isi shadow root tidak ikut: ia bukan anak host di pohon ini,
+    /// sama seperti di DOM sungguhan.
+    #[must_use]
+    pub fn dalam_html(&self, id: NodeId) -> Option<String> {
+        self.node(id)?;
+        let mut out = String::new();
+        for &anak in &self.nodes.get(id)?.children {
+            self.tulis(anak, &mut out);
+        }
+        Some(out)
+    }
+
     /// Menulis dokumen kembali sebagai HTML.
     ///
     /// Dipakai oleh snapshot tab cold: bentuk inilah yang disimpan, dan

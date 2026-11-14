@@ -20,7 +20,187 @@ use rquickjs::{Context, Function, Runtime};
 
 use super::NativeError;
 use super::ambil::{JawabanAmbil, Pengambil, PengambilTolak, PermintaanAmbil};
+use super::css::LembarLuar;
 use super::dom::{Document, ModeBayang, NodeId, NodeKind};
+use super::layout::{self, LaporanLayout, Viewport};
+
+/// Konteks halaman yang dibaca skrip: URL dan ukuran viewport.
+///
+/// Dipisah dari [`Isolat`] karena isinya milik **tab**, bukan milik runtime
+/// JavaScript. [`super::tab_pool::TabPool`] yang mengisi, isolat yang membaca.
+///
+/// Layout dihitung **malas**, dan itu keputusan memori: `TabPanas` sengaja
+/// tidak menyimpan [`LaporanLayout`] karena biayanya 0,551 MB per tab untuk
+/// data yang tidak dibaca siapa pun (lihat catatan di sana). Menyimpannya di
+/// sini untuk semua tab akan mengembalikan biaya yang sudah dibuang. Yang
+/// disimpan hanya kalau skrip benar-benar memanggil `getComputedStyle` atau
+/// `getBoundingClientRect`, dan dibuang begitu pohon berubah.
+pub struct Halaman {
+    url: String,
+    viewport: Viewport,
+    lembar: Vec<LembarLuar>,
+    /// Dinaikkan setiap operasi jembatan yang mengubah pohon.
+    ///
+    /// Dipakai sebagai kunci cache layout: tanpa ini, `getBoundingClientRect`
+    /// sesudah `appendChild` akan menjawab kotak versi lama, dan nilai basi
+    /// yang diam itu kelas kesalahan yang paling sulit ditemukan.
+    versi: AtomicU64,
+    layout: Mutex<Option<(u64, Arc<LaporanLayout>)>>,
+    /// Face `@font-face` milik dokumen, kalau ada.
+    ///
+    /// Ikut ke perhitungan layout malas karena kotak teks yang diukur dengan
+    /// face tertanam lalu dilukis dengan webfont meluap atau menyisakan
+    /// celah, dan `getBoundingClientRect` akan melaporkan angka yang tidak
+    /// cocok dengan tangkapan layar.
+    font: Option<Arc<super::teks::KumpulanFont>>,
+}
+
+impl Halaman {
+    /// Konteks satu halaman. `lembar` adalah stylesheet eksternal milik
+    /// dokumen, urut sesuai `<link>`-nya.
+    #[must_use]
+    pub fn baru(url: impl Into<String>, viewport: Viewport, lembar: Vec<LembarLuar>) -> Self {
+        Self {
+            url: url.into(),
+            viewport,
+            lembar,
+            versi: AtomicU64::new(0),
+            layout: Mutex::new(None),
+            font: None,
+        }
+    }
+
+    /// Memasang face webfont dokumen supaya layout malas memakai ukuran yang
+    /// sama dengan lapisan lukis.
+    #[must_use]
+    pub fn dengan_font(mut self, font: Arc<super::teks::KumpulanFont>) -> Self {
+        self.font = Some(font);
+        self
+    }
+
+    /// URL dokumen ini. Dipakai `location` dan resolusi `src` skrip.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Ukuran viewport yang dipakai `window.innerWidth`/`innerHeight`.
+    #[must_use]
+    pub fn viewport(&self) -> Viewport {
+        self.viewport
+    }
+
+    /// Menandai pohon berubah, sehingga cache layout tidak dipakai lagi.
+    fn naikkan_versi(&self) {
+        self.versi.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Layout untuk versi pohon saat ini, dihitung sekali per versi.
+    fn layout(&self, dok: &Document) -> Option<Arc<LaporanLayout>> {
+        let versi = self.versi.load(Ordering::Relaxed);
+        let mut simpan = self.layout.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((versi_cache, laporan)) = simpan.as_ref()
+            && *versi_cache == versi
+        {
+            return Some(Arc::clone(laporan));
+        }
+        let laporan = match &self.font {
+            Some(font) => {
+                layout::hitung_dengan_font(dok, self.viewport, &self.lembar, Arc::clone(font))
+            }
+            None => layout::hitung_dengan(dok, self.viewport, &self.lembar),
+        };
+        let laporan = Arc::new(laporan.ok()?);
+        *simpan = Some((versi, Arc::clone(&laporan)));
+        Some(laporan)
+    }
+}
+
+/// Sumber satu `<script>` di dokumen.
+enum SumberSkrip {
+    /// Teks di antara `<script>` dan `</script>`.
+    Sebaris(String),
+    /// Atribut `src`, apa adanya. Resolusi relatifnya urusan pemanggil.
+    Luar(String),
+}
+
+struct SkripHalaman {
+    sumber: SumberSkrip,
+}
+
+/// Hasil satu putaran eksekusi skrip halaman.
+///
+/// Tiga kolom, bukan satu boolean: "dijalankan" tanpa "dilewati" dan "galat"
+/// akan membuat halaman yang setengah jalan terlihat seperti halaman yang
+/// beres.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LaporanSkrip {
+    /// Jumlah skrip yang **dipanggil**, termasuk yang melempar galat.
+    ///
+    /// Yang gagal tetap dihitung: yang gagal adalah penyelesaiannya, bukan
+    /// pemanggilannya, dan menghitungnya sebagai nol membuat halaman yang
+    /// skripnya error terlihat seperti halaman tanpa skrip.
+    pub dijalankan: usize,
+    /// Skrip yang sengaja tidak dijalankan, beserta alasannya.
+    pub dilewati: Vec<String>,
+    /// Skrip yang dijalankan lalu melempar galat. Halaman tetap lanjut.
+    pub galat: Vec<String>,
+}
+
+impl LaporanSkrip {
+    /// Benar kalau ada skrip yang berjalan tanpa galat sama sekali.
+    #[must_use]
+    pub fn bersih(&self) -> bool {
+        self.dijalankan > 0 && self.galat.is_empty()
+    }
+}
+
+/// Mengumpulkan `<script>` dalam urutan dokumen.
+///
+/// Yang ditelusuri hanya anak pohon terang: isi `<template>` di browser juga
+/// tidak dieksekusi sampai dipakai, dan isi shadow root punya isolat sendiri.
+fn kumpulkan_skrip(dok: &Document, laporan: &mut LaporanSkrip) -> Vec<SkripHalaman> {
+    let mut hasil = Vec::new();
+    let mut tumpuk = vec![dok.root()];
+    while let Some(kini) = tumpuk.pop() {
+        let Some(node) = dok.node(kini) else {
+            continue;
+        };
+        if node.tag() == Some("script") {
+            let tipe = node.attr("type").unwrap_or("").trim().to_ascii_lowercase();
+            if tipe == "module" {
+                laporan
+                    .dilewati
+                    .push("<script type=\"module\"> dilewati: pemuat impor belum ada".to_owned());
+            } else if tipe.is_empty()
+                || tipe == "text/javascript"
+                || tipe == "application/javascript"
+                || tipe == "text/ecmascript"
+                || tipe == "application/ecmascript"
+            {
+                match node.attr("src").map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(src) => hasil.push(SkripHalaman {
+                        sumber: SumberSkrip::Luar(src.to_owned()),
+                    }),
+                    None => hasil.push(SkripHalaman {
+                        sumber: SumberSkrip::Sebaris(dok.teks(kini)),
+                    }),
+                }
+            } else {
+                laporan.dilewati.push(format!(
+                    "<script type={tipe:?}> dilewati: bukan MIME JavaScript"
+                ));
+            }
+            // Isi `<script>` bukan markup: anaknya teks, dan menelusurinya
+            // hanya akan menemukan node teks yang tidak perlu dijalankan.
+            continue;
+        }
+        for &anak in node.children.iter().rev() {
+            tumpuk.push(anak);
+        }
+    }
+    hasil
+}
 
 /// Pagu keras untuk satu isolat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,6 +459,59 @@ const JEMBATAN_DOM: &str = r##"
     },
   });
 
+  // Anak yang berupa elemen. `children` menyaring elemen di Rust, tapi
+  // `firstElementChild` tetap butuh larik nomornya sendiri supaya
+  // `childElementCount` tidak memanggil jembatan dua kali.
+  function anakElemen(objek) {
+    var anak = panggil("children", idDari(objek)) || [];
+    var hasil = [];
+    for (var i = 0; i < anak.length; i++) {
+      if (panggil("nodeType", anak[i]) === 1) hasil.push(anak[i]);
+    }
+    return hasil;
+  }
+
+  Object.defineProperties(SimpulElemen.prototype, {
+    firstElementChild: {
+      get: function () { var a = anakElemen(this); return a.length ? bungkus(a[0]) : null; },
+    },
+    lastElementChild: {
+      get: function () { var a = anakElemen(this); return a.length ? bungkus(a[a.length - 1]) : null; },
+    },
+    childElementCount: {
+      get: function () { return anakElemen(this).length; },
+    },
+    // `innerText` di browser sadar-layout (ia menghormati `display:none` dan
+    // menyusun baris). Di sini nilainya sama dengan `textContent`, dan itu
+    // disebut di CELAH: nilai yang lebih kecil dari seharusnya lebih jujur
+    // daripada susunan baris yang dikarang.
+    innerText: {
+      get: function () { return panggil("text", idDari(this)); },
+      set: function (v) { panggil("setText", idDari(this), v); },
+    },
+    // Getter saja. Setter `innerHTML` berarti mengurai HTML lalu mengganti
+    // seluruh anak, dan itu belum ada; CELAH menyebutnya.
+    innerHTML: {
+      get: function () { return panggil("html", idDari(this)); },
+    },
+  });
+
+  SimpulElemen.prototype.getElementsByTagName = function (tag) {
+    return (panggil("tagAll", idDari(this), String(tag)) || []).map(bungkus);
+  };
+
+  SimpulElemen.prototype.getBoundingClientRect = function () {
+    var r = panggil("rect", idDari(this));
+    return {
+      x: r.x, y: r.y, width: r.width, height: r.height,
+      top: r.top, left: r.left, right: r.right, bottom: r.bottom,
+      toJSON: function () {
+        return { x: r.x, y: r.y, width: r.width, height: r.height,
+                 top: r.top, left: r.left, right: r.right, bottom: r.bottom };
+      },
+    };
+  };
+
   Object.defineProperty(SimpulElemen.prototype, "shadowRoot", {
     get: function () { return bungkus(panggil("shadowRoot", idDari(this))); },
   });
@@ -442,6 +675,14 @@ const JEMBATAN_DOM: &str = r##"
     this.__berhenti = true;
     this.__berhentiSeketika = true;
   };
+  // `document.createEvent` mengembalikan peristiwa kosong yang diisi lewat
+  // `initEvent`. Tanpa ini, pustaka lama yang masih memakai pola 2010 gagal
+  // sebelum sempat memanggil apa pun.
+  Peristiwa.prototype.initEvent = function (tipe, bubbles, cancelable) {
+    this.type = String(tipe);
+    this.bubbles = !!bubbles;
+    this.cancelable = !!cancelable;
+  };
   globalThis.Event = Peristiwa;
 
   // Nomor node dokumen, diisi setelah `dokumen` dibuat. Dipakai `sebar` untuk
@@ -563,6 +804,10 @@ const JEMBATAN_DOM: &str = r##"
     },
     createElement: function (t) { return bungkus(panggil("create", t)); },
     createTextNode: function (t) { return bungkus(panggil("createText", t)); },
+    createEvent: function () { return new Peristiwa("", {}); },
+    getElementsByTagName: function (tag) {
+      return (panggil("tagAll", docId, String(tag)) || []).map(bungkus);
+    },
   };
 
   Object.defineProperties(dokumen, {
@@ -618,6 +863,140 @@ const JEMBATAN_DOM: &str = r##"
   };
 
   globalThis.document = dokumen;
+  globalThis.Element = SimpulElemen;
+
+  // --- konteks halaman: location, viewport, timer --------------------------
+  //
+  // Nilainya datang dari Rust lewat operasi `halaman`. Isolat tes tidak punya
+  // halaman, jadi `panggil` akan melempar; di situ `location.href` diisi teks
+  // kosong alih-alih `about:blank` yang bisa menyesatkan skrip yang
+  // memeriksanya.
+  var info;
+  try {
+    info = panggil("halaman");
+  } catch (e) {
+    info = { url: "", lebar: 0, tinggi: 0 };
+  }
+  globalThis.innerWidth = info.lebar;
+  globalThis.innerHeight = info.tinggi;
+  globalThis.outerWidth = info.lebar;
+  globalThis.outerHeight = info.tinggi;
+  globalThis.devicePixelRatio = 1;
+  (function () {
+    var u = String(info.url || "");
+    var m = /^([a-zA-Z][a-zA-Z0-9+.-]*:)\/\/([^\/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/.exec(u);
+    var protokol = m ? m[1] : "";
+    var host = m ? m[2] : "";
+    var port = (host.match(/:([0-9]+)$/) || ["", ""])[1];
+    var lokasi = {
+      href: u,
+      protocol: protokol,
+      host: host,
+      hostname: host.replace(/:[0-9]+$/, ""),
+      port: port,
+      pathname: m ? (m[3] || "/") : "",
+      search: m ? (m[4] || "") : "",
+      hash: m ? (m[5] || "") : "",
+      origin: protokol && host ? protokol + "//" + host : "",
+    };
+    lokasi.toString = function () { return u; };
+    globalThis.location = lokasi;
+  })();
+
+  // Antrean timer. rquickjs tidak punya event loop, dan menjalankan satu di
+  // dalam isolat berarti satu state mesin lagi yang harus diuji terhadap pagu
+  // waktu. Jadi antreannya dikuras Rust lewat `__timer.kuras()`, dan batasnya
+  // jujur: timer hanya berjalan saat mesin memompa, bukan selama halaman
+  // menganggur.
+  var antrean = [];
+  var nomorTimer = 1;
+  function jadwalkan(fn, jeda, berulang, args) {
+    if (typeof fn !== "function") return 0;
+    var id = nomorTimer++;
+    antrean.push({
+      id: id,
+      pada: Date.now() + (Number(jeda) || 0),
+      jeda: Number(jeda) || 0,
+      fn: fn,
+      args: args || [],
+      berulang: !!berulang,
+    });
+    return id;
+  }
+  function batalkan(id) {
+    for (var i = 0; i < antrean.length; i++) {
+      if (antrean[i].id === id) {
+        antrean.splice(i, 1);
+        return;
+      }
+    }
+  }
+  globalThis.setTimeout = function (fn, jeda) {
+    return jadwalkan(fn, jeda, false, Array.prototype.slice.call(arguments, 2));
+  };
+  globalThis.clearTimeout = batalkan;
+  globalThis.setInterval = function (fn, jeda) {
+    return jadwalkan(fn, jeda, true, Array.prototype.slice.call(arguments, 2));
+  };
+  globalThis.clearInterval = batalkan;
+  globalThis.requestAnimationFrame = function (fn) {
+    return jadwalkan(fn, 0, false, [Date.now()]);
+  };
+  globalThis.cancelAnimationFrame = batalkan;
+  Object.defineProperty(globalThis, "__timer", {
+    value: {
+      kuras: function () {
+        var sekarang = Date.now();
+        var siap = [];
+        for (var i = 0; i < antrean.length; i++) {
+          if (antrean[i].pada <= sekarang) siap.push(antrean[i]);
+        }
+        siap.sort(function (a, b) { return a.pada - b.pada || a.id - b.id; });
+        var dijalankan = 0;
+        for (var j = 0; j < siap.length; j++) {
+          var t = siap[j];
+          if (!t.berulang) batalkan(t.id);
+          t.fn.apply(null, t.args);
+          dijalankan++;
+          if (t.berulang) t.pada = Date.now() + Math.max(t.jeda, 1);
+        }
+        return dijalankan;
+      },
+      jumlah: function () { return antrean.length; },
+    },
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+
+  // `getComputedStyle` membaca hasil layout, bukan atribut `style`: nilai yang
+  // dikembalikan sudah lewat kaskade dan pewarisan, sama seperti browser.
+  // Properti yang tidak dihitung mesin ini menjawab teks kosong, bukan angka
+  // karangan.
+  function Gaya(el) {
+    this.__peta = panggil("style", idDari(el));
+  }
+  Gaya.prototype.getPropertyValue = function (nama) {
+    var kunci = String(nama);
+    if (kunci in this.__peta) return this.__peta[kunci];
+    var kebab = kunci.replace(/[A-Z]/g, function (c) { return "-" + c.toLowerCase(); });
+    return kebab in this.__peta ? this.__peta[kebab] : "";
+  };
+  var PROPERTI_GAYA = [
+    "color", "fontSize", "fontWeight", "lineHeight", "visibility",
+    "textAlign", "fontFamily", "display", "position", "width", "height",
+  ];
+  for (var gi = 0; gi < PROPERTI_GAYA.length; gi++) {
+    (function (nama) {
+      Object.defineProperty(Gaya.prototype, nama, {
+        get: function () { return this.getPropertyValue(nama); },
+      });
+    })(PROPERTI_GAYA[gi]);
+  }
+  globalThis.getComputedStyle = function (el) {
+    if (!el) throw new TypeError("getComputedStyle butuh elemen");
+    return new Gaya(el);
+  };
 
   // Dispatcher dipasang **non-enumerable**, sama seperti `__log`. Rust harus
   // bisa mengambilnya lagi pada setiap peristiwa, dan satu-satunya cara
@@ -735,12 +1114,34 @@ fn kunci(dokumen: &Arc<Mutex<Document>>) -> MutexGuard<'_, Document> {
 
 fn op_dom(
     dokumen: &Arc<Mutex<Document>>,
+    halaman: Option<&Halaman>,
     op: &str,
     a: &str,
     b: &str,
     c: &str,
 ) -> Result<serde_json::Value, String> {
     use serde_json::json;
+
+    // Operasi yang mengubah pohon menaikkan versi halaman. Tanpa ini,
+    // `getBoundingClientRect` sesudah `appendChild` menjawab kotak versi lama,
+    // dan nilai basi yang tidak memberi galat adalah cara paling halus untuk
+    // membuat skrip halaman salah tanpa ada yang tahu.
+    if matches!(
+        op,
+        "setText"
+            | "setAttr"
+            | "delAttr"
+            | "create"
+            | "createText"
+            | "append"
+            | "insertBefore"
+            | "remove"
+            | "setTitle"
+            | "attachShadow"
+    ) && let Some(halaman) = halaman
+    {
+        halaman.naikkan_versi();
+    }
 
     fn nomor(teks: &str) -> Result<NodeId, String> {
         teks.parse::<NodeId>()
@@ -985,6 +1386,118 @@ fn op_dom(
             }
             Ok(json!(null))
         }
+        "html" => {
+            let id = nomor(a)?;
+            let dok = kunci(dokumen);
+            dok.dalam_html(id)
+                .map(|isi| json!(isi))
+                .ok_or_else(|| format!("node {id} tidak ada"))
+        }
+        "tagAll" => {
+            let id = nomor(a)?;
+            let tag = b.to_ascii_lowercase();
+            let dok = kunci(dokumen);
+            let mut hasil = Vec::new();
+            let mut tumpuk = vec![id];
+            while let Some(kini) = tumpuk.pop() {
+                let Some(node) = dok.node(kini) else {
+                    continue;
+                };
+                if let NodeKind::Element(t) = &node.kind
+                    && (tag == "*" || t.eq_ignore_ascii_case(&tag))
+                {
+                    hasil.push(kini);
+                }
+                // Urutan dokumen: anak dibalik sebelum masuk tumpukan, karena
+                // tumpukan mengeluarkan yang terakhir dimasukkan.
+                for &anak in node.children.iter().rev() {
+                    tumpuk.push(anak);
+                }
+            }
+            Ok(json!(hasil))
+        }
+        "rect" => {
+            let id = nomor(a)?;
+            let Some(halaman) = halaman else {
+                return Err("getBoundingClientRect butuh konteks halaman".to_owned());
+            };
+            let dok = kunci(dokumen);
+            let laporan = halaman
+                .layout(&dok)
+                .ok_or_else(|| "layout tidak bisa dihitung".to_owned())?;
+            let kotak = laporan
+                .kotak_untuk(id)
+                .ok_or_else(|| format!("node {id} tidak punya kotak layout"))?;
+            Ok(json!({
+                "x": kotak.x,
+                "y": kotak.y,
+                "width": kotak.width,
+                "height": kotak.height,
+                "top": kotak.y,
+                "left": kotak.x,
+                "right": kotak.x + kotak.width,
+                "bottom": kotak.y + kotak.height,
+            }))
+        }
+        "style" => {
+            let id = nomor(a)?;
+            let Some(halaman) = halaman else {
+                return Err("getComputedStyle butuh konteks halaman".to_owned());
+            };
+            let dok = kunci(dokumen);
+            let laporan = halaman
+                .layout(&dok)
+                .ok_or_else(|| "layout tidak bisa dihitung".to_owned())?;
+            let mut peta = serde_json::Map::new();
+            // Deklarasi pemenang dulu, lalu nilai terhitung menimpanya.
+            // Urutan itu penting: `color: currentColor` yang menang di kaskade
+            // bukan jawaban yang berguna bagi skrip, sedangkan warna hasil
+            // warisan adalah.
+            if let Some(daftar) = laporan.gaya.get(&id) {
+                for (nama, nilai) in daftar {
+                    peta.insert(nama.clone(), json!(nilai));
+                }
+            }
+            if let Some(gaya) = laporan.gaya_terhitung(id) {
+                if let Some(warna) = &gaya.warna {
+                    peta.insert("color".to_owned(), json!(warna));
+                }
+                peta.insert(
+                    "font-size".to_owned(),
+                    json!(format!("{:.1}px", gaya.ukuran_font)),
+                );
+                peta.insert("font-weight".to_owned(), json!(gaya.tebal_font.to_string()));
+                peta.insert(
+                    "line-height".to_owned(),
+                    json!(format!("{:.1}px", gaya.tinggi_baris)),
+                );
+                peta.insert(
+                    "visibility".to_owned(),
+                    json!(if gaya.terlihat { "visible" } else { "hidden" }),
+                );
+                if let Some(perataan) = &gaya.perataan {
+                    peta.insert("text-align".to_owned(), json!(perataan));
+                }
+                if !gaya.keluarga_font.is_empty() {
+                    peta.insert(
+                        "font-family".to_owned(),
+                        json!(gaya.keluarga_font.join(", ")),
+                    );
+                }
+            }
+            Ok(serde_json::Value::Object(peta))
+        }
+        "halaman" => {
+            let Some(halaman) = halaman else {
+                return Err("isolat ini tidak punya konteks halaman".to_owned());
+            };
+            let viewport = halaman.viewport();
+            Ok(json!({
+                "url": halaman.url(),
+                "lebar": viewport.width,
+                "tinggi": viewport.height,
+            }))
+        }
         lain => Err(format!("operasi jembatan tidak dikenal: {lain:?}")),
     }
 }
@@ -1062,6 +1575,18 @@ pub struct Isolat {
     lewat_batas: Arc<AtomicBool>,
     /// Batas waktu yang dipakai [`Self::eval`] dan [`Self::eval_bertipe`].
     batas_waktu: Duration,
+    /// URL dan viewport halaman ini, kalau pemanggil menyerahkannya.
+    ///
+    /// `None` berarti isolat tanpa halaman (tes murni): `location` dan
+    /// `innerWidth` tetap ada tapi berisi nilai kosong, dan
+    /// `getComputedStyle`/`getBoundingClientRect` menjawab kosong dengan
+    /// alasan, bukan mengarang angka.
+    halaman: Option<Arc<Halaman>>,
+    /// Jalur jaringan yang sama dengan yang dipakai `fetch()`.
+    ///
+    /// Disimpan terpisah karena `<script src>` butuh pengambil yang sama
+    /// tanpa harus lewat JavaScript: byte-nya diambil Rust lalu dievaluasi.
+    pengambil: Option<Arc<dyn Pengambil>>,
 }
 
 impl Isolat {
@@ -1113,10 +1638,17 @@ impl Isolat {
             tenggat,
             lewat_batas,
             batas_waktu: pagu.batas_waktu,
+            halaman: None,
+            pengambil: None,
         };
         isolat.eval(PEMBUKA)?;
-        isolat.pasang_ambil(pengambil)?;
-        Ok(isolat)
+        isolat.pasang_ambil(Arc::clone(&pengambil))?;
+        // Disimpan sesudah `pasang_ambil` berhasil: kalau jembatan gagal
+        // dipasang, isolatnya dibuang dan tidak ada yang perlu jalur ini.
+        Ok(Self {
+            pengambil: Some(pengambil),
+            ..isolat
+        })
     }
 
     /// Isolat yang `document`-nya adalah pohon sungguhan, bukan objek kosong.
@@ -1142,10 +1674,135 @@ impl Isolat {
         dokumen: Arc<Mutex<Document>>,
         pengambil: Arc<dyn Pengambil>,
     ) -> Result<Self, NativeError> {
+        Self::dengan_dokumen_ambil_dan_halaman(pagu, dokumen, pengambil, None)
+    }
+
+    /// Bentuk terlengkap: pohon, jalur jaringan, dan konteks halaman.
+    ///
+    /// `halaman` yang `None` bukan kesalahan: isolat tes memang tidak punya
+    /// URL maupun viewport, dan `location`/`innerWidth` harus menjawab kosong
+    /// dengan jujur alih-alih menebak `about:blank` lalu menyesatkan skrip
+    /// yang memeriksanya.
+    pub fn dengan_dokumen_ambil_dan_halaman(
+        pagu: PaguIsolat,
+        dokumen: Arc<Mutex<Document>>,
+        pengambil: Arc<dyn Pengambil>,
+        halaman: Option<Arc<Halaman>>,
+    ) -> Result<Self, NativeError> {
         let mut isolat = Self::dengan_ambil(pagu, pengambil)?;
         isolat.dokumen = Some(dokumen);
+        isolat.halaman = halaman;
         isolat.pasang_jembatan()?;
         Ok(isolat)
+    }
+
+    /// Konteks halaman yang sedang dipakai isolat, kalau ada.
+    #[must_use]
+    pub fn halaman(&self) -> Option<&Arc<Halaman>> {
+        self.halaman.as_ref()
+    }
+
+    /// Menjalankan semua `<script>` milik dokumen, urut kemunculan.
+    ///
+    /// Ini yang membedakan mesin yang "bisa memparse HTML" dari mesin yang
+    /// bisa membuka situs hari ini: hampir semua aplikasi web mengirim kerangka
+    /// kosong lalu mengisinya dari JavaScript. Tanpa langkah ini, halaman
+    /// seperti itu tampil kosong tanpa satu pun galat.
+    ///
+    /// Yang dijalankan: `<script>` tanpa `src` (teksnya dievaluasi langsung)
+    /// dan `<script src>` yang byte-nya didapat lewat [`Pengambil`] yang sama
+    /// dengan `fetch()`. Yang dilewati beserta alasannya: `type` yang bukan
+    /// MIME JavaScript (`application/json`, `text/template`, ...) dan
+    /// `type="module"`, karena modul butuh pemuat impor yang belum ada.
+    ///
+    /// Satu skrip yang gagal **tidak** menghentikan yang lain: browser juga
+    /// begitu, dan halaman yang satu skripnya error tetap harus bisa dibaca.
+    /// Galatnya dikumpulkan, bukan ditelan.
+    pub fn jalankan_skrip_halaman(&self) -> Result<LaporanSkrip, NativeError> {
+        let mut laporan = LaporanSkrip::default();
+        let (daftar, dasar) = {
+            let Some(dokumen) = self.dokumen.as_ref() else {
+                return Err(NativeError::dom("eksekusi skrip butuh pohon dokumen"));
+            };
+            let dok = kunci(dokumen);
+            let dasar = dok
+                .nodes()
+                .iter()
+                .find(|n| n.tag() == Some("base"))
+                .and_then(|n| n.attr("href"))
+                .map(str::to_owned)
+                .or_else(|| self.halaman.as_ref().map(|h| h.url().to_owned()));
+            (kumpulkan_skrip(&dok, &mut laporan), dasar)
+        };
+
+        for skrip in daftar {
+            let sumber = match skrip.sumber {
+                SumberSkrip::Sebaris(teks) => teks,
+                SumberSkrip::Luar(src) => {
+                    let Some(pengambil) = self.pengambil.as_ref() else {
+                        laporan
+                            .dilewati
+                            .push(format!("{src}: isolat ini tidak punya jalur jaringan"));
+                        continue;
+                    };
+                    let Some(url) = super::bingkai::selesaikan(&src, dasar.as_deref()) else {
+                        laporan
+                            .dilewati
+                            .push(format!("{src}: URL tidak bisa diselesaikan"));
+                        continue;
+                    };
+                    let permintaan = PermintaanAmbil {
+                        metode: "GET".to_owned(),
+                        url: url.clone(),
+                        badan: None,
+                    };
+                    match pengambil.ambil(&permintaan) {
+                        Ok(jawaban) if (200..300).contains(&jawaban.status) => jawaban.badan,
+                        Ok(jawaban) => {
+                            laporan.dilewati.push(format!(
+                                "{url}: HTTP {} dari jalur jaringan",
+                                jawaban.status
+                            ));
+                            continue;
+                        }
+                        Err(pesan) => {
+                            laporan.dilewati.push(format!("{url}: {pesan}"));
+                            continue;
+                        }
+                    }
+                }
+            };
+            if sumber.trim().is_empty() {
+                continue;
+            }
+            match self.eval(&sumber) {
+                Ok(_) => laporan.dijalankan += 1,
+                Err(NativeError::BatasWaktu(pesan)) => {
+                    // Skrip yang melewati pagu waktu tetap dihitung sudah
+                    // dijalankan: yang gagal adalah penyelesaiannya, bukan
+                    // pemanggilannya, dan menyembunyikan itu membuat halaman
+                    // yang lambat terlihat seperti halaman tanpa skrip.
+                    laporan.dijalankan += 1;
+                    laporan.galat.push(pesan);
+                }
+                Err(err) => {
+                    laporan.dijalankan += 1;
+                    laporan.galat.push(err.to_string());
+                }
+            }
+        }
+        Ok(laporan)
+    }
+
+    /// Menjalankan timer yang sudah jatuh tempo.
+    ///
+    /// Mengembalikan jumlah callback yang dipanggil. Dipanggil pemanggil
+    /// sesudah skrip halaman dan sesudah setiap evaluasi dari klien: mesin ini
+    /// tidak punya event loop, jadi tidak ada yang menguras antrean kalau
+    /// tidak diminta.
+    pub fn kuras_timer(&self) -> Result<usize, NativeError> {
+        let hasil = self.eval("globalThis.__timer ? globalThis.__timer.kuras() : 0")?;
+        Ok(hasil.trim().parse::<usize>().unwrap_or(0))
     }
 
     /// Pohon yang sedang dipakai jembatan DOM, kalau ada.
@@ -1169,11 +1826,12 @@ impl Isolat {
         let Some(dokumen) = self.dokumen.clone() else {
             return Err(NativeError::dom("jembatan DOM dipasang tanpa pohon"));
         };
+        let halaman = self.halaman.clone();
         self.context.with(|ctx| {
             let fungsi = Function::new(
                 ctx.clone(),
                 move |op: String, a: String, b: String, c: String| -> String {
-                    match op_dom(&dokumen, &op, &a, &b, &c) {
+                    match op_dom(&dokumen, halaman.as_deref(), &op, &a, &b, &c) {
                         Ok(nilai) => nilai.to_string(),
                         Err(pesan) => serde_json::json!({ "__galat": pesan }).to_string(),
                     }
@@ -1818,11 +2476,416 @@ mod tests {
         dok.lock().unwrap()
     }
 
+    // ── Eksekusi `<script>` halaman ───────────────────────────────────────
+    // Sampai W5, satu-satunya jalan menjalankan JavaScript adalah
+    // `Runtime.evaluate` dari klien: halaman yang mengisi dirinya sendiri
+    // lewat `<script>` tampil kosong di mesin ini, tanpa satu pun galat. Tes
+    // di bawah menuntut hal yang berbeda dari tes jembatan DOM: bukan "JS
+    // bisa memutasi pohon kalau dipanggil", tapi "pohon berubah karena
+    // halaman memintanya sendiri".
+
+    fn isolat_halaman(
+        html: &str,
+        url: &str,
+        pengambil: Option<Arc<dyn Pengambil>>,
+    ) -> (Isolat, Arc<Mutex<Document>>) {
+        let dok = Arc::new(Mutex::new(Document::parse_html(html).unwrap()));
+        let halaman = Arc::new(Halaman::baru(url, Viewport::new(800.0, 600.0), Vec::new()));
+        let isolat = Isolat::dengan_dokumen_ambil_dan_halaman(
+            PaguIsolat::default(),
+            Arc::clone(&dok),
+            pengambil.unwrap_or_else(|| Arc::new(PengambilTolak)),
+            Some(halaman),
+        )
+        .unwrap();
+        (isolat, dok)
+    }
+
+    #[test]
+    fn skrip_sebaris_berjalan_saat_halaman_dibuka() {
+        let (isolat, dok) = isolat_halaman(
+            "<html><head><title>awal</title></head><body>\
+             <div id=\"x\">lama</div>\
+             <script>document.title = 'dari skrip'; \
+             document.getElementById('x').textContent = 'halo';</script>\
+             </body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert_eq!(laporan.dijalankan, 1, "satu skrip sebaris harus berjalan");
+        assert!(
+            laporan.galat.is_empty(),
+            "galat tak terduga: {:?}",
+            laporan.galat
+        );
+        assert!(laporan.dilewati.is_empty(), "tidak ada yang dilewati");
+        assert!(laporan.bersih());
+
+        // Sisi Rust harus melihat hasilnya: judul di pohon, bukan di isolat.
+        assert_eq!(isi(&dok).judul().as_deref(), Some("dari skrip"));
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('x').textContent")
+                .unwrap(),
+            "halo"
+        );
+    }
+
+    #[test]
+    fn skrip_bukan_javascript_dilewati_dengan_alasan() {
+        // `application/json` bukan program. Menjalankannya akan melempar galat
+        // sintaks yang menyamar sebagai halaman rusak, jadi yang benar adalah
+        // melewatinya dan menyebut sebabnya.
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body>\
+             <script type=\"application/json\">{\"a\":1}</script>\
+             <script type=\"module\">export const a = 1;</script>\
+             </body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert_eq!(laporan.dijalankan, 0, "tidak ada yang boleh dijalankan");
+        assert!(laporan.galat.is_empty());
+        assert_eq!(laporan.dilewati.len(), 2, "{:?}", laporan.dilewati);
+        assert!(
+            laporan
+                .dilewati
+                .iter()
+                .any(|a| a.contains("application/json")),
+            "{:?}",
+            laporan.dilewati
+        );
+        assert!(
+            laporan.dilewati.iter().any(|a| a.contains("module")),
+            "{:?}",
+            laporan.dilewati
+        );
+        assert!(!laporan.bersih(), "nol skrip berjalan bukan putaran bersih");
+    }
+
+    /// Gerbang jaringan yang mengembalikan JavaScript, dan mencatat URL yang
+    /// diminta. Dipakai untuk membuktikan `src` relatif diselesaikan terhadap
+    /// URL halaman, bukan terhadap direktori kerja proses.
+    struct GerbangSkrip {
+        dicatat: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Pengambil for GerbangSkrip {
+        fn ambil(&self, permintaan: &PermintaanAmbil) -> Result<JawabanAmbil, String> {
+            self.dicatat
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(permintaan.url.clone());
+            Ok(JawabanAmbil {
+                status: 200,
+                url: permintaan.url.clone(),
+                content_type: Some("text/javascript".to_owned()),
+                badan: "document.title = 'dari luar';".to_owned(),
+            })
+        }
+    }
+
+    #[test]
+    fn skrip_luar_diambil_lewat_jalur_jaringan_lalu_berjalan() {
+        let dicatat = Arc::new(Mutex::new(Vec::new()));
+        let gerbang = Arc::new(GerbangSkrip {
+            dicatat: Arc::clone(&dicatat),
+        });
+        let (isolat, dok) = isolat_halaman(
+            "<html><head><title>awal</title></head><body>\
+             <script src=\"app.js\"></script></body></html>",
+            "https://contoh.test/folder/halaman",
+            Some(gerbang as Arc<dyn Pengambil>),
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert_eq!(laporan.dijalankan, 1, "galat: {:?}", laporan.galat);
+        assert!(laporan.galat.is_empty(), "{:?}", laporan.galat);
+
+        let diminta = dicatat.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            diminta,
+            vec!["https://contoh.test/folder/app.js".to_owned()],
+            "src relatif harus diselesaikan terhadap URL halaman"
+        );
+        assert_eq!(isi(&dok).judul().as_deref(), Some("dari luar"));
+    }
+
+    #[test]
+    fn skrip_yang_melempar_galat_tidak_menghentikan_skrip_lain() {
+        // Satu skrip rusak di kepala halaman tidak boleh mematikan skrip
+        // berikutnya: browser juga begitu, dan halaman seperti itu tetap harus
+        // bisa dibaca.
+        let (isolat, dok) = isolat_halaman(
+            "<html><body>\
+             <script>lempar_galat_yang_tidak_ada()</script>\
+             <script>document.title = 'skrip kedua tetap jalan'</script>\
+             </body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert_eq!(laporan.dijalankan, 2, "dua skrip dipanggil");
+        assert_eq!(laporan.galat.len(), 1, "satu galat dilaporkan: {laporan:?}");
+        assert_eq!(
+            isi(&dok).judul().as_deref(),
+            Some("skrip kedua tetap jalan")
+        );
+    }
+
+    // ── API konteks halaman ───────────────────────────────────────────────
+    // Satu tes per API, dan nama tesnya menyebut API-nya. Halaman nyata
+    // memanggil `location.href`, `window.innerWidth`, `setTimeout`, dan
+    // `getComputedStyle` di baris pertama skripnya; tanpa ini skrip halaman
+    // berjalan lalu langsung melempar `ReferenceError`, dan halaman yang
+    // seharusnya terisi tampil kosong.
+
+    #[test]
+    fn location_membaca_url_halaman() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body></body></html>",
+            "https://contoh.test/folder/halaman?x=1#bagian",
+            None,
+        );
+        assert_eq!(
+            isolat.eval("location.href").unwrap(),
+            "https://contoh.test/folder/halaman?x=1#bagian"
+        );
+        assert_eq!(
+            isolat.eval("location.origin").unwrap(),
+            "https://contoh.test"
+        );
+        assert_eq!(isolat.eval("location.protocol").unwrap(), "https:");
+        assert_eq!(isolat.eval("location.hostname").unwrap(), "contoh.test");
+        assert_eq!(isolat.eval("location.pathname").unwrap(), "/folder/halaman");
+        assert_eq!(isolat.eval("location.search").unwrap(), "?x=1");
+        assert_eq!(isolat.eval("location.hash").unwrap(), "#bagian");
+        assert_eq!(
+            isolat.eval("String(location)").unwrap(),
+            "https://contoh.test/folder/halaman?x=1#bagian"
+        );
+    }
+
+    #[test]
+    fn inner_width_dan_inner_height_membaca_viewport() {
+        let (isolat, _dok) =
+            isolat_halaman("<html><body></body></html>", "https://contoh.test/", None);
+        assert_eq!(isolat.eval("innerWidth").unwrap(), "800");
+        assert_eq!(isolat.eval("innerHeight").unwrap(), "600");
+        assert_eq!(isolat.eval("window.outerWidth").unwrap(), "800");
+        assert_eq!(isolat.eval("window.outerHeight").unwrap(), "600");
+        assert_eq!(isolat.eval("devicePixelRatio").unwrap(), "1");
+    }
+
+    #[test]
+    fn settimeout_dijalankan_saat_timer_dikuras() {
+        let (isolat, dok) = isolat_halaman(
+            "<html><head><title>awal</title></head><body></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        isolat
+            .eval("setTimeout(function () { document.title = 'dari timer'; }, 0)")
+            .unwrap();
+        // Belum dikuras: tidak ada yang berjalan sendiri. Ini batas yang
+        // disebut di CELAH, dan tes ini yang membuatnya tidak diam-diam
+        // berubah jadi janji yang lebih besar.
+        assert_eq!(isi(&dok).judul().as_deref(), Some("awal"));
+        assert_eq!(isolat.kuras_timer().unwrap(), 1);
+        assert_eq!(isi(&dok).judul().as_deref(), Some("dari timer"));
+    }
+
+    #[test]
+    fn clear_timeout_membatalkan_callback() {
+        let (isolat, dok) = isolat_halaman(
+            "<html><head><title>awal</title></head><body></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        isolat
+            .eval("var id = setTimeout(function () { document.title = 'tidak boleh'; }, 0); clearTimeout(id)")
+            .unwrap();
+        assert_eq!(isolat.kuras_timer().unwrap(), 0);
+        assert_eq!(isi(&dok).judul().as_deref(), Some("awal"));
+    }
+
+    #[test]
+    fn setinterval_dan_clearinterval_mengatur_antrean() {
+        // Yang diuji antreannya, bukan waktunya: tes yang menunggu 1 detik
+        // untuk membuktikan interval berulang itu tes yang lambat dan rapuh.
+        let (isolat, _dok) =
+            isolat_halaman("<html><body></body></html>", "https://contoh.test/", None);
+        isolat
+            .eval("var id = setInterval(function () {}, 1000)")
+            .unwrap();
+        assert_eq!(isolat.eval("__timer.jumlah()").unwrap(), "1");
+        // Belum jatuh tempo, jadi kuras tidak memanggil apa pun.
+        assert_eq!(isolat.kuras_timer().unwrap(), 0);
+        isolat.eval("clearInterval(id)").unwrap();
+        assert_eq!(isolat.eval("__timer.jumlah()").unwrap(), "0");
+    }
+
+    #[test]
+    fn get_computed_style_membaca_kaskade_bukan_atribut() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head><style>#a { color: rgb(1, 2, 3); }</style></head>\
+             <body><div id=\"a\" style=\"font-size: 20px\">x</div></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        // Ukuran font dari atribut `style`, warna dari `<style>`: dua sumber
+        // berbeda yang keduanya harus lewat kaskade.
+        assert_eq!(
+            isolat
+                .eval("getComputedStyle(document.getElementById('a')).fontSize")
+                .unwrap(),
+            "20.0px"
+        );
+        let warna = isolat
+            .eval("getComputedStyle(document.getElementById('a')).getPropertyValue('color')")
+            .unwrap();
+        assert!(
+            warna.contains("1, 2, 3") || warna.contains("1,2,3"),
+            "warna dari <style> harus terbaca, dapat: {warna:?}"
+        );
+    }
+
+    #[test]
+    fn get_bounding_client_rect_memakai_layout() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body><div id=\"a\" style=\"width:50px;height:20px\">x</div></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        assert_eq!(
+            isolat
+                .eval("String(document.getElementById('a').getBoundingClientRect().height)")
+                .unwrap(),
+            "20"
+        );
+        assert_eq!(
+            isolat
+                .eval("String(document.getElementById('a').getBoundingClientRect().width)")
+                .unwrap(),
+            "50"
+        );
+    }
+
+    #[test]
+    fn inner_html_getter_mengembalikan_isi_elemen() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body><div id=\"p\">teks<span class=\"s\">satu</span></div></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let isi_elemen = isolat
+            .eval("document.getElementById('p').innerHTML")
+            .unwrap();
+        assert!(isi_elemen.contains("teks"), "{isi_elemen:?}");
+        assert!(isi_elemen.contains("<span"), "{isi_elemen:?}");
+        assert!(isi_elemen.contains("satu"), "{isi_elemen:?}");
+        // Tag elemennya sendiri tidak ikut: itu `outerHTML`.
+        assert!(!isi_elemen.contains("id=\"p\""), "{isi_elemen:?}");
+    }
+
+    #[test]
+    fn get_elements_by_tag_name_mengembalikan_semua() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body><div><span>a</span></div><span>b</span></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementsByTagName('span').length")
+                .unwrap(),
+            "2"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementsByTagName('span')[1].textContent")
+                .unwrap(),
+            "b"
+        );
+        // Versi elemen hanya menelusuri anaknya sendiri.
+        assert_eq!(
+            isolat
+                .eval("document.querySelector('div').getElementsByTagName('span').length")
+                .unwrap(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn first_element_child_dan_last_element_child_melewati_teks() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body><div id=\"p\">teks<span>satu</span><b>dua</b>teks</div></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('p').firstElementChild.tagName")
+                .unwrap(),
+            "SPAN"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('p').lastElementChild.tagName")
+                .unwrap(),
+            "B"
+        );
+        assert_eq!(
+            isolat
+                .eval("document.getElementById('p').childElementCount")
+                .unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn add_event_listener_di_document_menerima_click_yang_menggelembung() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body><div id=\"tombol\">tekan</div></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let kena = isolat
+            .eval(
+                "var kena = 0; \
+                 document.addEventListener('click', function () { kena++; }); \
+                 document.getElementById('tombol').click(); \
+                 kena",
+            )
+            .unwrap();
+        assert_eq!(kena, "1", "click harus menggelembung sampai document");
+        // `removeEventListener` harus benar-benar melepas, bukan cuma
+        // menandai: pendengar yang tertinggal akan menghitung klik berikutnya.
+        let sesudah = isolat
+            .eval(
+                "var f = function () { kena++; }; \
+                 document.addEventListener('click', f); \
+                 document.removeEventListener('click', f); \
+                 document.getElementById('tombol').click(); \
+                 kena",
+            )
+            .unwrap();
+        assert_eq!(sesudah, "2", "pendengar yang dilepas tidak boleh dipanggil");
+    }
+
     #[test]
     fn test_js_runtime_dom_mutations() {
-        // AC-003. Skrip halaman harus bisa mencari elemen, membuat elemen,
+        // AC-003. JavaScript harus bisa mencari elemen, membuat elemen,
         // menyisipkannya, dan mengubah teks, lalu semuanya terlihat di pohon
         // Rust yang dipakai `DOM.getDocument` dan raster.
+        //
+        // **Tes ini memanggil `eval` langsung, jadi ia tidak membuktikan
+        // bahwa `<script>` di halaman pernah dijalankan.** Yang membuktikan
+        // itu `skrip_sebaris_berjalan_saat_halaman_dibuka` dan kawan-kawannya
+        // di bawah. Nama tes ini menyebut "runtime" karena itu jalur
+        // `Runtime.evaluate`, bukan pemuatan halaman; sempat dibaca sebagai
+        // bukti eksekusi `<script>`, dan itu keliru.
         let (isolat, dok) = isolat_dengan(
             "<html><head></head><body><div id=\"kartu\"><p>lama</p></div></body></html>",
         );

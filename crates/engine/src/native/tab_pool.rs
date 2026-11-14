@@ -23,7 +23,7 @@ use super::NativeError;
 use super::ambil::{Pengambil, PengambilTolak};
 use super::css::LembarLuar;
 use super::dom::{Document, NodeId};
-use super::js::{Isolat, PaguIsolat};
+use super::js::{Halaman, Isolat, LaporanSkrip, PaguIsolat};
 
 /// Biaya PSS marginal satu tab hidup, dalam MB.
 ///
@@ -159,6 +159,12 @@ pub struct TabPanas {
     /// yang ditinggal di sisi Rust akan mengunci diri sendiri.
     dokumen: Arc<Mutex<Document>>,
     pub isolat: Isolat,
+    /// Hasil putaran `<script>` saat tab dibangun.
+    ///
+    /// Disimpan, bukan dibuang, karena "halaman kosong" dan "halaman yang
+    /// skripnya gagal" terlihat sama dari luar. Dengan laporan ini pemanggil
+    /// bisa membedakan keduanya tanpa membedah isolat.
+    pub skrip: LaporanSkrip,
     pub terakhir_dipakai: Instant,
     /// Lembar gaya eksternal milik dokumen ini, urut sesuai `<link>`-nya.
     ///
@@ -237,6 +243,14 @@ pub struct TabPool<C: ColdStore> {
     /// semua, bukan mengizinkan semua. Kebijakan yang sebenarnya dipegang
     /// pemanggil (daemon), karena crate ini tidak boleh tahu aturan izin.
     pengambil: Arc<dyn Pengambil>,
+    /// Viewport yang dilaporkan `window.innerWidth`/`innerHeight` dan dipakai
+    /// `getBoundingClientRect` untuk menghitung layout malas.
+    ///
+    /// Bawaannya sama dengan [`super::layout::Viewport`] yang dipakai lapisan
+    /// lukis di daemon (800x600). Berbeda dari itu berarti skrip halaman
+    /// membaca ukuran yang bukan ukuran yang dilukis, dan `getBoundingClientRect`
+    /// akan meleset dari tangkapan layar.
+    viewport: super::layout::Viewport,
     berikutnya: u64,
     pub jumlah_singkir: usize,
 }
@@ -252,6 +266,7 @@ impl<C: ColdStore> TabPool<C> {
             maks_total,
             pagu_isolat: PaguIsolat::default(),
             pengambil: Arc::new(PengambilTolak),
+            viewport: super::layout::Viewport::new(800.0, 600.0),
             berikutnya: 1,
             jumlah_singkir: 0,
         }
@@ -271,6 +286,13 @@ impl<C: ColdStore> TabPool<C> {
     #[must_use]
     pub fn dengan_pengambil(mut self, pengambil: Arc<dyn Pengambil>) -> Self {
         self.pengambil = pengambil;
+        self
+    }
+
+    /// Ukuran jendela yang dilihat skrip halaman.
+    #[must_use]
+    pub fn dengan_viewport(mut self, viewport: super::layout::Viewport) -> Self {
+        self.viewport = viewport;
         self
     }
 
@@ -416,15 +438,38 @@ impl<C: ColdStore> TabPool<C> {
         lembar: Vec<LembarLuar>,
         font: std::sync::Arc<super::teks::KumpulanFont>,
     ) -> Result<TabPanas, PoolError> {
+        self.bangun_dengan(id, url, html, lembar, font, true)
+    }
+
+    /// [`Self::bangun`], dengan pilihan menjalankan `<script>` atau tidak.
+    ///
+    /// Tab yang dihidupkan dari penyimpanan dingin dibangun **tanpa**
+    /// menjalankan skrip: snapshot menyimpan HTML **sesudah** skrip berjalan,
+    /// jadi menjalankannya lagi akan menerapkan mutasinya dua kali
+    /// (`appendChild` yang sama jadi dua simpul). Muat ulang dan navigasi tetap
+    /// menjalankan skrip, karena itu memang pemuatan baru.
+    fn bangun_dengan(
+        &self,
+        id: TabId,
+        url: &str,
+        html: &str,
+        lembar: Vec<LembarLuar>,
+        font: std::sync::Arc<super::teks::KumpulanFont>,
+        jalankan_skrip: bool,
+    ) -> Result<TabPanas, PoolError> {
         // Layout sengaja tidak dihitung di sini: lihat catatan di `TabPanas`.
         // Satu pohon, dua pemakai: isolat dan `TabPanas` memegang `Arc` yang
         // sama. `Isolat::new` sengaja tidak dipakai di sini, karena isolat
         // tanpa pohon tidak bisa menjawab `document.getElementById`.
         let dokumen = Arc::new(Mutex::new(Document::parse_html(html)?));
-        let isolat = Isolat::dengan_dokumen_dan_ambil(
+        let halaman = Arc::new(
+            Halaman::baru(url, self.viewport, lembar.clone()).dengan_font(Arc::clone(&font)),
+        );
+        let isolat = Isolat::dengan_dokumen_ambil_dan_halaman(
             self.pagu_isolat,
             Arc::clone(&dokumen),
             Arc::clone(&self.pengambil),
+            Some(halaman),
         )?;
         // Judul dibaca di blok sendiri supaya kuncinya jatuh sebelum
         // `pasang_judul` menjalankan skrip: jembatan mengunci pohon yang sama.
@@ -435,7 +480,20 @@ impl<C: ColdStore> TabPool<C> {
         if let Some(judul) = judul {
             isolat.pasang_judul(&judul)?;
         }
+        // Skrip halaman berjalan sesudah jembatan DOM dan judul terpasang:
+        // skrip yang membaca `document.title` di baris pertama harus melihat
+        // judul dokumen, bukan string kosong. Timer dikuras sekali sesudahnya
+        // supaya `setTimeout(fn, 0)` yang dipasang saat muat ikut jalan.
+        let mut skrip = if jalankan_skrip {
+            isolat.jalankan_skrip_halaman()?
+        } else {
+            LaporanSkrip::default()
+        };
+        if jalankan_skrip && let Err(err) = isolat.kuras_timer() {
+            skrip.galat.push(format!("timer: {err}"));
+        }
         Ok(TabPanas {
+            skrip,
             id,
             url: url.to_string(),
             dokumen,
@@ -505,12 +563,13 @@ impl<C: ColdStore> TabPool<C> {
         // penyimpanan dingin. Tab yang dihidupkan kembali memakai face tertanam
         // sampai navigasi berikutnya mengunduh ulang `@font-face`. Perbedaan ini
         // dinyatakan di `CELAH`, bukan disembunyikan.
-        let panas = self.bangun(
+        let panas = self.bangun_dengan(
             snapshot.id,
             &snapshot.url,
             &snapshot.html,
             snapshot.lembar.clone(),
             std::sync::Arc::new(super::teks::KumpulanFont::baru()),
+            false,
         )?;
         self.dingin
             .hapus(id)
