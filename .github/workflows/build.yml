@@ -33,7 +33,7 @@ env:
   # dengan BMI2/AVX2 dan biner mati "Illegal instruction" di CPU yang tidak
   # punya fitur itu (run 43531270141: 689 instruksi BMI2, laptop Sandy Bridge
   # cuma punya avx/popcnt/sse4_2).
-  RUSTFLAGS: "-C target-cpu=x86-64"
+  RUSTFLAGS: "-C target-cpu=x86-64 -C target-feature=-bmi2,-bmi1"
 
 jobs:
   build:
@@ -85,6 +85,16 @@ jobs:
             | grep -nE "target-cpu|target-feature|^-[CO]$" \
             | head -20 || echo "(tidak ditemukan di log)"
 
+      - name: Probe apakah rustc menghormati baseline
+        run: |
+          set -eu
+          mkdir -p /tmp/probe && cd /tmp/probe
+          printf 'fn main(){ let x: u64 = std::env::args().count() as u64; println!("{}", x >> 3); }\n' > p.rs
+          rustc -C opt-level=2 $RUSTFLAGS p.rs -o p
+          N=$(objdump -d p | grep -cE '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx)\b' || true)
+          echo "probe BMI2 pada biner hello-world: ${N}"
+          echo "probe RUSTFLAGS: ${RUSTFLAGS}"
+
       - name: Gate portabilitas ISA
         run: |
           set -eu
@@ -107,6 +117,15 @@ jobs:
           echo "instruksi BMI2 (di atas baseline x86-64): ${HITS}"
           if [ "${HITS}" -ne 0 ]; then
             echo "artefak tidak portabel: ${HITS} instruksi BMI2" >&2
+            echo "--- asal tiga instruksi pertama (crate mana) ---" >&2
+            objdump -d "$BIN" \
+              | grep -E '\b(sarx|shlx|shrx|bzhi|pdep|pext|mulx|rorx)\b' \
+              | head -3 \
+              | while read -r baris; do
+                  alamat=$(echo "$baris" | awk -F: '{print $1}' | tr -d ' ')
+                  echo "$baris" >&2
+                  addr2line -f -C -e "$BIN" "0x${alamat}" >&2 || true
+                done
             exit 1
           fi
 
