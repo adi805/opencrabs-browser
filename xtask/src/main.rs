@@ -9,6 +9,8 @@ mod bench;
 mod check;
 mod doctor;
 mod e2e;
+mod jaringan;
+mod segar;
 mod sensus;
 
 use std::process::ExitCode;
@@ -22,6 +24,8 @@ perintah:
   check    fmt + clippy -D warnings + test unit + sensus proses
   e2e      jalankan daemon native lalu kontrak CDP ujung ke ujung
   bench    jalankan harness bench/ (argumen diteruskan ke node)
+  segar    apakah biner rilis dibangun dari pohon yang sekarang (AC-009)
+  jaringan daftar pemanggil pembuka koneksi dan gerbangnya (AC-017)
 "
     );
 }
@@ -36,6 +40,8 @@ fn main() -> ExitCode {
         "check" => check::run(),
         "e2e" => e2e::run(&rest),
         "bench" => bench::run(&rest),
+        "segar" => segar::run(&rest),
+        "jaringan" => jaringan::run(&rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
