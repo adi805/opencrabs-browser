@@ -256,6 +256,13 @@ max_tabs = 8
 
 [policy]
 default = \"native\"
+
+# Halaman uji dilayani dari loopback, dan gerbang jaringan menolak alamat
+# internal kecuali ditulis sendiri di sini. Tanpa bagian ini navigasi pertama
+# sudah gagal dengan \"menunjuk ke jaringan internal\", jadi kontrak CDP tidak
+# pernah sampai diuji.
+[fetch]
+izin_host = [\"127.0.0.1\"]
 ",
         port + 1,
         db.display(),
