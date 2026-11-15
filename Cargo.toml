@@ -52,7 +52,12 @@ image-webp = "0.2"
 # Tanpa fitur itu isolat tidak bisa hidup di dalam state axum/daemon yang
 # multi-thread, dan `Engine: Send + Sync` tidak bisa dipenuhi. Fitur ini cuma
 # menambah `std` + `tokio/rt-multi-thread`, bukan dependensi baru.
-rquickjs = { version = "0.14", features = ["parallel"] }
+#
+# `loader` membuka `Runtime::set_loader` + trait `Resolver`/`Loader`, yang
+# dibutuhkan `import` di dalam `<script type="module">`. Tanpanya QuickJS
+# menolak modul apa pun yang punya impor. Fitur ini hanya menambah
+# `relative-path`, tanpa dependensi baru yang berat.
+rquickjs = { version = "0.14", features = ["parallel", "loader"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

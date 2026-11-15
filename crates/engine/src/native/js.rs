@@ -12,11 +12,13 @@
 //! Pemanggil yang butuh lintas thread membungkusnya sendiri dengan
 //! `spawn_blocking`.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use rquickjs::{Context, Function, Runtime};
+use rquickjs::loader::{ImportAttributes, Loader, Resolver};
+use rquickjs::module::Declared;
+use rquickjs::{Context, Function, Module, Runtime};
 
 use super::NativeError;
 use super::ambil::{JawabanAmbil, Pengambil, PengambilTolak, PermintaanAmbil};
@@ -176,6 +178,13 @@ enum KelasSkrip {
 struct SkripHalaman {
     sumber: SumberSkrip,
     kelas: KelasSkrip,
+    /// `true` kalau `type="module"`.
+    ///
+    /// Modul tidak dievaluasi lewat `eval` biasa: ia punya scope sendiri, tidak
+    /// menempel ke objek global, dan dijalankan sebagai modul QuickJS. Karena
+    /// itu ia butuh kelas fase **dan** jalur evaluasi yang berbeda, dan dua
+    /// hal itu disimpan terpisah supaya satu tidak menebak yang lain.
+    modul: bool,
 }
 
 /// Hasil satu putaran eksekusi skrip halaman.
@@ -232,9 +241,28 @@ fn kumpulkan_skrip(dok: &Document, laporan: &mut LaporanSkrip) -> Vec<SkripHalam
         if node.tag() == Some("script") {
             let tipe = node.attr("type").unwrap_or("").trim().to_ascii_lowercase();
             if tipe == "module" {
-                laporan
-                    .dilewati
-                    .push("<script type=\"module\"> dilewati: pemuat impor belum ada".to_owned());
+                // Modul **selalu** ditunda, sesuai spesifikasi HTML: `defer`
+                // tidak berpengaruh padanya, dan `async` saja yang
+                // memindahkannya ke "segera setelah siap". Memakai mesin
+                // `Defer`/`Async` yang sudah ada berarti modul tidak butuh
+                // fase ketiga, hanya jalur evaluasi yang berbeda.
+                let kelas = if node.attr("async").is_some() {
+                    KelasSkrip::Async
+                } else {
+                    KelasSkrip::Defer
+                };
+                match node.attr("src").map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(src) => hasil.push(SkripHalaman {
+                        sumber: SumberSkrip::Luar(src.to_owned()),
+                        kelas,
+                        modul: true,
+                    }),
+                    None => hasil.push(SkripHalaman {
+                        sumber: SumberSkrip::Sebaris(dok.teks(kini)),
+                        kelas,
+                        modul: true,
+                    }),
+                }
             } else if tipe.is_empty()
                 || tipe == "text/javascript"
                 || tipe == "application/javascript"
@@ -256,11 +284,13 @@ fn kumpulkan_skrip(dok: &Document, laporan: &mut LaporanSkrip) -> Vec<SkripHalam
                         hasil.push(SkripHalaman {
                             sumber: SumberSkrip::Luar(src.to_owned()),
                             kelas,
+                            modul: false,
                         });
                     }
                     None => hasil.push(SkripHalaman {
                         sumber: SumberSkrip::Sebaris(dok.teks(kini)),
                         kelas: KelasSkrip::Blocking,
+                        modul: false,
                     }),
                 }
             } else {
@@ -1953,6 +1983,88 @@ pub enum NilaiJs {
     BigInt(String),
 }
 
+/// Penyelesai penentu modul (`import ... from "..."`).
+///
+/// Mesin ini **tidak** punya `node_modules` maupun import map, jadi penentu
+/// tanpa skema (`react`, `lodash`) tidak punya arti yang bisa dipertanggung-
+/// jawabkan. Menyelesaikannya sebagai URL relatif akan menebak: `Url::join`
+/// memetakan `react` ke `https://host/path/react`, dan galat yang muncul
+/// nanti akan menyebut 404 di URL yang tidak pernah dimaksud penulis halaman.
+/// Karena itu penentu seperti itu ditolak dengan alasannya sendiri.
+struct ResolusiModul;
+
+/// Apakah penentu modul sudah berbentuk URL yang bisa diselesaikan sendiri.
+fn penentu_beralamat(nama: &str) -> bool {
+    nama.starts_with('/')
+        || nama.starts_with("./")
+        || nama.starts_with("../")
+        || nama.contains("://")
+        || nama.starts_with("data:")
+        || nama.starts_with("blob:")
+}
+
+impl Resolver for ResolusiModul {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &rquickjs::Ctx<'js>,
+        base: &str,
+        nama: &str,
+        _atribut: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        if !penentu_beralamat(nama) {
+            return Err(rquickjs::Error::new_loading_message(
+                nama,
+                format!(
+                    "penentu modul {nama:?} tidak bisa diselesaikan: mesin ini tidak punya \
+                     node_modules atau import map, jadi pakai URL relatif (./x.js) atau absolut"
+                ),
+            ));
+        }
+        super::bingkai::selesaikan(nama, Some(base)).ok_or_else(|| {
+            rquickjs::Error::new_loading_message(
+                nama,
+                format!("URL modul {nama:?} tidak bisa diselesaikan terhadap {base}"),
+            )
+        })
+    }
+}
+
+/// Pemuat isi modul lewat jalur jaringan yang sama dengan `fetch()`.
+///
+/// Kebijakan host **tidak** diduplikasi di sini: `pengambil` sudah memegang
+/// daftar izin, dan modul yang diimpor tunduk pada aturan yang sama dengan
+/// `fetch` dari skrip. Dua tempat memutuskan izin berarti dua kebenaran yang
+/// bisa menyimpang, dan yang lebih longgar akan menang tanpa ketahuan.
+struct PemuatModul {
+    pengambil: Arc<dyn Pengambil>,
+}
+
+impl Loader for PemuatModul {
+    fn load<'js>(
+        &mut self,
+        ctx: &rquickjs::Ctx<'js>,
+        nama: &str,
+        _atribut: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<Module<'js, Declared>> {
+        let permintaan = PermintaanAmbil {
+            metode: "GET".to_owned(),
+            url: nama.to_owned(),
+            badan: None,
+        };
+        let jawaban = self
+            .pengambil
+            .ambil(&permintaan)
+            .map_err(|pesan| rquickjs::Error::new_loading_message(nama, pesan))?;
+        if !(200..300).contains(&jawaban.status) {
+            return Err(rquickjs::Error::new_loading_message(
+                nama,
+                format!("HTTP {} dari jalur jaringan", jawaban.status),
+            ));
+        }
+        Module::declare(ctx.clone(), nama, jawaban.badan.into_bytes())
+    }
+}
+
 pub struct Isolat {
     // Urutan deklarasi penting: konteks harus dijatuhkan sebelum runtime.
     // Runtime disimpan hanya untuk menjaga umurnya, karena `Context` bergantung
@@ -2007,6 +2119,14 @@ pub struct Isolat {
     /// dipanggil, persis kegagalan yang membuat halaman tampil kosong tanpa
     /// satu pun galat.
     skrip_defer: Mutex<Vec<SkripHalaman>>,
+    /// Nomor urut modul yang sudah dievaluasi di isolat ini.
+    ///
+    /// QuickJS menyimpan modul per **nama** di dalam satu konteks, dan
+    /// mengevaluasi nama yang sama dua kali mengembalikan modul yang sudah
+    /// jalan alih-alih menjalankannya lagi. Nama unik per evaluasi membuat
+    /// dua `<script type="module">` yang isinya sama-sama dieksekusi, seperti
+    /// di browser.
+    modul_ke: AtomicUsize,
 }
 
 impl Isolat {
@@ -2031,6 +2151,16 @@ impl Isolat {
         let runtime = Runtime::new().map_err(NativeError::runtime)?;
         runtime.set_memory_limit(pagu.memori_bytes);
         runtime.set_max_stack_size(pagu.stack_bytes);
+        // Dipasang sebelum konteks dibuat: loader adalah milik runtime, dan
+        // QuickJS memakainya saat modul pertama dievaluasi. Tanpa ini, modul
+        // yang punya `import` gagal dengan "could not load module", tanpa
+        // menyebut bahwa pemuatnya memang tidak pernah dipasang.
+        runtime.set_loader(
+            ResolusiModul,
+            PemuatModul {
+                pengambil: Arc::clone(&pengambil),
+            },
+        );
         let context = Context::full(&runtime).map_err(NativeError::runtime)?;
 
         let tenggat = Arc::new(AtomicU64::new(0));
@@ -2061,6 +2191,7 @@ impl Isolat {
             halaman: None,
             pengambil: None,
             skrip_defer: Mutex::new(Vec::new()),
+            modul_ke: AtomicUsize::new(0),
         };
         isolat.eval(PEMBUKA)?;
         isolat.pasang_ambil(Arc::clone(&pengambil))?;
@@ -2192,8 +2323,8 @@ impl Isolat {
         dasar: Option<&str>,
         laporan: &mut LaporanSkrip,
     ) {
-        let sumber = match &skrip.sumber {
-            SumberSkrip::Sebaris(teks) => teks.clone(),
+        let (sumber, asal) = match &skrip.sumber {
+            SumberSkrip::Sebaris(teks) => (teks.clone(), None),
             SumberSkrip::Luar(src) => {
                 let Some(pengambil) = self.pengambil.as_ref() else {
                     laporan
@@ -2213,7 +2344,9 @@ impl Isolat {
                     badan: None,
                 };
                 match pengambil.ambil(&permintaan) {
-                    Ok(jawaban) if (200..300).contains(&jawaban.status) => jawaban.badan,
+                    Ok(jawaban) if (200..300).contains(&jawaban.status) => {
+                        (jawaban.badan, Some(url))
+                    }
                     Ok(jawaban) => {
                         laporan.dilewati.push(format!(
                             "{url}: HTTP {} dari jalur jaringan",
@@ -2231,7 +2364,31 @@ impl Isolat {
         if sumber.trim().is_empty() {
             return;
         }
-        match self.eval(&sumber) {
+        let hasil = if skrip.modul {
+            // Modul yang punya `src` memakai URL-nya sendiri sebagai nama.
+            // Impor relatif di dalamnya (`./x.js`) harus diselesaikan
+            // terhadap URL modul itu, bukan terhadap URL halaman, dan QuickJS
+            // memakai nama ini sebagai `base` resolver. Efek sampingnya juga
+            // benar: dua tag `src` ke URL yang sama adalah modul yang sama dan
+            // hanya berjalan sekali, seperti di browser.
+            //
+            // Modul sebaris tidak punya URL, jadi ia diberi nama unik per
+            // evaluasi: nama yang sama dua kali membuat modul kedua dianggap
+            // sudah dievaluasi lalu dilewati.
+            let nama = match asal {
+                Some(url) => url,
+                None => {
+                    let nomor = self.modul_ke.fetch_add(1, Ordering::Relaxed);
+                    format!("{}{nomor}.mjs", dasar.unwrap_or("halaman#"))
+                }
+            };
+            self.eval_modul(&nama, &sumber)
+        } else {
+            // Nilai balik skrip klasik tidak dipakai di sini; yang penting ia
+            // berjalan tanpa galat.
+            self.eval(&sumber).map(|_| ())
+        };
+        match hasil {
             Ok(_) => laporan.dijalankan += 1,
             Err(NativeError::BatasWaktu(pesan)) => {
                 // Skrip yang melewati pagu waktu tetap dihitung sudah
@@ -2489,6 +2646,46 @@ impl Isolat {
             // pernah menyelesaikan `await`-nya.
             pompa_mikrotugas(&ctx);
             Ok::<_, NativeError>(nilai.0)
+        });
+        self.lepas_tenggat();
+        hasil
+    }
+
+    /// Menjalankan sumber sebagai **modul** ES, bukan program global.
+    ///
+    /// Bedanya bukan gaya penulisan: modul punya scope sendiri, jadi `var` dan
+    /// `function` di dalamnya tidak menempel ke `globalThis`, dan `import`
+    /// hanya sah di jalur ini. Karena itu `ctx.eval()` tidak bisa dipakai:
+    /// ia selalu menjalankan program global.
+    ///
+    /// QuickJS mengevaluasi modul secara asinkron: `Module::evaluate`
+    /// mengembalikan Promise yang baru settle setelah job queue dikuras. Tanpa
+    /// kurasan itu, galat runtime di dalam modul tidak pernah terlihat dan
+    /// modul yang gagal tampak seperti modul yang berhasil tanpa efek.
+    fn eval_modul(&self, nama: &str, sumber: &str) -> Result<(), NativeError> {
+        self.pasang_tenggat();
+        let hasil = self.context.with(|ctx| {
+            let promise = match Module::evaluate(ctx.clone(), nama, sumber.as_bytes().to_vec()) {
+                Ok(promise) => promise,
+                // Galat sintaks muncul di sini, sebelum modul sempat berjalan.
+                Err(err) => return Err(self.galat_skrip(&ctx, err, Some(nama))),
+            };
+            let mut dijalankan = 0usize;
+            loop {
+                match promise.result::<()>() {
+                    Some(Ok(())) => return Ok(()),
+                    Some(Err(err)) => return Err(self.galat_skrip(&ctx, err, Some(nama))),
+                    None => {}
+                }
+                // Modul yang menunggu `await` abadi berhenti di pagu ini
+                // dengan alasan yang disebut, bukan menggantung selamanya.
+                if dijalankan >= BATAS_MIKROTUGAS || !ctx.execute_pending_job() {
+                    return Err(NativeError::Script(format!(
+                        "{nama}: modul tidak selesai dalam {BATAS_MIKROTUGAS} mikrotugas"
+                    )));
+                }
+                dijalankan += 1;
+            }
         });
         self.lepas_tenggat();
         hasil
@@ -3134,10 +3331,14 @@ mod tests {
         // `application/json` bukan program. Menjalankannya akan melempar galat
         // sintaks yang menyamar sebagai halaman rusak, jadi yang benar adalah
         // melewatinya dan menyebut sebabnya.
+        //
+        // `type="module"` dulu ada di daftar ini karena mesin belum mendukung
+        // modul. Sejak modul didukung ia DIEKSEKUSI, bukan dilewati, jadi
+        // contohnya diganti tipe non-JS lain yang memang harus dilewati.
         let (isolat, _dok) = isolat_halaman(
             "<html><body>\
              <script type=\"application/json\">{\"a\":1}</script>\
-             <script type=\"module\">export const a = 1;</script>\
+             <script type=\"text/template\"><p>{{a}}</p></script>\
              </body></html>",
             "https://contoh.test/",
             None,
@@ -3155,7 +3356,7 @@ mod tests {
             laporan.dilewati
         );
         assert!(
-            laporan.dilewati.iter().any(|a| a.contains("module")),
+            laporan.dilewati.iter().any(|a| a.contains("text/template")),
             "{:?}",
             laporan.dilewati
         );
@@ -4272,6 +4473,231 @@ mod tests {
             isolat.eval("document.readyState").unwrap(),
             "complete",
             "satu skrip defer yang galat tidak boleh menggantung readyState"
+        );
+    }
+
+    // ── FR-013 lanjutan: `type="module"` ──────────────────────────────────
+    // Modul bukan "eval dengan kata kunci baru". Ia punya scope sendiri, jadi
+    // `var` di dalamnya tidak menempel ke `globalThis`, dan ia selalu ditunda
+    // kecuali diberi `async`. Dua sifat itu yang diuji di sini, karena
+    // keduanya yang membedakannya dari skrip klasik.
+
+    #[test]
+    fn modul_sebaris_ditunda_dan_tidak_bocor_ke_global() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head><script type=\"module\">\
+               var dalamModul = 'rahasia'; \
+               globalThis.terlihat = 'ya'; \
+             </script></head><body></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert!(laporan.galat.is_empty(), "galat: {:?}", laporan.galat);
+        assert_eq!(
+            isolat.eval("typeof globalThis.terlihat").unwrap(),
+            "undefined",
+            "modul tidak boleh berjalan sebelum fase defer"
+        );
+
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert_eq!(pemuatan.defer.dijalankan, 1, "satu modul harus berjalan");
+        assert!(
+            pemuatan.defer.galat.is_empty(),
+            "galat modul: {:?}",
+            pemuatan.defer.galat
+        );
+        assert_eq!(
+            isolat.eval("globalThis.terlihat").unwrap(),
+            "ya",
+            "efek samping modul harus terlihat"
+        );
+        assert_eq!(
+            isolat.eval("typeof dalamModul").unwrap(),
+            "undefined",
+            "`var` di dalam modul tidak boleh menempel ke global"
+        );
+    }
+
+    #[test]
+    fn dua_modul_dengan_isi_sama_dua_duanya_dijalankan() {
+        // QuickJS menyimpan modul per nama. Kalau nama modul tidak unik,
+        // modul kedua akan dianggap "sudah dievaluasi" lalu dilewati, dan
+        // halaman kehilangan satu dari dua efek samping tanpa galat.
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head>\
+             <script type=\"module\">globalThis.hitung = (globalThis.hitung || 0) + 1;</script>\
+             <script type=\"module\">globalThis.hitung = (globalThis.hitung || 0) + 1;</script>\
+             </head><body></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        isolat.jalankan_skrip_halaman().unwrap();
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert_eq!(pemuatan.defer.dijalankan, 2, "dua modul harus berjalan");
+        assert_eq!(
+            isolat.eval("globalThis.hitung").unwrap(),
+            "2",
+            "masing-masing modul harus menyumbang satu efek samping"
+        );
+    }
+
+    #[test]
+    fn modul_yang_galat_dilaporkan_bukan_ditelan() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head><script type=\"module\">throw new Error('modul meledak');</script>\
+             </head><body></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        isolat.jalankan_skrip_halaman().unwrap();
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert!(pemuatan.selesai, "load tetap harus terkirim");
+        assert_eq!(pemuatan.defer.dijalankan, 1);
+        assert_eq!(
+            pemuatan.defer.galat.len(),
+            1,
+            "galat modul harus dilaporkan: {:?}",
+            pemuatan.defer.galat
+        );
+        assert!(
+            pemuatan.defer.galat[0].contains("modul meledak"),
+            "galat harus menyebut sebabnya: {:?}",
+            pemuatan.defer.galat
+        );
+        assert_eq!(
+            isolat.eval("document.readyState").unwrap(),
+            "complete",
+            "modul yang galat tidak boleh menggantung readyState"
+        );
+    }
+
+    #[test]
+    fn modul_async_berjalan_sebelum_dcl() {
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head><script type=\"module\" async>\
+               globalThis.kapan = document.readyState; \
+             </script></head><body></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert!(laporan.galat.is_empty(), "galat: {:?}", laporan.galat);
+        assert_eq!(
+            isolat.eval("globalThis.kapan").unwrap(),
+            "loading",
+            "modul `async` berjalan begitu tersedia, bukan ditahan sampai DCL"
+        );
+    }
+
+    // ── Impor modul ───────────────────────────────────────────────────────
+    // Resolusi relatif harus memakai URL **modul itu**, bukan URL halaman.
+    // Kalau salah, impor `./lib/x.js` dari `/js/app.js` akan meminta
+    // `/lib/x.js` dan gagal 404 di URL yang tidak pernah ditulis siapa pun.
+
+    #[test]
+    fn modul_mengimpor_modul_relatif_terhadap_url_dirinya() {
+        let peta = PetaSkrip(
+            [
+                (
+                    "https://contoh.test/js/lib/nilai.mjs".to_owned(),
+                    "export const nilai = 42;".to_owned(),
+                ),
+                (
+                    "https://contoh.test/js/app.mjs".to_owned(),
+                    "import { nilai } from './lib/nilai.mjs'; globalThis.hasil = nilai;".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head><script type=\"module\" src=\"/js/app.mjs\"></script>\
+             </head><body></body></html>",
+            "https://contoh.test/halaman/",
+            Some(Arc::new(peta)),
+        );
+        isolat.jalankan_skrip_halaman().unwrap();
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert!(
+            pemuatan.defer.galat.is_empty(),
+            "impor harus berhasil, galat: {:?}",
+            pemuatan.defer.galat
+        );
+        assert_eq!(
+            isolat.eval("globalThis.hasil").unwrap(),
+            "42",
+            "nilai dari modul yang diimpor harus sampai ke modul pengimpor"
+        );
+    }
+
+    #[test]
+    fn penentu_modul_tanpa_skema_ditolak_dengan_alasan() {
+        // `react` bukan URL. Menyelesaikannya sebagai relatif akan menebak
+        // lalu gagal 404 di alamat yang tidak dimaksud penulis halaman.
+        let peta = PetaSkrip(
+            [(
+                "https://contoh.test/app.mjs".to_owned(),
+                "import x from 'react'; globalThis.x = x;".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head><script type=\"module\" src=\"/app.mjs\"></script>\
+             </head><body></body></html>",
+            "https://contoh.test/",
+            Some(Arc::new(peta)),
+        );
+        isolat.jalankan_skrip_halaman().unwrap();
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert_eq!(
+            pemuatan.defer.galat.len(),
+            1,
+            "impor yang tidak bisa diselesaikan harus dilaporkan: {:?}",
+            pemuatan.defer.galat
+        );
+        let pesan = &pemuatan.defer.galat[0];
+        assert!(
+            pesan.contains("node_modules"),
+            "alasan harus menyebut kenapa, bukan sekadar gagal: {pesan}"
+        );
+    }
+
+    #[test]
+    fn modul_yang_diimpor_gagal_dilaporkan_sebagai_galat_modul() {
+        let peta = PetaSkrip(
+            [
+                (
+                    "https://contoh.test/rusak.mjs".to_owned(),
+                    "export const x = ;".to_owned(),
+                ),
+                (
+                    "https://contoh.test/app.mjs".to_owned(),
+                    "import { x } from './rusak.mjs'; globalThis.x = x;".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let (isolat, _dok) = isolat_halaman(
+            "<html><head><script type=\"module\" src=\"/app.mjs\"></script>\
+             </head><body></body></html>",
+            "https://contoh.test/",
+            Some(Arc::new(peta)),
+        );
+        isolat.jalankan_skrip_halaman().unwrap();
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert_eq!(
+            pemuatan.defer.galat.len(),
+            1,
+            "modul yang sintaksnya rusak harus dilaporkan: {:?}",
+            pemuatan.defer.galat
+        );
+        assert_eq!(
+            isolat.eval("typeof globalThis.x").unwrap(),
+            "undefined",
+            "modul yang gagal tidak boleh setengah menempel ke global"
         );
     }
 }

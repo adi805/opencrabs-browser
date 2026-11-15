@@ -170,11 +170,18 @@ pub const CELAH: &[&str] = &[
      `Isolat::selesaikan_pemuatan` menjalankannya **di antara** \
      `DOMContentLoaded` dan `load` (urutan diuji \
      `defer_berjalan_sesudah_dcl_sebelum_load`). `async` menang atas `defer` \
-     kalau kedua atribut ada. Yang belum: urutan `async` deterministik karena \
-     sumbernya diambil sinkron, bukan mengikuti waktu jaringan seperti \
-     browser; `document.write` tidak ada; dan `type=\"module\"` dilewati \
-     karena pemuat impor belum ada, begitu pula tipe bukan JavaScript \
-     (`application/json`, `text/template`); keduanya dilaporkan di kolom \
+     kalau kedua atribut ada. `type=\"module\"` didukung: modul punya scope \
+     sendiri (jadi `var` di dalamnya tidak menempel ke `globalThis`), selalu \
+     ditunda kecuali diberi `async`, dan `import` diselesaikan terhadap URL \
+     modul itu sendiri lalu diambil lewat `Pengambil` yang sama dengan \
+     `fetch()`. Yang belum: penentu tanpa skema (`react`, `lodash`) ditolak \
+     dengan alasan karena mesin ini tidak punya `node_modules` atau import \
+     map, bukan diselesaikan diam-diam sebagai URL relatif; import map, \
+     `import()` dinamis, dan `import.meta` belum ada. Urutan `async` juga \
+     belum deterministik karena sumbernya diambil sinkron, bukan mengikuti \
+     waktu jaringan seperti browser, dan `document.write` tidak ada. Tipe \
+     bukan JavaScript (`application/json`, `text/template`) tetap dilewati \
+     dan dilaporkan di kolom \
      `skrip.dilewati` pada tanda terima, bukan didiamkan. Mesin ini \
      sendiri tidak punya event loop: antrean timer hanya berjalan saat \
      `Isolat::kuras_timer` dipanggil. Yang memasang pemompa adalah daemon \
