@@ -337,12 +337,21 @@ impl Slot {
             isi.terakhir = sekarang.saturating_add(lama_boot);
             isi.tidur = false;
         }
-        tracing::info!(
-            mesin = %self.id,
-            port = engine.info().devtools_port,
-            pid = ?engine.process_id(),
-            "mesin dinyalakan ulang"
-        );
+        // FR-012: pid yang tidak ada tidak ditulis sebagai `None`, karena
+        // pembaca log tidak bisa membedakannya dari pid yang gagal dibaca.
+        match engine.process_id() {
+            Some(pid) => tracing::info!(
+                mesin = %self.id,
+                port = engine.info().devtools_port,
+                pid,
+                "mesin dinyalakan ulang"
+            ),
+            None => tracing::info!(
+                mesin = %self.id,
+                port = engine.info().devtools_port,
+                "mesin dinyalakan ulang"
+            ),
+        }
         Ok(engine)
     }
 

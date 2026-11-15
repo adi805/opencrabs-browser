@@ -235,24 +235,51 @@ pub async fn run(args: ServeArgs, file: FileConfig, config_path: PathBuf) -> Res
 
     for (id, slot) in pool.slots() {
         let hidup = slot.hidup();
+        // FR-012: klaim pengukuran yang tidak terukur tidak ditulis sama sekali.
+        // `pss_mb=?` adalah klaim kosong yang terbaca seperti angka yang hilang;
+        // pembaca log tidak bisa membedakannya dari pengukuran yang gagal.
         let pss_mb = hidup
             .as_ref()
             .and_then(|engine| engine.process_id())
             .and_then(metrics::read_pss_bytes)
-            .map_or_else(
-                || "?".to_string(),
-                |bytes| format!("{:.1}", bytes as f64 / 1_048_576.0),
-            );
-        tracing::info!(
-            mesin = %id,
-            kind = slot.kind(),
-            pid = ?hidup.as_ref().and_then(|engine| engine.process_id()),
-            http = %hidup
-                .as_ref()
-                .map_or_else(|| "(tidak hidup)".to_owned(), |engine| engine.http_base()),
-            pss_mb = %pss_mb,
-            "mesin siap"
-        );
+            .map(|bytes| format!("{:.1}", bytes as f64 / 1_048_576.0));
+        let pid = hidup.as_ref().and_then(|engine| engine.process_id());
+        let http = hidup
+            .as_ref()
+            .map_or_else(|| "(tidak hidup)".to_owned(), |engine| engine.http_base());
+        // `pid=None` juga bukan nilai: mesin native hidup di dalam proses
+        // daemon, jadi tidak ada pid yang bisa dilaporkan. Medannya hilang,
+        // bukan diisi `None`.
+        match (pid, pss_mb) {
+            (Some(pid), Some(pss_mb)) => tracing::info!(
+                mesin = %id,
+                kind = slot.kind(),
+                pid,
+                http = %http,
+                pss_mb = %pss_mb,
+                "mesin siap"
+            ),
+            (Some(pid), None) => tracing::info!(
+                mesin = %id,
+                kind = slot.kind(),
+                pid,
+                http = %http,
+                "mesin siap"
+            ),
+            (None, Some(pss_mb)) => tracing::info!(
+                mesin = %id,
+                kind = slot.kind(),
+                http = %http,
+                pss_mb = %pss_mb,
+                "mesin siap"
+            ),
+            (None, None) => tracing::info!(
+                mesin = %id,
+                kind = slot.kind(),
+                http = %http,
+                "mesin siap"
+            ),
+        }
     }
 
     for mesin in &resolved.machines {
@@ -442,14 +469,28 @@ async fn nyalakan(
         .with_port(mesin.port)
         .with_args(mesin.args.iter().cloned());
 
-    tracing::info!(
-        mesin = %mesin.id,
-        kind = %mesin.kind,
-        binary = %mesin.binary.display(),
-        user_data_dir = %mesin.user_data_dir.display(),
-        port = mesin.port,
-        "menyalakan mesin"
-    );
+    // FR-012: `binary=` kosong adalah nilai kosong yang terbaca seperti kolom
+    // yang gagal diisi. Mesin native berjalan di dalam proses daemon, jadi ia
+    // memang tidak punya biner sendiri: medan itu tidak ditulis sama sekali,
+    // bukan ditulis kosong.
+    if mesin.binary.as_os_str().is_empty() {
+        tracing::info!(
+            mesin = %mesin.id,
+            kind = %mesin.kind,
+            user_data_dir = %mesin.user_data_dir.display(),
+            port = mesin.port,
+            "menyalakan mesin"
+        );
+    } else {
+        tracing::info!(
+            mesin = %mesin.id,
+            kind = %mesin.kind,
+            binary = %mesin.binary.display(),
+            user_data_dir = %mesin.user_data_dir.display(),
+            port = mesin.port,
+            "menyalakan mesin"
+        );
+    }
 
     // Penggerak dipilih dari jenis mesin, bukan dari satu biner tetap: itulah
     // yang membuat `[engines.oxi]` bisa hidup berdampingan dengan shell dalam
