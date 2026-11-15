@@ -1072,15 +1072,36 @@ impl Dalam {
         // Face webfont ikut, bukan hanya lembar gaya: `font-family` yang
         // menamai `@font-face` hanya berpengaruh kalau pelukis memegang byte
         // yang sama dengan yang dipakai pengukur.
-        let raster = paint::lukis_dengan_font(
-            &t.dokumen(),
-            viewport,
-            klip,
-            format,
-            &t.lembar,
-            &std::collections::HashMap::new(),
-            t.font(),
-        )
+        //
+        // Layout diambil dari cache halaman kalau ada. Cache-nya dikunci versi
+        // pohon yang sama dengan yang dipakai `getBoundingClientRect`, jadi
+        // tangkapan berulang pada pohon yang tidak berubah tidak menata ulang
+        // dokumen, sementara pohon yang berubah tetap menghasilkan kotak baru.
+        let dok = t.dokumen();
+        let laporan = t
+            .isolat
+            .halaman()
+            .and_then(|halaman| halaman.layout_untuk(&dok, viewport));
+        let raster = match laporan {
+            Some(laporan) => paint::lukis_dari_laporan(
+                &dok,
+                &laporan,
+                viewport,
+                klip,
+                format,
+                &std::collections::HashMap::new(),
+                t.font(),
+            ),
+            None => paint::lukis_dengan_font(
+                &dok,
+                viewport,
+                klip,
+                format,
+                &t.lembar,
+                &std::collections::HashMap::new(),
+                t.font(),
+            ),
+        }
         .map_err(|err| Galat::baru(-32000, format!("tangkapan layar gagal: {err}")))?;
         diabaikan_param.extend(raster.diabaikan.iter().cloned());
         Ok(json!({
