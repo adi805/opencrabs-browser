@@ -45,7 +45,13 @@ pub struct Halaman {
     /// sesudah `appendChild` akan menjawab kotak versi lama, dan nilai basi
     /// yang diam itu kelas kesalahan yang paling sulit ditemukan.
     versi: AtomicU64,
-    layout: Mutex<Option<(u64, Arc<LaporanLayout>)>>,
+    /// Cache layout, dikunci `(versi pohon, lebar, tinggi)`.
+    ///
+    /// Viewport ikut jadi kunci karena laporan yang sama tidak sah untuk
+    /// ukuran jendela lain: `width: 100%` dan `@media` menghasilkan kotak
+    /// berbeda, dan memakai ulang laporan lebar lama adalah cara paling halus
+    /// membuat tangkapan layar salah tanpa satu pun galat.
+    layout: Mutex<Option<((u64, u32, u32), Arc<LaporanLayout>)>>,
     /// Face `@font-face` milik dokumen, kalau ada.
     ///
     /// Ikut ke perhitungan layout malas karena kotak teks yang diukur dengan
@@ -95,23 +101,35 @@ impl Halaman {
         self.versi.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Layout untuk versi pohon saat ini, dihitung sekali per versi.
+    /// Layout untuk versi pohon saat ini pada viewport `self.viewport`.
     fn layout(&self, dok: &Document) -> Option<Arc<LaporanLayout>> {
-        let versi = self.versi.load(Ordering::Relaxed);
+        self.layout_untuk(dok, self.viewport)
+    }
+
+    /// Layout untuk versi pohon saat ini pada viewport mana pun.
+    ///
+    /// Dipublikasikan supaya jalur tangkapan layar memakai laporan yang
+    /// **sama** dengan yang menjawab `getBoundingClientRect`, bukan menata
+    /// ulang: satu halaman 1.206 elemen butuh belasan detik untuk ditata, dan
+    /// tangkapan berulang tanpa cache membayar biaya itu di setiap iterasi.
+    pub fn layout_untuk(&self, dok: &Document, viewport: Viewport) -> Option<Arc<LaporanLayout>> {
+        let kunci = (
+            self.versi.load(Ordering::Relaxed),
+            viewport.width.to_bits(),
+            viewport.height.to_bits(),
+        );
         let mut simpan = self.layout.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((versi_cache, laporan)) = simpan.as_ref()
-            && *versi_cache == versi
+        if let Some((kunci_cache, laporan)) = simpan.as_ref()
+            && *kunci_cache == kunci
         {
             return Some(Arc::clone(laporan));
         }
         let laporan = match &self.font {
-            Some(font) => {
-                layout::hitung_dengan_font(dok, self.viewport, &self.lembar, Arc::clone(font))
-            }
-            None => layout::hitung_dengan(dok, self.viewport, &self.lembar),
+            Some(font) => layout::hitung_dengan_font(dok, viewport, &self.lembar, Arc::clone(font)),
+            None => layout::hitung_dengan(dok, viewport, &self.lembar),
         };
         let laporan = Arc::new(laporan.ok()?);
-        *simpan = Some((versi, Arc::clone(&laporan)));
+        *simpan = Some((kunci, Arc::clone(&laporan)));
         Some(laporan)
     }
 }
@@ -3007,6 +3025,32 @@ mod tests {
                 .eval("String(document.getElementById('a').getBoundingClientRect().width)")
                 .unwrap(),
             "50"
+        );
+    }
+
+    #[test]
+    fn cache_layout_dibuang_saat_pohon_berubah() {
+        // Cache layout dikunci versi pohon, dan versi itu dinaikkan oleh
+        // jembatan saat operasi yang mengubah pohon lewat. Tes ini menuntut
+        // kenaikan itu benar-benar terjadi: tanpa itu, `setAttribute` yang
+        // mengubah lebar akan tetap menjawab angka lama, tanpa satu pun galat.
+        let (isolat, _dok) = isolat_halaman(
+            "<html><body><div id=\"a\" style=\"width:50px;height:20px\">x</div></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let baca = |ekspresi: &str| isolat.eval(ekspresi).unwrap();
+        let lebar = "String(document.getElementById('a').getBoundingClientRect().width)";
+        assert_eq!(baca(lebar), "50", "lebar awal dari layout");
+        // Panggilan kedua membaca cache: hasilnya harus sama, bukan nol.
+        assert_eq!(baca(lebar), "50", "panggilan kedua memakai cache");
+        isolat
+            .eval("document.getElementById('a').setAttribute('style', 'width:120px;height:20px')")
+            .unwrap();
+        assert_eq!(
+            baca(lebar),
+            "120",
+            "layout harus dihitung ulang sesudah atribut berubah"
         );
     }
 

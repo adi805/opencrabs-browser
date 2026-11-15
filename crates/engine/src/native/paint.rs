@@ -21,7 +21,7 @@ use super::NativeError;
 use super::css::LembarLuar;
 use super::dom::{Document, NodeId};
 use super::gaya::GayaTerhitung;
-use super::layout::{self, Kotak, Viewport};
+use super::layout::{self, Kotak, LaporanLayout, Viewport};
 
 /// Format keluaran yang bisa dikodekan raster.
 ///
@@ -244,6 +244,28 @@ fn lukis_penuh(
 ) -> Result<Raster, NativeError> {
     let laporan =
         layout::hitung_dengan_font(doc, viewport, eksternal, std::sync::Arc::clone(&font))?;
+    lukis_dari_laporan(doc, &laporan, viewport, klip, format, gambar, font)
+}
+
+/// Melukis dari laporan layout yang **sudah dihitung** pemanggil.
+///
+/// Dipakai jalur tangkapan layar yang memegang cache layout milik halaman.
+/// Tanpa pintu ini, setiap tangkapan menata ulang seluruh dokumen: biaya
+/// yang sama dibayar berkali-kali untuk pohon yang tidak berubah, dan pada
+/// halaman 1.206 elemen itu belasan detik per gambar.
+///
+/// Laporan yang diserahkan harus berasal dari pohon `doc` yang sama dan
+/// viewport yang sama; keduanya bukan parameter yang diperiksa di sini karena
+/// pemanggil yang memegang cache yang tahu kuncinya.
+pub fn lukis_dari_laporan(
+    doc: &Document,
+    laporan: &LaporanLayout,
+    viewport: Viewport,
+    klip: Option<Klip>,
+    format: Format,
+    gambar: &HashMap<String, Vec<u8>>,
+    font: std::sync::Arc<super::teks::KumpulanFont>,
+) -> Result<Raster, NativeError> {
     let kerapatan = klip.map_or(1.0, |k| k.kerapatan());
     let (lebar, tinggi, geser) = match klip {
         Some(k) => (
