@@ -797,6 +797,23 @@ impl Dalam {
         gaya: LembarJaringan,
     ) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
+        tolak_param_tak_dikenal(
+            params,
+            "Page.navigate",
+            &[
+                "url",
+                "referrer",
+                "transitionType",
+                "transitionQualifiers",
+                "gesture",
+                "frameId",
+            ],
+        )?;
+        // `frameId` bukan hiasan: klien yang mengirimnya meminta **satu bingkai**
+        // dinavigasi. Bingkai utama dilayani; bingkai lain ditolak dengan nama
+        // parameternya, karena membalas sukses untuk dokumen yang tidak
+        // tersentuh lebih buruk daripada galat.
+        tolak_bingkai_lain(params, "Page.navigate", tab)?;
         let url = param_teks(params, "url")?;
         let dok = dokumen_awal(&url, ambilan, gaya)?;
         let sebelum = self.sidik(tab)?;
@@ -895,6 +912,8 @@ impl Dalam {
 
     fn set_konten(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
         let tab = self.tab_dari_sesi(sesi)?;
+        tolak_param_tak_dikenal(params, "Page.setDocumentContent", &["html", "frameId"])?;
+        tolak_bingkai_lain(params, "Page.setDocumentContent", tab)?;
         let html = param_teks(params, "html")?;
         let url = self
             .tabs
@@ -998,6 +1017,18 @@ impl Dalam {
     /// `optimizeForSpeed`, dan `fromSurface`. Yang diminta tapi tidak mengubah
     /// hasil dicatat di `receipt.diabaikan`, bukan didiamkan.
     fn tangkap_layar(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
+        tolak_param_tak_dikenal(
+            params,
+            "Page.captureScreenshot",
+            &[
+                "format",
+                "quality",
+                "clip",
+                "captureBeyondViewport",
+                "optimizeForSpeed",
+                "fromSurface",
+            ],
+        )?;
         let (format, mut diabaikan_param) = format_dari(params)?;
         let klip = klip_dari(params)?;
         let di_luar_viewport = params
@@ -1418,6 +1449,33 @@ impl Dalam {
     }
 
     fn evaluasi(&mut self, params: &Value, sesi: Option<&str>) -> Result<Value, Galat> {
+        tolak_param_tak_dikenal(
+            params,
+            "Runtime.evaluate",
+            &[
+                "expression",
+                "returnByValue",
+                "userGesture",
+                "includeCommandLineAPI",
+                "silent",
+                "contextId",
+                "timeout",
+                "awaitPromise",
+            ],
+        )?;
+        // `awaitPromise` sungguhan tidak bisa dihormati: mesin ini tidak punya
+        // penyimpanan objek, jadi nilai Promise tidak bisa ditunggu di sisi
+        // protokol. Menerimanya lalu membalas objek Promise kosong adalah
+        // jawaban yang terlihat sukses tapi salah, jadi ia ditolak dengan nama
+        // dan jalan keluarnya. `false` adalah nilai bawaan, jadi tidak apa-apa.
+        if params.get("awaitPromise").and_then(Value::as_bool) == Some(true) {
+            return Err(Galat::baru(
+                -32602,
+                "parameter `awaitPromise` belum didukung: mesin ini tidak punya `objectId`, \
+                 jadi Promise tidak bisa ditunggu di sisi protokol; tulis hasilnya ke global di \
+                 dalam skrip lalu baca dengan evaluasi kedua",
+            ));
+        }
         let tab = self.tab_dari_sesi(sesi)?;
         let ekspresi = param_teks(params, "expression")?;
         let sebelum = self.sidik(tab)?;
@@ -1570,6 +1628,62 @@ fn bingkai(id: Value, hasil: Result<Value, Galat>) -> String {
         }
     }
     Value::Object(map).to_string()
+}
+
+/// Menolak parameter yang tidak dikenal untuk sebuah metode.
+///
+/// Chrome menjawab parameter karangan dengan galat `-32602`, bukan
+/// menerimanya diam-diam. Mesin ini dulu mengabaikannya: klien yang salah
+/// mengeja `captureBeyondViewport` mendapat tangkapan yang terlihat benar tapi
+/// bukan yang ia minta, dan tidak ada satu baris pun yang memberi tahu. Di sini
+/// namanya disebut **dan** daftar yang didukung ikut dicetak, supaya salah eja
+/// bisa diperbaiki tanpa membuka dokumentasi.
+///
+/// `params` yang bukan objek (mis. `null` atau tidak dikirim) lolos: tidak ada
+/// kunci untuk diperiksa, dan metode yang butuh parameter akan menolaknya
+/// sendiri lewat `param_teks`.
+/// `frameId` yang menunjuk bingkai selain dokumen utama ditolak dengan nama
+/// parameternya, bukan diabaikan. Mesin ini hanya punya satu bingkai per tab,
+/// jadi klien yang mengirim id bingkai lain sedang meminta pekerjaan yang tidak
+/// akan terjadi; membalas sukses untuk itu sama dengan berbohong.
+fn tolak_bingkai_lain(params: &Value, metode: &str, tab: TabId) -> Result<(), Galat> {
+    let Some(nilai) = params.get("frameId") else {
+        return Ok(());
+    };
+    let utama = frame_id(tab);
+    if nilai.as_str() == Some(utama.as_str()) {
+        return Ok(());
+    }
+    Err(Galat::baru(
+        -32602,
+        format!(
+            "parameter `frameId` = {nilai} tidak menunjuk bingkai mana pun untuk {metode}; \
+             satu-satunya bingkai tab ini adalah `{utama}`"
+        ),
+    ))
+}
+
+fn tolak_param_tak_dikenal(params: &Value, metode: &str, didukung: &[&str]) -> Result<(), Galat> {
+    let Some(obj) = params.as_object() else {
+        return Ok(());
+    };
+    let asing: Vec<String> = obj
+        .keys()
+        .filter(|kunci| !didukung.contains(&kunci.as_str()))
+        .map(|kunci| format!("`{kunci}`"))
+        .collect();
+    if asing.is_empty() {
+        return Ok(());
+    }
+    let sah: Vec<String> = didukung.iter().map(|kunci| format!("`{kunci}`")).collect();
+    Err(Galat::baru(
+        -32602,
+        format!(
+            "parameter {} tidak dikenal untuk {metode}; yang didukung: {}",
+            asing.join(", "),
+            sah.join(", ")
+        ),
+    ))
 }
 
 fn param_teks(params: &Value, nama: &str) -> Result<String, Galat> {
