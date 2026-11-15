@@ -401,7 +401,7 @@ pub fn lukis_dari_laporan(
         };
         let gaya = laporan.terhitung.get(node).cloned().unwrap_or_default();
         let warna = warna_teks(&gaya, &mut diabaikan, *node);
-        let potong = potong_teks(doc, &laporan, *node);
+        let potong = potong_teks(doc, laporan, *node);
         let (baris, glyph) = lukis_teks(
             &mut pixmap,
             &BlokTeks {

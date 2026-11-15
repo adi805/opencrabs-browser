@@ -24,6 +24,19 @@ use super::css::LembarLuar;
 use super::dom::{Document, ModeBayang, NodeId, NodeKind};
 use super::layout::{self, LaporanLayout, Viewport};
 
+/// Kunci cache layout: `(versi pohon, lebar, tinggi)`.
+///
+/// Lebar dan tinggi disimpan sebagai bit `f32` supaya bisa dibandingkan persis
+/// tanpa toleransi: dua viewport yang berbeda satu ULP tetap dua kunci
+/// berbeda, dan cache yang menyamakan keduanya akan menjawab kotak yang salah.
+type KunciLayout = (u64, u32, u32);
+
+/// Layout terakhir beserta kunci yang menghasilkannya.
+///
+/// Alias ini ada supaya bentuk bersarangnya tidak diurai ulang di setiap tanda
+/// tangan yang menyentuh cache.
+type CacheLayout = Option<(KunciLayout, Arc<LaporanLayout>)>;
+
 /// Konteks halaman yang dibaca skrip: URL dan ukuran viewport.
 ///
 /// Dipisah dari [`Isolat`] karena isinya milik **tab**, bukan milik runtime
@@ -51,7 +64,7 @@ pub struct Halaman {
     /// ukuran jendela lain: `width: 100%` dan `@media` menghasilkan kotak
     /// berbeda, dan memakai ulang laporan lebar lama adalah cara paling halus
     /// membuat tangkapan layar salah tanpa satu pun galat.
-    layout: Mutex<Option<((u64, u32, u32), Arc<LaporanLayout>)>>,
+    layout: Mutex<CacheLayout>,
     /// Face `@font-face` milik dokumen, kalau ada.
     ///
     /// Ikut ke perhitungan layout malas karena kotak teks yang diukur dengan
@@ -113,7 +126,7 @@ impl Halaman {
     /// ulang: satu halaman 1.206 elemen butuh belasan detik untuk ditata, dan
     /// tangkapan berulang tanpa cache membayar biaya itu di setiap iterasi.
     pub fn layout_untuk(&self, dok: &Document, viewport: Viewport) -> Option<Arc<LaporanLayout>> {
-        let kunci = (
+        let kunci: KunciLayout = (
             self.versi.load(Ordering::Relaxed),
             viewport.width.to_bits(),
             viewport.height.to_bits(),
