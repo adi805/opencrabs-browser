@@ -493,11 +493,20 @@ impl<C: ColdStore> TabPool<C> {
             skrip.galat.push(format!("timer: {err}"));
         }
         // Pemuatan selesai sesudah skrip halaman berjalan: `readyState`
-        // menjadi `complete` dan `DOMContentLoaded` lalu `load` dikirim.
+        // menjadi `interactive`, `DOMContentLoaded` dikirim, skrip `defer`
+        // dijalankan, `readyState` menjadi `complete`, lalu `load` dikirim.
         // Tab yang dihidupkan tanpa menjalankan skrip tetap diselesaikan,
         // karena snapshot dinginnya memang sudah melewati fase itu.
-        if let Err(err) = isolat.selesaikan_pemuatan() {
-            skrip.galat.push(format!("pemuatan: {err}"));
+        match isolat.selesaikan_pemuatan() {
+            Ok(pemuatan) => {
+                // Skrip `defer` berjalan di antara DCL dan load, jadi hasilnya
+                // digabung ke laporan yang sama: pemanggil tidak perlu tahu
+                // kapan sebuah skrip berjalan untuk tahu ada yang gagal.
+                skrip.dijalankan += pemuatan.defer.dijalankan;
+                skrip.galat.extend(pemuatan.defer.galat);
+                skrip.dilewati.extend(pemuatan.defer.dilewati);
+            }
+            Err(err) => skrip.galat.push(format!("pemuatan: {err}")),
         }
         Ok(TabPanas {
             skrip,

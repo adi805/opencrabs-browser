@@ -164,18 +164,18 @@ pub const CELAH: &[&str] = &[
      `contentDocument`/`contentWindow` tidak ada di isolat, jadi skrip halaman \
      tidak bisa menyentuh dokumen anak",
     "eksekusi `<script>` berjalan saat dokumen dipasang (navigasi dan \
-     `Page.setDocumentContent`), tapi semantiknya belum seperti browser: \
-     tidak ada `defer`/`async` dan `document.write` tidak ada, walaupun \
-     `window.addEventListener`/`removeEventListener` dan `document.readyState` \
-     sudah tersedia. Fase pemuatan \
-     **ada tapi tidak dipisah seperti browser**: sesudah semua skrip sebaris \
-     selesai, `Isolat::selesaikan_pemuatan` memindahkan `readyState` ke \
-     `complete` lalu mengirim `DOMContentLoaded` dan `load` berurutan; urutannya \
-     diuji `dom_content_loaded_dan_load_dipanggil_berurutan`, tetapi tidak ada \
-     `interactive` di antara parse dan eksekusi. `type=\"module\"` dilewati \
-     karena pemuat impor belum ada, dan tipe bukan JavaScript \
-     (`application/json`, `text/template`) juga dilewati; keduanya dilaporkan \
-     di kolom `skrip.dilewati` pada tanda terima, bukan didiamkan. Mesin ini \
+     `Page.setDocumentContent`). Tiga kelas skrip dipisah seperti browser: \
+     skrip klasik berjalan berurutan saat dokumen dipasang, `async` berjalan \
+     begitu tersedia tanpa menahan apa pun, dan `defer` ditahan sampai \
+     `Isolat::selesaikan_pemuatan` menjalankannya **di antara** \
+     `DOMContentLoaded` dan `load` (urutan diuji \
+     `defer_berjalan_sesudah_dcl_sebelum_load`). `async` menang atas `defer` \
+     kalau kedua atribut ada. Yang belum: urutan `async` deterministik karena \
+     sumbernya diambil sinkron, bukan mengikuti waktu jaringan seperti \
+     browser; `document.write` tidak ada; dan `type=\"module\"` dilewati \
+     karena pemuat impor belum ada, begitu pula tipe bukan JavaScript \
+     (`application/json`, `text/template`); keduanya dilaporkan di kolom \
+     `skrip.dilewati` pada tanda terima, bukan didiamkan. Mesin ini \
      sendiri tidak punya event loop: antrean timer hanya berjalan saat \
      `Isolat::kuras_timer` dipanggil. Yang memasang pemompa adalah daemon \
      (`cdp::native_wire::NativeEngine`, tiap 20 ms lewat `kuras_timer_semua`), \

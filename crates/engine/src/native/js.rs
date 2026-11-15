@@ -155,8 +155,27 @@ enum SumberSkrip {
     Luar(String),
 }
 
+/// Kapan sebuah skrip dijalankan relatif terhadap fase pemuatan.
+///
+/// Tiga kelas ini yang membedakan browser dari "jalankan semua skrip berurutan":
+/// skrip klasik tanpa atribut menahan parser dan berjalan **sebelum**
+/// `DOMContentLoaded`, `defer` berjalan **sesudah** `DOMContentLoaded` tapi
+/// sebelum `load`, dan `async` berjalan begitu sumbernya tersedia tanpa
+/// menahan apa pun. Tanpa pemisahan ini, pustaka yang memasang pendengar di
+/// `DOMContentLoaded` akan mendaftar terlambat dan tidak pernah dipanggil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KelasSkrip {
+    /// Skrip klasik: menahan parser, berjalan berurutan sebelum DCL.
+    Blocking,
+    /// `defer`: berurutan, sesudah DCL, sebelum `load`.
+    Defer,
+    /// `async`: segera setelah tersedia, urutan tidak dijamin.
+    Async,
+}
+
 struct SkripHalaman {
     sumber: SumberSkrip,
+    kelas: KelasSkrip,
 }
 
 /// Hasil satu putaran eksekusi skrip halaman.
@@ -186,6 +205,19 @@ impl LaporanSkrip {
     }
 }
 
+/// Hasil [`Isolat::selesaikan_pemuatan`].
+///
+/// Dua kolom, bukan satu boolean: "pemuatan selesai" dan "skrip `defer`
+/// berjalan bersih" adalah dua hal berbeda, dan halaman yang `load`-nya
+/// terkirim tapi `defer`-nya melempar galat tetap harus terlihat bermasalah.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LaporanPemuatan {
+    /// Benar kalau `DOMContentLoaded`/`load` benar-benar dikirim kali ini.
+    pub selesai: bool,
+    /// Hasil eksekusi skrip `defer` yang berjalan di antara keduanya.
+    pub defer: LaporanSkrip,
+}
+
 /// Mengumpulkan `<script>` dalam urutan dokumen.
 ///
 /// Yang ditelusuri hanya anak pohon terang: isi `<template>` di browser juga
@@ -209,12 +241,26 @@ fn kumpulkan_skrip(dok: &Document, laporan: &mut LaporanSkrip) -> Vec<SkripHalam
                 || tipe == "text/ecmascript"
                 || tipe == "application/ecmascript"
             {
+                // `defer`/`async` hanya berlaku untuk skrip klasik yang punya
+                // `src`. Spesifikasi HTML mengabaikan keduanya pada skrip
+                // sebaris, jadi skrip sebaris selalu `Blocking`.
                 match node.attr("src").map(str::trim).filter(|s| !s.is_empty()) {
-                    Some(src) => hasil.push(SkripHalaman {
-                        sumber: SumberSkrip::Luar(src.to_owned()),
-                    }),
+                    Some(src) => {
+                        let kelas = if node.attr("async").is_some() {
+                            KelasSkrip::Async
+                        } else if node.attr("defer").is_some() {
+                            KelasSkrip::Defer
+                        } else {
+                            KelasSkrip::Blocking
+                        };
+                        hasil.push(SkripHalaman {
+                            sumber: SumberSkrip::Luar(src.to_owned()),
+                            kelas,
+                        });
+                    }
                     None => hasil.push(SkripHalaman {
                         sumber: SumberSkrip::Sebaris(dok.teks(kini)),
+                        kelas: KelasSkrip::Blocking,
                     }),
                 }
             } else {
@@ -1113,10 +1159,19 @@ const JEMBATAN_DOM: &str = r##"
   // sesudah dipakai supaya tidak jadi global yang bisa dilihat skrip halaman.
   Object.defineProperty(globalThis, "__siap", {
     value: {
-      selesai: function () {
-        if (keadaanSiap === "complete") return 0;
+      // Dua pintu, bukan satu `selesai()`. Skrip `defer` harus berjalan DI
+      // ANTARA `DOMContentLoaded` dan `load`, dan satu fungsi yang mengirim
+      // keduanya sekaligus tidak menyisakan celah untuk menyisipkan apa pun:
+      // akibatnya `defer` terpaksa berjalan sebelum DCL, dan pustaka yang
+      // mendaftar di DCL tidak pernah dipanggil.
+      dcl: function () {
+        if (keadaanSiap !== "loading") return 0;
         keadaanSiap = "interactive";
         sebar(new Peristiwa("DOMContentLoaded", { bubbles: false }), docId);
+        return 1;
+      },
+      load: function () {
+        if (keadaanSiap === "complete") return 0;
         keadaanSiap = "complete";
         sebar(new Peristiwa("load", { bubbles: false }), docId);
         return 1;
@@ -1943,6 +1998,15 @@ pub struct Isolat {
     /// Disimpan terpisah karena `<script src>` butuh pengambil yang sama
     /// tanpa harus lewat JavaScript: byte-nya diambil Rust lalu dievaluasi.
     pengambil: Option<Arc<dyn Pengambil>>,
+    /// Skrip `defer` yang sudah dikumpulkan tapi belum boleh berjalan.
+    ///
+    /// Ditahan di sini, bukan dijalankan langsung, karena `defer` baru boleh
+    /// berjalan **sesudah** `DOMContentLoaded`. Menjalankannya di
+    /// [`Self::jalankan_skrip_halaman`] akan membuat pustaka yang memasang
+    /// pendengar di `DOMContentLoaded` mendaftar terlambat dan tidak pernah
+    /// dipanggil, persis kegagalan yang membuat halaman tampil kosong tanpa
+    /// satu pun galat.
+    skrip_defer: Mutex<Vec<SkripHalaman>>,
 }
 
 impl Isolat {
@@ -1996,6 +2060,7 @@ impl Isolat {
             batas_waktu: pagu.batas_waktu,
             halaman: None,
             pengambil: None,
+            skrip_defer: Mutex::new(Vec::new()),
         };
         isolat.eval(PEMBUKA)?;
         isolat.pasang_ambil(Arc::clone(&pengambil))?;
@@ -2091,63 +2156,96 @@ impl Isolat {
             (kumpulkan_skrip(&dok, &mut laporan), dasar)
         };
 
+        let mut tertunda = Vec::new();
         for skrip in daftar {
-            let sumber = match skrip.sumber {
-                SumberSkrip::Sebaris(teks) => teks,
-                SumberSkrip::Luar(src) => {
-                    let Some(pengambil) = self.pengambil.as_ref() else {
-                        laporan
-                            .dilewati
-                            .push(format!("{src}: isolat ini tidak punya jalur jaringan"));
-                        continue;
-                    };
-                    let Some(url) = super::bingkai::selesaikan(&src, dasar.as_deref()) else {
-                        laporan
-                            .dilewati
-                            .push(format!("{src}: URL tidak bisa diselesaikan"));
-                        continue;
-                    };
-                    let permintaan = PermintaanAmbil {
-                        metode: "GET".to_owned(),
-                        url: url.clone(),
-                        badan: None,
-                    };
-                    match pengambil.ambil(&permintaan) {
-                        Ok(jawaban) if (200..300).contains(&jawaban.status) => jawaban.badan,
-                        Ok(jawaban) => {
-                            laporan.dilewati.push(format!(
-                                "{url}: HTTP {} dari jalur jaringan",
-                                jawaban.status
-                            ));
-                            continue;
-                        }
-                        Err(pesan) => {
-                            laporan.dilewati.push(format!("{url}: {pesan}"));
-                            continue;
-                        }
-                    }
-                }
-            };
-            if sumber.trim().is_empty() {
-                continue;
-            }
-            match self.eval(&sumber) {
-                Ok(_) => laporan.dijalankan += 1,
-                Err(NativeError::BatasWaktu(pesan)) => {
-                    // Skrip yang melewati pagu waktu tetap dihitung sudah
-                    // dijalankan: yang gagal adalah penyelesaiannya, bukan
-                    // pemanggilannya, dan menyembunyikan itu membuat halaman
-                    // yang lambat terlihat seperti halaman tanpa skrip.
-                    laporan.dijalankan += 1;
-                    laporan.galat.push(pesan);
-                }
-                Err(err) => {
-                    laporan.dijalankan += 1;
-                    laporan.galat.push(err.to_string());
+            match skrip.kelas {
+                // `defer` ditahan: ia baru boleh berjalan sesudah
+                // `DOMContentLoaded`, yang dikirim [`Self::selesaikan_pemuatan`].
+                KelasSkrip::Defer => tertunda.push(skrip),
+                // `async` tidak menahan apa pun dan boleh berjalan begitu
+                // sumbernya tersedia. Mesin ini mengambil sumber secara
+                // sinkron, jadi "tersedia" berarti sekarang; urutannya
+                // deterministik di sini, berbeda dari browser sungguhan yang
+                // bergantung waktu jaringan. Batas itu tercatat di `CELAH`.
+                KelasSkrip::Async | KelasSkrip::Blocking => {
+                    self.jalankan_satu_skrip(&skrip, dasar.as_deref(), &mut laporan);
                 }
             }
         }
+        *self
+            .skrip_defer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = tertunda;
         Ok(laporan)
+    }
+
+    /// Mengambil sumber satu skrip lalu menjalankannya, mencatat hasilnya.
+    ///
+    /// Dipisah karena tiga kelas skrip berjalan di tiga titik waktu berbeda:
+    /// `Blocking` dan `Async` saat dokumen dipasang, `Defer` di antara
+    /// `DOMContentLoaded` dan `load`. Ketiganya butuh langkah yang sama
+    /// persis, dan menyalinnya tiga kali berarti tiga tempat yang bisa
+    /// menyimpang.
+    fn jalankan_satu_skrip(
+        &self,
+        skrip: &SkripHalaman,
+        dasar: Option<&str>,
+        laporan: &mut LaporanSkrip,
+    ) {
+        let sumber = match &skrip.sumber {
+            SumberSkrip::Sebaris(teks) => teks.clone(),
+            SumberSkrip::Luar(src) => {
+                let Some(pengambil) = self.pengambil.as_ref() else {
+                    laporan
+                        .dilewati
+                        .push(format!("{src}: isolat ini tidak punya jalur jaringan"));
+                    return;
+                };
+                let Some(url) = super::bingkai::selesaikan(src, dasar) else {
+                    laporan
+                        .dilewati
+                        .push(format!("{src}: URL tidak bisa diselesaikan"));
+                    return;
+                };
+                let permintaan = PermintaanAmbil {
+                    metode: "GET".to_owned(),
+                    url: url.clone(),
+                    badan: None,
+                };
+                match pengambil.ambil(&permintaan) {
+                    Ok(jawaban) if (200..300).contains(&jawaban.status) => jawaban.badan,
+                    Ok(jawaban) => {
+                        laporan.dilewati.push(format!(
+                            "{url}: HTTP {} dari jalur jaringan",
+                            jawaban.status
+                        ));
+                        return;
+                    }
+                    Err(pesan) => {
+                        laporan.dilewati.push(format!("{url}: {pesan}"));
+                        return;
+                    }
+                }
+            }
+        };
+        if sumber.trim().is_empty() {
+            return;
+        }
+        match self.eval(&sumber) {
+            Ok(_) => laporan.dijalankan += 1,
+            Err(NativeError::BatasWaktu(pesan)) => {
+                // Skrip yang melewati pagu waktu tetap dihitung sudah
+                // dijalankan: yang gagal adalah penyelesaiannya, bukan
+                // pemanggilannya, dan menyembunyikan itu membuat halaman
+                // yang lambat terlihat seperti halaman tanpa skrip.
+                laporan.dijalankan += 1;
+                laporan.galat.push(pesan);
+            }
+            Err(err) => {
+                laporan.dijalankan += 1;
+                laporan.galat.push(err.to_string());
+            }
+        }
     }
 
     /// Menjalankan timer yang sudah jatuh tempo.
@@ -2161,17 +2259,41 @@ impl Isolat {
         Ok(hasil.trim().parse::<usize>().unwrap_or(0))
     }
 
-    /// Menyelesaikan pemuatan: `readyState` menjadi `complete` dan peristiwa
-    /// `DOMContentLoaded` lalu `load` dikirim berurutan.
+    /// Menyelesaikan pemuatan: `readyState` bertransisi `loading` ->
+    /// `interactive` -> `complete`, `DOMContentLoaded` lalu `load` dikirim,
+    /// dan skrip `defer` berjalan **di antara keduanya**.
     ///
-    /// Mengembalikan `true` kalau peristiwa benar-benar dikirim. Pintu
-    /// `__siap` dihapus sesudah dipakai supaya skrip halaman tidak bisa
+    /// Urutan itu bukan detail. Pustaka nyata memasang pendengar di
+    /// `DOMContentLoaded` lalu mengharapkan skrip `defer` sudah berjalan
+    /// sesudahnya, dan `load` baru boleh terlihat sesudah `defer` selesai.
+    /// Pintu `__siap` dihapus sesudah dipakai supaya skrip halaman tidak bisa
     /// memicunya dua kali, dan supaya `Object.keys(globalThis)` tetap bersih
     /// seperti di browser sungguhan.
-    pub fn selesaikan_pemuatan(&self) -> Result<bool, NativeError> {
-        let hasil = self.eval("globalThis.__siap ? globalThis.__siap.selesai() : 0")?;
+    pub fn selesaikan_pemuatan(&self) -> Result<LaporanPemuatan, NativeError> {
+        let dcl = self.eval("globalThis.__siap ? globalThis.__siap.dcl() : 0")?;
+        // Kunci dilepas sebelum skrip dijalankan: `eval` memasang jembatan
+        // yang mengunci pohon, dan menahan kunci antrean sambil mengevaluasi
+        // skrip adalah cara paling mudah mengunci diri sendiri.
+        let tertunda = {
+            let mut penjaga = self
+                .skrip_defer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *penjaga)
+        };
+        let mut defer = LaporanSkrip::default();
+        if !tertunda.is_empty() {
+            let dasar = self.halaman.as_ref().map(|h| h.url().to_owned());
+            for skrip in &tertunda {
+                self.jalankan_satu_skrip(skrip, dasar.as_deref(), &mut defer);
+            }
+        }
+        let load = self.eval("globalThis.__siap ? globalThis.__siap.load() : 0")?;
         let _ = self.eval("delete globalThis.__siap");
-        Ok(hasil.trim() != "0")
+        Ok(LaporanPemuatan {
+            selesai: dcl.trim() != "0" || load.trim() != "0",
+            defer,
+        })
     }
 
     /// Pohon yang sedang dipakai jembatan DOM, kalau ada.
@@ -3873,10 +3995,10 @@ mod tests {
             "loading",
             "selama skrip halaman berjalan, dokumen masih loading"
         );
-        assert!(isolat.selesaikan_pemuatan().unwrap());
+        assert!(isolat.selesaikan_pemuatan().unwrap().selesai);
         assert_eq!(isolat.eval("document.readyState").unwrap(), "complete");
         assert!(
-            !isolat.selesaikan_pemuatan().unwrap(),
+            !isolat.selesaikan_pemuatan().unwrap().selesai,
             "pemuatan yang sama tidak boleh diselesaikan dua kali"
         );
     }
@@ -3901,7 +4023,7 @@ mod tests {
             Some("awal"),
             "pendengar belum dipanggil sebelum pemuatan selesai"
         );
-        assert!(isolat.selesaikan_pemuatan().unwrap());
+        assert!(isolat.selesaikan_pemuatan().unwrap().selesai);
         // `DOMContentLoaded` melihat `interactive`, `load` melihat `complete`.
         // Itu urutan yang dijamin spesifikasi, dan pustaka memakainya untuk
         // membedakan "DOM siap" dari "semua sumber daya siap".
@@ -3996,9 +4118,160 @@ mod tests {
             sesudah.starts_with("TypeError: "),
             "penolakan harus berupa TypeError yang bisa ditangkap: {sesudah}"
         );
+    }
+
+    /// Pengambil uji yang memetakan URL ke badan skrip, supaya satu halaman
+    /// bisa memuat beberapa `<script src>` dengan isi berbeda.
+    struct PetaSkrip(std::collections::HashMap<String, String>);
+
+    impl Pengambil for PetaSkrip {
+        fn ambil(&self, permintaan: &PermintaanAmbil) -> Result<JawabanAmbil, String> {
+            let badan = self
+                .0
+                .get(&permintaan.url)
+                .cloned()
+                .ok_or_else(|| format!("URL tak dikenal: {}", permintaan.url))?;
+            Ok(JawabanAmbil {
+                status: 200,
+                url: permintaan.url.clone(),
+                content_type: Some("text/javascript".to_owned()),
+                badan,
+            })
+        }
+    }
+
+    /// Halaman dengan pencatat urutan: satu skrip blocking yang memasang
+    /// pendengar DCL/load, lalu satu `<script src>` dengan atribut `atribut`.
+    fn halaman_berjejak(
+        atribut: &str,
+        berkas: &str,
+        badan: &str,
+    ) -> (Isolat, Arc<Mutex<Document>>) {
+        let peta = PetaSkrip(
+            [(format!("https://contoh.test/{berkas}"), badan.to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        let html = format!(
+            "<html><head><title>awal</title>\
+             <script>var jejak = []; function catat(x) {{ jejak.push(x); }} \
+               catat('blocking:' + document.readyState); \
+               window.addEventListener('DOMContentLoaded', function () {{ \
+                 catat('dcl:' + document.readyState); }}); \
+               window.addEventListener('load', function () {{ \
+                 catat('load:' + document.readyState); }}); \
+             </script>\
+             <script src=\"/{berkas}\" {atribut}></script>\
+             </head><body></body></html>"
+        );
+        isolat_halaman(&html, "https://contoh.test/", Some(Arc::new(peta)))
+    }
+
+    // ── FR-013 lanjutan: defer dan async punya fase sendiri ───────────────
+    // Spesifikasi HTML menempatkan `defer` DI ANTARA `DOMContentLoaded` dan
+    // `load`. Kalau ia berjalan sebelum DCL, pustaka yang memasang pendengar
+    // di DCL mendaftar terlambat dan tidak pernah dipanggil: halaman tampil
+    // kosong tanpa satu pun galat.
+
+    #[test]
+    fn defer_berjalan_sesudah_dcl_sebelum_load() {
+        let (isolat, _dok) = halaman_berjejak(
+            "defer",
+            "tunda.js",
+            "catat('defer:' + document.readyState);",
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert!(laporan.galat.is_empty(), "galat: {:?}", laporan.galat);
+        assert_eq!(
+            isolat.eval("jejak.join(',')").unwrap(),
+            "blocking:loading",
+            "`defer` tidak boleh berjalan sebelum DOMContentLoaded"
+        );
+
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert!(pemuatan.selesai, "pemuatan harus benar-benar diselesaikan");
+        assert_eq!(
+            pemuatan.defer.dijalankan, 1,
+            "satu skrip defer harus berjalan"
+        );
         assert!(
-            sesudah.contains("tidak diizinkan") || sesudah.contains("gerbang"),
-            "alasan penolakan harus menyebut gerbangnya: {sesudah}"
+            pemuatan.defer.galat.is_empty(),
+            "galat defer: {:?}",
+            pemuatan.defer.galat
+        );
+        assert_eq!(
+            isolat.eval("jejak.join(',')").unwrap(),
+            "blocking:loading,dcl:interactive,defer:interactive,load:complete",
+            "urutan wajib: blocking -> DCL -> defer -> load"
+        );
+    }
+
+    #[test]
+    fn skrip_async_berjalan_sebelum_dcl_tanpa_menahan() {
+        let (isolat, _dok) = halaman_berjejak(
+            "async",
+            "segera.js",
+            "catat('async:' + document.readyState);",
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert!(laporan.galat.is_empty(), "galat: {:?}", laporan.galat);
+        assert_eq!(
+            isolat.eval("jejak.join(',')").unwrap(),
+            "blocking:loading,async:loading",
+            "`async` berjalan begitu tersedia, bukan ditahan sampai DCL"
+        );
+
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert_eq!(
+            pemuatan.defer.dijalankan, 0,
+            "`async` bukan `defer`: tidak ada yang ditunda"
+        );
+        assert_eq!(
+            isolat.eval("jejak.join(',')").unwrap(),
+            "blocking:loading,async:loading,dcl:interactive,load:complete"
+        );
+    }
+
+    #[test]
+    fn defer_menang_atas_blocking_tapi_kalah_dari_async() {
+        // Spesifikasi: `async` menang kalau kedua atribut ada, karena skrip
+        // `async` tidak dijamin urutannya sehingga `defer` tidak bisa berarti.
+        let (isolat, _dok) = halaman_berjejak(
+            "defer async",
+            "dua.js",
+            "catat('dua:' + document.readyState);",
+        );
+        isolat.jalankan_skrip_halaman().unwrap();
+        assert_eq!(
+            isolat.eval("jejak.join(',')").unwrap(),
+            "blocking:loading,dua:loading",
+            "atribut `async` harus menang atas `defer`"
+        );
+        isolat.selesaikan_pemuatan().unwrap();
+    }
+
+    #[test]
+    fn defer_yang_galat_tidak_menghalangi_load() {
+        let (isolat, _dok) =
+            halaman_berjejak("defer", "rusak.js", "throw new Error('defer meledak');");
+        isolat.jalankan_skrip_halaman().unwrap();
+        let pemuatan = isolat.selesaikan_pemuatan().unwrap();
+        assert!(pemuatan.selesai, "load tetap harus terkirim");
+        assert_eq!(pemuatan.defer.dijalankan, 1);
+        assert_eq!(
+            pemuatan.defer.galat.len(),
+            1,
+            "galatnya dilaporkan, bukan ditelan"
+        );
+        assert!(
+            pemuatan.defer.galat[0].contains("defer meledak"),
+            "galat harus menyebut sebabnya: {:?}",
+            pemuatan.defer.galat
+        );
+        assert_eq!(
+            isolat.eval("document.readyState").unwrap(),
+            "complete",
+            "satu skrip defer yang galat tidak boleh menggantung readyState"
         );
     }
 }
