@@ -165,18 +165,27 @@ pub const CELAH: &[&str] = &[
      tidak bisa menyentuh dokumen anak",
     "eksekusi `<script>` berjalan saat dokumen dipasang (navigasi dan \
      `Page.setDocumentContent`), tapi semantiknya belum seperti browser: \
-     tidak ada `defer`/`async`, `document.write` tidak ada, dan tidak ada \
-     fase `DOMContentLoaded`/`load` yang memisahkan skrip dari pemuatan. \
-     `type=\"module\"` dilewati karena pemuat impor belum ada, dan tipe bukan \
-     JavaScript (`application/json`, `text/template`) juga dilewati; keduanya \
-     dilaporkan di kolom `skrip.dilewati` pada tanda terima, bukan didiamkan. \
-     Timer hanya berjalan saat mesin memompa (`Runtime.evaluate` atau sesudah \
-     pemuatan), jadi `setTimeout` tidak pernah menyala sendiri selama halaman \
-     menganggur. `getComputedStyle` hanya menjawab properti yang benar-benar \
-     dihitung kaskade; sisanya teks kosong, bukan angka karangan. `innerText` \
-     sama dengan `textContent` karena raster belum menyusun baris per elemen. \
-     Satu skrip yang melempar galat tidak menghentikan yang lain, dan galatnya \
-     dikumpulkan di `skrip.galat`",
+     tidak ada `defer`/`async` dan `document.write` tidak ada, walaupun \
+     `window.addEventListener`/`removeEventListener` dan `document.readyState` \
+     sudah tersedia. Fase pemuatan \
+     **ada tapi tidak dipisah seperti browser**: sesudah semua skrip sebaris \
+     selesai, `Isolat::selesaikan_pemuatan` memindahkan `readyState` ke \
+     `complete` lalu mengirim `DOMContentLoaded` dan `load` berurutan; urutannya \
+     diuji `dom_content_loaded_dan_load_dipanggil_berurutan`, tetapi tidak ada \
+     `interactive` di antara parse dan eksekusi. `type=\"module\"` dilewati \
+     karena pemuat impor belum ada, dan tipe bukan JavaScript \
+     (`application/json`, `text/template`) juga dilewati; keduanya dilaporkan \
+     di kolom `skrip.dilewati` pada tanda terima, bukan didiamkan. Mesin ini \
+     sendiri tidak punya event loop: antrean timer hanya berjalan saat \
+     `Isolat::kuras_timer` dipanggil. Yang memasang pemompa adalah daemon \
+     (`cdp::native_wire::NativeEngine`, tiap 20 ms lewat `kuras_timer_semua`), \
+     jadi di bawah daemon `setTimeout`/`setInterval` jatuh tempo tanpa pemicu \
+     klien, sementara pemakai `engine` langsung yang tidak memompa sendiri \
+     tetap tidak mendapat perilaku itu. `getComputedStyle` hanya menjawab \
+     properti yang benar-benar dihitung kaskade; sisanya teks kosong, bukan \
+     angka karangan. `innerText` sama dengan `textContent` karena raster belum \
+     menyusun baris per elemen. Satu skrip yang melempar galat tidak \
+     menghentikan yang lain, dan galatnya dikumpulkan di `skrip.galat`",
     "shadow root tertutup tidak terlihat skrip halaman, dan itu memang \
      spesifikasinya, bukan celah: `selectors.rs` punya dua jalur, \
      `pilih_terang` untuk skrip halaman yang berhenti di batas pohon, dan \
