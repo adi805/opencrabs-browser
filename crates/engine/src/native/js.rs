@@ -3846,4 +3846,146 @@ mod tests {
             "menempelkan salinan menambah div dan anaknya, bukan memindahkan asli"
         );
     }
+
+    // ── FR-013: readyState dan peristiwa pemuatan ─────────────────────────
+    // Pustaka nyata menunggu `document.readyState` dan memasang pendengar
+    // `DOMContentLoaded`/`load` sebelum menyentuh DOM. Tanpa keduanya,
+    // halaman yang memakai jQuery atau Alpine berhenti di baris pertama.
+
+    #[test]
+    fn ready_state_loading_lalu_complete() {
+        let (isolat, _dok) = isolat_halaman("<div id=\"a\"></div>", "https://contoh.test/", None);
+        assert_eq!(
+            isolat.eval("document.readyState").unwrap(),
+            "loading",
+            "selama skrip halaman berjalan, dokumen masih loading"
+        );
+        assert!(isolat.selesaikan_pemuatan().unwrap());
+        assert_eq!(isolat.eval("document.readyState").unwrap(), "complete");
+        assert!(
+            !isolat.selesaikan_pemuatan().unwrap(),
+            "pemuatan yang sama tidak boleh diselesaikan dua kali"
+        );
+    }
+
+    #[test]
+    fn dom_content_loaded_dan_load_dipanggil_berurutan() {
+        let (isolat, dok) = isolat_halaman(
+            "<html><head><title>awal</title></head><body>\
+             <script>\
+               window.addEventListener('DOMContentLoaded', function () { \
+                 document.title = 'dcl:' + document.readyState; });\
+               window.addEventListener('load', function () { \
+                 document.title = document.title + '|load:' + document.readyState; });\
+             </script></body></html>",
+            "https://contoh.test/",
+            None,
+        );
+        let laporan = isolat.jalankan_skrip_halaman().unwrap();
+        assert!(laporan.galat.is_empty(), "galat: {:?}", laporan.galat);
+        assert_eq!(
+            isi(&dok).judul().as_deref(),
+            Some("awal"),
+            "pendengar belum dipanggil sebelum pemuatan selesai"
+        );
+        assert!(isolat.selesaikan_pemuatan().unwrap());
+        // `DOMContentLoaded` melihat `interactive`, `load` melihat `complete`.
+        // Itu urutan yang dijamin spesifikasi, dan pustaka memakainya untuk
+        // membedakan "DOM siap" dari "semua sumber daya siap".
+        assert_eq!(
+            isi(&dok).judul().as_deref(),
+            Some("dcl:interactive|load:complete")
+        );
+    }
+
+    #[test]
+    fn window_add_event_listener_tidak_lagi_galat() {
+        let (isolat, _dok) = isolat_dengan("<div id=\"a\"></div>");
+        assert_eq!(
+            isolat
+                .eval(
+                    "typeof window.addEventListener + ':' + \
+                     typeof window.removeEventListener + ':' + \
+                     typeof document.addEventListener"
+                )
+                .unwrap(),
+            "function:function:function"
+        );
+    }
+
+    // ── FR-009: fetch mengembalikan Promise asli ──────────────────────────
+
+    #[test]
+    fn fetch_mengembalikan_promise_dengan_then() {
+        let (gerbang, _dicatat) = GerbangUji::baru(&["contoh.test"]);
+        let isolat =
+            Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        assert_eq!(
+            isolat
+                .eval("typeof fetch('https://contoh.test/a').then")
+                .unwrap(),
+            "function",
+            "hasil fetch harus thenable, bukan objek biasa"
+        );
+        assert_eq!(
+            isolat
+                .eval(
+                    "fetch('https://contoh.test/a').then(function (r) { return r.status; }) \
+                     instanceof Promise"
+                )
+                .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn await_fetch_selesai_dalam_satu_evaluasi() {
+        let (gerbang, _dicatat) = GerbangUji::baru(&["contoh.test"]);
+        let isolat =
+            Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        // Microtask dikuras sesudah eval, jadi fungsi async yang dijalankan
+        // di sini sudah selesai saat `eval` kembali. Kalau antreannya tidak
+        // dikuras, judulnya tetap kosong.
+        isolat
+            .eval(
+                "(async function () { \
+                   var r = await fetch('https://contoh.test/a'); \
+                   globalThis.__hasil = await r.text(); \
+                 })()",
+            )
+            .unwrap();
+        let hasil = isolat.eval("globalThis.__hasil").unwrap();
+        assert!(
+            !hasil.is_empty() && hasil != "undefined",
+            "await fetch harus menghasilkan badan, bukan {hasil:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_yang_ditolak_menjadi_promise_yang_ditolak() {
+        let (gerbang, _dicatat) = GerbangUji::baru(&["contoh.test"]);
+        let isolat =
+            Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        let pesan = isolat
+            .eval(
+                "var hasil = 'belum'; \
+                 fetch('https://terlarang.test/').catch(function (e) { \
+                   hasil = e.name + ': ' + e.message; }); \
+                 hasil",
+            )
+            .unwrap();
+        // `.catch` adalah microtask: nilainya belum terlihat di baris yang
+        // sama, dan itu memang perilaku browser. Yang diuji adalah hasil
+        // sesudah antreannya dikuras, bukan ketergesa-gesaan.
+        assert_eq!(pesan, "belum");
+        let sesudah = isolat.eval("hasil").unwrap();
+        assert!(
+            sesudah.starts_with("TypeError: "),
+            "penolakan harus berupa TypeError yang bisa ditangkap: {sesudah}"
+        );
+        assert!(
+            sesudah.contains("tidak diizinkan") || sesudah.contains("gerbang"),
+            "alasan penolakan harus menyebut gerbangnya: {sesudah}"
+        );
+    }
 }
