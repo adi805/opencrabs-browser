@@ -1072,6 +1072,48 @@ const JEMBATAN_DOM: &str = r##"
   globalThis.document = dokumen;
   globalThis.Element = SimpulElemen;
 
+  // `window.addEventListener` adalah permukaan yang dipakai hampir setiap
+  // pustaka, dan di sini `window` adalah objek global. Pendengar tingkat
+  // jendela dan tingkat dokumen berbagi satu peta: peristiwa `load` dikirim
+  // ke dokumen, dan pendengar yang dipasang lewat `window` ikut menerimanya.
+  // Memisahkan dua peta berarti dua jalur penyebaran yang harus diuji
+  // terpisah tanpa ada halaman nyata yang membedakannya.
+  globalThis.addEventListener = function (tipe, fn) {
+    dokumen.addEventListener(tipe, fn);
+  };
+  globalThis.removeEventListener = function (tipe, fn) {
+    dokumen.removeEventListener(tipe, fn);
+  };
+
+  // `readyState` bertransisi `loading` -> `interactive` -> `complete` seperti
+  // spesifikasi. Nilainya dibaca pustaka sebelum menyentuh DOM; tanpa kolom
+  // ini, `document.readyState === 'complete'` bernilai `undefined` dan
+  // pustaka menunggu selamanya.
+  var keadaanSiap = "loading";
+  Object.defineProperty(dokumen, "readyState", {
+    get: function () { return keadaanSiap; },
+    enumerable: true,
+    configurable: true,
+  });
+  // Pintu satu kali dari Rust: menyelesaikan pemuatan berarti mengirim
+  // `DOMContentLoaded` lalu `load`. Urutannya tetap, dan `__siap` dihapus
+  // sesudah dipakai supaya tidak jadi global yang bisa dilihat skrip halaman.
+  Object.defineProperty(globalThis, "__siap", {
+    value: {
+      selesai: function () {
+        if (keadaanSiap === "complete") return 0;
+        keadaanSiap = "interactive";
+        sebar(new Peristiwa("DOMContentLoaded", { bubbles: false }), docId);
+        keadaanSiap = "complete";
+        sebar(new Peristiwa("load", { bubbles: false }), docId);
+        return 1;
+      },
+    },
+    enumerable: false,
+    configurable: true,
+    writable: false,
+  });
+
   // --- konteks halaman: location, viewport, timer --------------------------
   //
   // Nilainya datang dari Rust lewat operasi `halaman`. Isolat tes tidak punya
@@ -2059,6 +2101,19 @@ impl Isolat {
     pub fn kuras_timer(&self) -> Result<usize, NativeError> {
         let hasil = self.eval("globalThis.__timer ? globalThis.__timer.kuras() : 0")?;
         Ok(hasil.trim().parse::<usize>().unwrap_or(0))
+    }
+
+    /// Menyelesaikan pemuatan: `readyState` menjadi `complete` dan peristiwa
+    /// `DOMContentLoaded` lalu `load` dikirim berurutan.
+    ///
+    /// Mengembalikan `true` kalau peristiwa benar-benar dikirim. Pintu
+    /// `__siap` dihapus sesudah dipakai supaya skrip halaman tidak bisa
+    /// memicunya dua kali, dan supaya `Object.keys(globalThis)` tetap bersih
+    /// seperti di browser sungguhan.
+    pub fn selesaikan_pemuatan(&self) -> Result<bool, NativeError> {
+        let hasil = self.eval("globalThis.__siap ? globalThis.__siap.selesai() : 0")?;
+        let _ = self.eval("delete globalThis.__siap");
+        Ok(hasil.trim() != "0")
     }
 
     /// Pohon yang sedang dipakai jembatan DOM, kalau ada.

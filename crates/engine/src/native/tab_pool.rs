@@ -492,6 +492,13 @@ impl<C: ColdStore> TabPool<C> {
         if jalankan_skrip && let Err(err) = isolat.kuras_timer() {
             skrip.galat.push(format!("timer: {err}"));
         }
+        // Pemuatan selesai sesudah skrip halaman berjalan: `readyState`
+        // menjadi `complete` dan `DOMContentLoaded` lalu `load` dikirim.
+        // Tab yang dihidupkan tanpa menjalankan skrip tetap diselesaikan,
+        // karena snapshot dinginnya memang sudah melewati fase itu.
+        if let Err(err) = isolat.selesaikan_pemuatan() {
+            skrip.galat.push(format!("pemuatan: {err}"));
+        }
         Ok(TabPanas {
             skrip,
             id,
