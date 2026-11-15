@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use engine::native::ambil::Pengambil;
@@ -239,10 +240,76 @@ struct Dalam {
     peristiwa: Antrean,
 }
 
+/// Menyusun daftar target `/json/list` dari keadaan yang sedang dipegang.
+///
+/// Dipakai [`Kunci::drop`] untuk menyegarkan cermin, dan hanya di situ: satu
+/// definisi bentuk berarti cermin dan pembaca tidak bisa menyimpang.
+fn daftar_target(d: &Dalam) -> Vec<Value> {
+    d.tabs
+        .iter()
+        .map(|(id, meta)| {
+            let terpasang = d.sesi.values().any(|t| t == id);
+            json!({
+                "id": meta.id_target,
+                "type": "page",
+                "title": meta.judul.clone().unwrap_or_default(),
+                "url": meta.url,
+                "description": "",
+                "attached": terpasang,
+            })
+        })
+        .collect()
+}
+
 /// State mesin native, dipakai bersama oleh server dan tes.
+///
+/// `dalam` adalah kunci besar: siapa pun yang memegangnya boleh mengubah tab,
+/// dan operasi lambat (raster, skrip halaman) memegangnya selama ia berjalan.
+/// `cermin` adalah salinan daftar target dalam bentuk `/json/list`, disegarkan
+/// setiap kali kunci besar **dilepas**.
+///
+/// Kenapa perlu cermin sama sekali: `/json/list` hanya membaca metadata, tapi
+/// lewat `dalam` ia harus menunggu raster selesai. Diukur 15 Nov 2026 pada
+/// biner rilis: p95 `/json/list` 200,3 ms saat sepuluh tangkapan berjalan,
+/// padahal NFR-002 menuntut di bawah 50 ms. Pemisahan ini membuat daftar tab
+/// bisa dijawab tanpa menyentuh kunci yang sedang dipegang raster.
 #[derive(Clone)]
 pub struct NativeState {
     dalam: Arc<Mutex<Dalam>>,
+    cermin: Arc<Mutex<Vec<Value>>>,
+}
+
+/// Penjaga kunci besar yang menyegarkan cermin saat dilepas.
+///
+/// Dipilih `Drop`, bukan pemanggilan manual di tiap jalur ubah, karena jalur
+/// ubahnya ada belasan dan yang terlupa satu saja membuat `/json/list`
+/// menampilkan tab yang sudah ditutup. Dengan `Drop`, tidak ada jalur yang
+/// bisa lupa: setiap pelepasan kunci menulis ulang cermin dari keadaan yang
+/// barusan ia pegang.
+struct Kunci<'a> {
+    dalam: MutexGuard<'a, Dalam>,
+    cermin: Arc<Mutex<Vec<Value>>>,
+}
+
+impl Deref for Kunci<'_> {
+    type Target = Dalam;
+    fn deref(&self) -> &Dalam {
+        &self.dalam
+    }
+}
+
+impl DerefMut for Kunci<'_> {
+    fn deref_mut(&mut self) -> &mut Dalam {
+        &mut self.dalam
+    }
+}
+
+impl Drop for Kunci<'_> {
+    fn drop(&mut self) {
+        let daftar = daftar_target(&self.dalam);
+        let mut cermin = self.cermin.lock().unwrap_or_else(|err| err.into_inner());
+        *cermin = daftar;
+    }
 }
 
 impl Default for NativeState {
@@ -296,14 +363,39 @@ impl NativeState {
                 tekanan: BTreeMap::new(),
                 peristiwa: Antrean::default(),
             })),
+            cermin: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn kunci(&self) -> MutexGuard<'_, Dalam> {
-        self.dalam.lock().unwrap_or_else(|err| {
+    fn kunci(&self) -> Kunci<'_> {
+        let dalam = self.dalam.lock().unwrap_or_else(|err| {
             tracing::warn!("state mesin native pulih dari mutex poisoned");
             err.into_inner()
-        })
+        });
+        Kunci {
+            dalam,
+            cermin: Arc::clone(&self.cermin),
+        }
+    }
+
+    /// Menjalankan timer yang sudah jatuh tempo di semua tab panas.
+    ///
+    /// Dipanggil pemompa latar milik [`super::NativeEngine`]. Mesin ini tidak
+    /// punya event loop di dalam isolat, jadi tanpa pemanggil berkala
+    /// `setTimeout(fn, 5000)` hanya berjalan kalau klien kebetulan
+    /// mengevaluasi sesuatu. Mengembalikan jumlah callback yang dipanggil.
+    pub fn kuras_timer_semua(&self) -> usize {
+        let dalam = self.kunci();
+        let ids: Vec<TabId> = dalam.tabs.keys().copied().collect();
+        let mut total = 0usize;
+        for id in ids {
+            if let Some(t) = dalam.pool.tab(id)
+                && let Ok(jumlah) = t.isolat.kuras_timer()
+            {
+                total += jumlah;
+            }
+        }
+        total
     }
 
     /// Menjawab satu frame dari soket browser. `None` berarti tidak ada balasan
@@ -355,23 +447,18 @@ impl NativeState {
 
     /// Daftar target dalam bentuk `/json/list` milik Chrome, tanpa URL soket
     /// (pemanggil yang menempelkannya, karena hanya dia yang tahu port).
+    ///
+    /// Dibaca dari cermin, **bukan** dari [`Dalam`]. Alasannya ada di
+    /// dokumentasi [`NativeState`]: raster memegang kunci besar selama ia
+    /// berjalan, jadi jalur ini tidak boleh menunggunya. Yang dibaca adalah
+    /// keadaan saat kunci terakhir dilepas, dan itu cukup: daftar tab tidak
+    /// berubah di tengah raster.
     #[must_use]
     pub fn target(&self) -> Vec<Value> {
-        let d = self.kunci();
-        d.tabs
-            .iter()
-            .map(|(id, meta)| {
-                let terpasang = d.sesi.values().any(|t| t == id);
-                json!({
-                    "id": meta.id_target,
-                    "type": "page",
-                    "title": meta.judul.clone().unwrap_or_default(),
-                    "url": meta.url,
-                    "description": "",
-                    "attached": terpasang,
-                })
-            })
-            .collect()
+        self.cermin
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     pub fn buka(&self, url: &str) -> Result<String, Galat> {
@@ -412,9 +499,17 @@ impl NativeState {
 
     /// Jumlah tab yang dialamatkan saat ini, untuk pemeriksaan kapasitas dari
     /// luar tanpa membuka state.
+    ///
+    /// Dibaca dari cermin, sama seperti [`Self::target`]. `/healthz` memanggil
+    /// ini pada setiap probe, dan sebelum cermin dipasang ia ikut menunggu
+    /// raster: terukur p50 110,4 ms saat sepuluh tangkapan berjalan, padahal
+    /// pemeriksaan kesehatan seharusnya selesai dalam mikrodetik.
     #[must_use]
     pub fn jumlah_tab(&self) -> usize {
-        self.kunci().tabs.len()
+        self.cermin
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
     }
 }
 

@@ -174,6 +174,38 @@ impl NativeEngine {
             hidup_tugas.store(false, Ordering::SeqCst);
         });
 
+        // Pemompa timer: satu tugas ringan yang menguras antrean timer tiap
+        // 20 ms. Tanpa ini `setTimeout` hanya berjalan ketika klien memanggil
+        // `Runtime.evaluate`, dan halaman yang menganggur tidak pernah
+        // menyelesaikan timer-nya (FR-011). Tugas ini berhenti sendiri saat
+        // server ditutup, karena `hidup` yang sama dipakai untuk itu.
+        //
+        // Pemanggilannya dibungkus `spawn_blocking`, dan itu bukan kehati-hatian
+        // berlebihan: `kuras_timer_semua` mengambil kunci state yang sama dengan
+        // raster, sedangkan raster memegangnya selama satu tangkapan penuh.
+        // Diukur 15 Nov 2026 pada biner rilis: memanggilnya langsung dari worker
+        // tokio membekukan worker itu ~100 ms, dan setiap permintaan HTTP yang
+        // kebetulan ditangani worker tersebut ikut macet. Gejalanya menipu
+        // karena `/json/version` tidak menyentuh state sama sekali tapi ikut
+        // terlambat 124 ms. Di kolam blokir, yang menunggu adalah thread blokir,
+        // bukan worker.
+        let state_pompa = state.clone();
+        let hidup_pompa = Arc::clone(&hidup);
+        let _pompa = handle.spawn(async move {
+            let mut detak = tokio::time::interval(std::time::Duration::from_millis(20));
+            detak.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while hidup_pompa.load(Ordering::Relaxed) {
+                detak.tick().await;
+                let state_kuras = state_pompa.clone();
+                if tokio::task::spawn_blocking(move || state_kuras.kuras_timer_semua())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
         let info = EngineInfo {
             browser: PRODUK.to_owned(),
             protocol_version: PROTOKOL.to_owned(),
@@ -529,12 +561,41 @@ async fn layani(
             Some(j) => (Some(j.ambilan), j.gaya),
             None => (None, LembarJaringan::default()),
         };
-        let jawaban = state.tangani_ambil(&teks, sesi.as_deref(), dokumen, gaya);
+        // Raster dan tata letak adalah kerja CPU yang memakan ratusan
+        // milidetik pada halaman besar. Menjalankannya langsung di task ini
+        // memblokir worker tokio yang sedang melayani soket CDP, dan selama
+        // itu `GET /json/list` ikut menunggu: p95-nya terukur 200 ms padahal
+        // ambangnya 50 ms (NFR-002/AC-015). `spawn_blocking` memindahkannya
+        // ke kolam thread blokir, sementara `NativeState` yang dibagi lewat
+        // `Arc<Mutex<..>>` tetap menyerialkan penulis per state.
+        //
+        // Pengurasan peristiwa ikut di dalam blok yang sama, bukan sesudahnya.
+        // Ia juga mengambil kunci state, jadi kalau dipanggil dari worker,
+        // worker itu menunggu raster yang sedang berjalan. Satu frame = satu
+        // kunjungan ke kolam blokir, dan tidak ada jalur di sini yang menyentuh
+        // kunci besar dari worker.
+        let state_kerja = state.clone();
+        let sesi_kerja = sesi.clone();
+        let (jawaban, peristiwa) = match tokio::task::spawn_blocking(move || {
+            let jawaban = state_kerja.tangani_ambil(&teks, sesi_kerja.as_deref(), dokumen, gaya);
+            let peristiwa = state_kerja.ambil_peristiwa(sesi_kerja.as_deref());
+            (jawaban, peristiwa)
+        })
+        .await
+        {
+            Ok(hasil) => hasil,
+            // Task blokir panik: soket ini tidak punya jawaban sah untuk
+            // frame itu. Ditutup, bukan dibiarkan menggantung tanpa balasan.
+            Err(err) => {
+                tracing::warn!(galat = %err, "penanganan frame gagal di kolam blokir");
+                break;
+            }
+        };
         // Peristiwa dikirim sebelum balasan: klien yang menunggu balasan
         // sebuah `evaluate` tidak boleh kehilangan `console.log` yang lahir
         // dari evaluasi itu sendiri, dan urutan ini membuat satu putaran
         // baca sudah memuat keduanya.
-        for peristiwa in state.ambil_peristiwa(sesi.as_deref()) {
+        for peristiwa in peristiwa {
             if tx.send(AxumMessage::Text(peristiwa.into())).await.is_err() {
                 return;
             }
