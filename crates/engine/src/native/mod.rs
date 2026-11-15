@@ -115,11 +115,12 @@ pub const CELAH: &[&str] = &[
      state fokus",
     "`fetch()` di dalam isolat hanya bisa lewat jalur yang dipasang pemanggil \
      (`native::ambil::Pengambil`); tanpa hook ia menolak semua. Jawabannya \
-     objek biasa, bukan `Promise`: `await fetch(...)` dan `await r.text()` \
-     jalan karena await pada nilai non-thenable mengembalikan nilai itu \
-     sendiri, tapi `fetch(...).then(...)`, `Promise.all` dan `AbortController` \
-     tidak. Badan diangkut sebagai teks UTF-8 lossy, jadi `arrayBuffer()`, \
-     stream, dan cookie tidak ada",
+     **Promise asli**, dan antrean microtask dikuras sesudah setiap evaluasi \
+     (`pompa_mikrotugas`, batas 10.000 tugas), jadi `await`, `.then()`, dan \
+     rantai promise berjalan seperti di browser. Yang belum: `AbortController` \
+     dan `AbortSignal` tidak ada, begitu juga `queueMicrotask`; badan diangkut \
+     sebagai teks UTF-8 lossy, jadi `arrayBuffer()`, stream, dan cookie tidak \
+     ada",
     "nilai balik `Runtime.evaluate` membawa tipe JS (boolean, number, string, \
      object) dan objek dikirim *by value*, tapi belum ada `objectId`, \
      `Runtime.callFunctionOn`, maupun `awaitPromise`: klien yang menyimpan \

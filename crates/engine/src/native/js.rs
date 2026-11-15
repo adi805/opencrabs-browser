@@ -1273,11 +1273,11 @@ const JEMBATAN_DOM: &str = r##"
 /// Tanpa hook, panggilan berakhir dengan galat yang menyebut sebabnya, bukan
 /// jawaban kosong yang terlihat seperti halaman tanpa isi.
 ///
-/// Yang dikembalikan **objek biasa, bukan `Promise`**, dan itu disengaja:
-/// `await fetch(...)` dan `await jawaban.text()` tetap bekerja karena `await`
-/// pada nilai yang bukan thenable mengembalikan nilai itu sendiri, sementara
-/// menjalankan mesin promise di dalam isolat berarti satu state mesin lagi
-/// yang harus diuji terhadap batas waktu. Batasnya disebut di [`super::CELAH`].
+/// Yang dikembalikan **Promise asli**, dan antrean microtask-nya dikuras
+/// [`pompa_mikrotugas`] sesudah setiap evaluasi, jadi `await fetch(...)`
+/// maupun `fetch(...).then(...)` sama-sama selesai dalam satu panggilan.
+/// Executor promise berjalan sinkron, sehingga gerbang jaringan tetap
+/// diputuskan sebelum `fetch` kembali.
 const JEMBATAN_AMBIL: &str = r##"
 (function () {
   var ambil = globalThis.__ambil;
@@ -1304,11 +1304,20 @@ const JEMBATAN_AMBIL: &str = r##"
           return this.get(nama) !== null;
         },
       },
+      // `Response.text()` dan `Response.json()` di browser mengembalikan
+      // Promise, bukan nilai. Halaman memakai keduanya dengan `await` maupun
+      // `.then()`, jadi bentuk sinkron akan lolos pada `await` tapi gagal
+      // senyap pada `.then()`. Microtask-nya dikuras pemompa, jadi promise di
+      // sini selesai sebelum `eval` kembali.
       text: function () {
-        return teks;
+        return Promise.resolve(teks);
       },
       json: function () {
-        return JSON.parse(teks);
+        try {
+          return Promise.resolve(JSON.parse(teks));
+        } catch (e) {
+          return Promise.reject(new SyntaxError(String((e && e.message) || e)));
+        }
       },
     };
     return isi;
@@ -1319,16 +1328,29 @@ const JEMBATAN_AMBIL: &str = r##"
   // `.catch()`, keduanya sama-sama tidak bekerja, dan itu tercatat di CELAH
   // alih-alih disamarkan.
   function fetch(url, init) {
-    var metode = init && init.method ? String(init.method) : "GET";
-    var badan = "";
-    if (init && init.body !== undefined && init.body !== null) {
-      badan = String(init.body);
-    }
-    var data = JSON.parse(ambil(metode, String(url), badan));
-    if (data && typeof data.__galat === "string") {
-      throw new TypeError(data.__galat);
-    }
-    return jawaban(data);
+    // Promise asli, bukan objek mirip. Executor-nya tetap berjalan sinkron,
+    // jadi gerbang jaringan sudah diputuskan saat `fetch` dipanggil; yang
+    // berubah hanya bentuk kegagalannya: penolakan datang sebagai promise
+    // yang ditolak, sehingga `.catch()` dan `try { await }` sama-sama bekerja.
+    return new Promise(function (resolve, reject) {
+      var metode = init && init.method ? String(init.method) : "GET";
+      var badan = "";
+      if (init && init.body !== undefined && init.body !== null) {
+        badan = String(init.body);
+      }
+      var data;
+      try {
+        data = JSON.parse(ambil(metode, String(url), badan));
+      } catch (e) {
+        reject(new TypeError(String((e && e.message) || e)));
+        return;
+      }
+      if (data && typeof data.__galat === "string") {
+        reject(new TypeError(data.__galat));
+        return;
+      }
+      resolve(jawaban(data));
+    });
   }
 
   // `fetch` di browser sungguhan adalah properti milik `window`, dan
@@ -1800,6 +1822,29 @@ fn op_dom(
     }
 }
 
+/// Batas jumlah microtask yang dijalankan sesudah satu evaluasi.
+///
+/// Rantai promise yang saling menjadwalkan tanpa akhir akan mengunci tab ini
+/// kalau antreannya dikuras tanpa batas. Batasnya jauh di atas kebutuhan
+/// halaman sungguhan (ratusan), dan melewatinya berarti skripnya sendiri yang
+/// salah, bukan mesin yang lambat.
+const BATAS_MIKROTUGAS: usize = 10_000;
+
+/// Mengosongkan antrean microtask sesudah satu evaluasi.
+///
+/// `rquickjs` tidak menjalankan antrean itu sendiri: tanpa pemompaan di sini,
+/// `await` pada Promise yang sudah selesai pun tidak pernah dilanjutkan, dan
+/// `fetch()` yang mengembalikan Promise asli akan terlihat menggantung.
+fn pompa_mikrotugas(ctx: &rquickjs::Ctx<'_>) {
+    let mut dijalankan = 0usize;
+    while ctx.execute_pending_job() {
+        dijalankan += 1;
+        if dijalankan >= BATAS_MIKROTUGAS {
+            break;
+        }
+    }
+}
+
 /// Nilai balik skrip dengan tipe JavaScript yang **dipertahankan**.
 ///
 /// Sebelum ini setiap hasil dijadikan string, jadi `navigator.webdriver`
@@ -2267,11 +2312,21 @@ impl Isolat {
     /// tetap terlihat oleh skrip berikutnya, sama seperti di browser.
     pub fn eval(&self, sumber: &str) -> Result<String, NativeError> {
         self.pasang_tenggat();
-        let hasil = self
-            .context
-            .with(|ctx| ctx.eval::<rquickjs::Coerced<String>, _>(sumber.as_bytes().to_vec()))
-            .map(|v| v.0)
-            .map_err(|e| self.galat_skrip(e));
+        let hasil = self.context.with(|ctx| {
+            let nilai = match ctx.eval::<rquickjs::Coerced<String>, _>(sumber.as_bytes().to_vec()) {
+                Ok(nilai) => nilai,
+                // Diterjemahkan DI DALAM closure: pesan pengecualian hanya
+                // bisa diambil selama konteksnya masih dipegang.
+                Err(err) => return Err(self.galat_skrip(err)),
+            };
+            // Microtask yang lahir dari evaluasi ini dijalankan sebelum
+            // nilainya dikembalikan, sama seperti event loop browser yang
+            // mengosongkan antrean microtask di antara dua tugas. Tanpa
+            // ini, `fetch()` yang mengembalikan Promise asli tidak akan
+            // pernah menyelesaikan `await`-nya.
+            pompa_mikrotugas(&ctx);
+            Ok::<_, NativeError>(nilai.0)
+        });
         self.lepas_tenggat();
         hasil
     }
@@ -2299,6 +2354,11 @@ impl Isolat {
             let nilai: rquickjs::Value = ctx
                 .eval(sumber.as_bytes().to_vec())
                 .map_err(|e| self.galat_skrip(e))?;
+            // Sama seperti [`Isolat::eval`]: microtask yang dijadwalkan oleh
+            // ekspresi ini dijalankan sebelum nilainya dibaca, sehingga
+            // `await` di dalam fungsi async yang dipanggil klien selesai
+            // dalam satu panggilan.
+            pompa_mikrotugas(&ctx);
 
             let hasil = match nilai.type_of() {
                 rquickjs::Type::Uninitialized | rquickjs::Type::Undefined => NilaiJs::TanpaNilai,
@@ -2466,12 +2526,15 @@ mod tests {
     fn fetch_menolak_tanpa_jalur_jaringan() {
         // Isolat tanpa hook tidak boleh berubah jadi jalan keluar bebas.
         let isolat = Isolat::new(PaguIsolat::default()).unwrap();
-        let pesan = isolat
+        isolat
             .eval(
-                "try { fetch('https://contoh.test/'); 'tidak menolak' } \
-                 catch (e) { e.name + ': ' + e.message }",
+                "(async function () { \
+                   try { await fetch('https://contoh.test/'); globalThis.__pesan = 'tidak menolak'; } \
+                   catch (e) { globalThis.__pesan = e.name + ': ' + e.message; } \
+                 })()",
             )
             .unwrap();
+        let pesan = isolat.eval("globalThis.__pesan").unwrap();
         assert!(
             pesan.starts_with("TypeError: "),
             "penolakan harus berupa galat yang bisa ditangkap: {pesan}"
@@ -2487,28 +2550,45 @@ mod tests {
         let (gerbang, dicatat) = GerbangUji::baru(&["contoh.test"]);
         let isolat =
             Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
+        // Satu panggilan per sifat yang diperiksa, supaya jumlah panggilan
+        // yang tercatat di gerbang tetap empat seperti sebelumnya.
+        isolat
+            .eval(
+                "(async function () { \
+                   var r = await fetch('https://contoh.test/a'); \
+                   globalThis.__teks = await r.text(); \
+                 })()",
+            )
+            .unwrap();
         assert_eq!(
-            isolat
-                .eval("fetch('https://contoh.test/a').text()")
-                .unwrap(),
+            isolat.eval("globalThis.__teks").unwrap(),
             "badan dari contoh.test"
         );
-        assert_eq!(
-            isolat
-                .eval("fetch('https://contoh.test/a').status")
-                .unwrap(),
-            "200"
-        );
-        assert_eq!(
-            isolat.eval("fetch('https://contoh.test/a').ok").unwrap(),
-            "true"
-        );
-        assert_eq!(
-            isolat
-                .eval("fetch('https://contoh.test/a').headers.get('Content-Type')")
-                .unwrap(),
-            "text/plain"
-        );
+        isolat
+            .eval(
+                "(async function () { \
+                   globalThis.__status = (await fetch('https://contoh.test/a')).status; \
+                 })()",
+            )
+            .unwrap();
+        assert_eq!(isolat.eval("globalThis.__status").unwrap(), "200");
+        isolat
+            .eval(
+                "(async function () { \
+                   globalThis.__ok = (await fetch('https://contoh.test/a')).ok; \
+                 })()",
+            )
+            .unwrap();
+        assert_eq!(isolat.eval("globalThis.__ok").unwrap(), "true");
+        isolat
+            .eval(
+                "(async function () { \
+                   var r = await fetch('https://contoh.test/a'); \
+                   globalThis.__tipe = r.headers.get('Content-Type'); \
+                 })()",
+            )
+            .unwrap();
+        assert_eq!(isolat.eval("globalThis.__tipe").unwrap(), "text/plain");
         let tercatat = dicatat.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(tercatat.len(), 4, "setiap panggilan harus lewat gerbang");
         assert_eq!(tercatat[0].url, "https://contoh.test/a");
@@ -2521,12 +2601,15 @@ mod tests {
         let (gerbang, dicatat) = GerbangUji::baru(&["contoh.test"]);
         let isolat =
             Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
-        let pesan = isolat
+        isolat
             .eval(
-                "try { fetch('https://terlarang.test/'); 'tidak menolak' } \
-                 catch (e) { e.message }",
+                "(async function () { \
+                   try { await fetch('https://terlarang.test/'); globalThis.__pesan = 'tidak menolak'; } \
+                   catch (e) { globalThis.__pesan = e.message; } \
+                 })()",
             )
             .unwrap();
+        let pesan = isolat.eval("globalThis.__pesan").unwrap();
         assert!(
             pesan.contains("terlarang.test"),
             "penolakan harus menyebut host yang ditolak: {pesan}"
@@ -2541,7 +2624,12 @@ mod tests {
         let isolat =
             Isolat::dengan_ambil(PaguIsolat::default(), gerbang as Arc<dyn Pengambil>).unwrap();
         isolat
-            .eval("fetch('https://contoh.test/kirim', {method: 'post', body: 'a=1'}).text()")
+            .eval(
+                "(async function () { \
+                   await (await fetch('https://contoh.test/kirim', \
+                     {method: 'post', body: 'a=1'})).text(); \
+                 })()",
+            )
             .unwrap();
         let tercatat = dicatat.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
@@ -2585,12 +2673,15 @@ mod tests {
             }
         }
         let isolat = Isolat::dengan_ambil(PaguIsolat::default(), Arc::new(Json)).unwrap();
-        assert_eq!(
-            isolat
-                .eval("fetch('https://contoh.test/j').json().nilai")
-                .unwrap(),
-            "7"
-        );
+        isolat
+            .eval(
+                "(async function () { \
+                   var r = await fetch('https://contoh.test/j'); \
+                   globalThis.__nilai = (await r.json()).nilai; \
+                 })()",
+            )
+            .unwrap();
+        assert_eq!(isolat.eval("globalThis.__nilai").unwrap(), "7");
     }
 
     #[test]

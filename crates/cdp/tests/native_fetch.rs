@@ -10,9 +10,11 @@
 //! perlu dibuktikan hanya "badan jawaban sampai ke skrip", dan satu server
 //! mainan lebih mudah dibaca daripada satu framework di dev-dependencies.
 //!
-//! `fetch` di mesin ini **sinkron**: tidak ada antrean microtask di isolat,
-//! jadi promise tidak akan pernah selesai. Karena itu `text()` mengembalikan
-//! string langsung dan tesnya memakai bentuk itu.
+//! `fetch` di mesin ini mengembalikan **Promise asli**: antrean microtask
+//! dikuras sesudah setiap evaluasi, jadi `await` dan `.then()` sama-sama
+//! selesai dalam satu panggilan `Runtime.evaluate`. `Response.text()` dan
+//! `.json()` juga mengembalikan Promise, sama seperti browser. Karena itu
+//! setiap tes di sini memakai `await`, bukan bentuk sinkron.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -116,19 +118,32 @@ fn fetch_yang_diizinkan_mengembalikan_badan_dari_server_sungguhan() {
     let state = state_dengan(kebijakan);
     let sesi = buka_tab(&state);
 
+    // Fungsi async dipanggil lalu dibiarkan selesai oleh pemompa microtask,
+    // jadi hasilnya dibaca dari global pada evaluasi yang sama.
     let badan = evaluasi(
         &state,
         &sesi,
-        &format!("fetch('http://127.0.0.1:{port}/isi').text()"),
+        &format!(
+            "(async function () {{ \
+               globalThis.__badan = await (await fetch('http://127.0.0.1:{port}/isi')).text(); \
+             }})()"
+        ),
     );
-    assert_eq!(badan["type"], json!("string"), "dapat: {badan}");
-    assert_eq!(badan["value"], json!("isi dari server uji"));
+    assert!(badan.get("error").is_none(), "dapat: {badan}");
+    let nilai = evaluasi(&state, &sesi, "globalThis.__badan");
+    assert_eq!(nilai["type"], json!("string"), "dapat: {nilai}");
+    assert_eq!(nilai["value"], json!("isi dari server uji"));
 
-    let status = evaluasi(
+    evaluasi(
         &state,
         &sesi,
-        &format!("fetch('http://127.0.0.1:{port}/isi').status"),
+        &format!(
+            "(async function () {{ \
+               globalThis.__status = (await fetch('http://127.0.0.1:{port}/isi')).status; \
+             }})()"
+        ),
     );
+    let status = evaluasi(&state, &sesi, "globalThis.__status");
     // JSON tidak membedakan 200 dari 200.0, tapi `json!` membedakannya:
     // `json!(200)` adalah integer dan `json!(200.0)` adalah float. Nilai yang
     // datang dari isolat selalu float karena JS hanya punya satu tipe angka,
@@ -141,13 +156,19 @@ fn fetch_ke_host_di_luar_daftar_izin_ditolak_dengan_alasannya() {
     let state = state_dengan(KebijakanJaringan::default());
     let sesi = buka_tab(&state);
 
+    // Penolakan datang sebagai Promise yang ditolak, bukan lemparan sinkron,
+    // jadi yang menangkapnya `catch` di dalam fungsi async.
     let hasil = evaluasi(
         &state,
         &sesi,
-        "try { fetch('https://contoh.test/'); 'tidak menolak' } \
-         catch (e) { e.name + ': ' + e.message }",
+        "(async function () { \
+           try { await fetch('https://contoh.test/'); globalThis.__pesan = 'tidak menolak'; } \
+           catch (e) { globalThis.__pesan = e.name + ': ' + e.message; } \
+         })()",
     );
-    let pesan = hasil["value"].as_str().unwrap_or_default().to_owned();
+    assert!(hasil.get("error").is_none(), "dapat: {hasil}");
+    let nilai = evaluasi(&state, &sesi, "globalThis.__pesan");
+    let pesan = nilai["value"].as_str().unwrap_or_default().to_owned();
     assert!(
         pesan.starts_with("TypeError: "),
         "penolakan harus berupa galat yang bisa ditangkap skrip: {pesan}"
@@ -177,11 +198,15 @@ fn daftar_tolak_menang_lewat_runtime_evaluate() {
         &state,
         &sesi,
         &format!(
-            "try {{ fetch('http://127.0.0.1:{port}/'); 'tidak menolak' }} \
-             catch (e) {{ e.message }}"
+            "(async function () {{ \
+               try {{ await fetch('http://127.0.0.1:{port}/'); globalThis.__pesan = 'tidak menolak'; }} \
+               catch (e) {{ globalThis.__pesan = e.message; }} \
+             }})()"
         ),
     );
-    let pesan = hasil["value"].as_str().unwrap_or_default().to_owned();
+    assert!(hasil.get("error").is_none(), "dapat: {hasil}");
+    let nilai = evaluasi(&state, &sesi, "globalThis.__pesan");
+    let pesan = nilai["value"].as_str().unwrap_or_default().to_owned();
     assert!(
         pesan.contains("daftar tolak"),
         "alasan harus menyebut daftar tolak: {pesan}"
