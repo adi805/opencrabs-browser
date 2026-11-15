@@ -93,7 +93,7 @@ async fn tab_dengan(soket: &mut Klien, html: &str) -> String {
         soket,
         3,
         "Page.setDocumentContent",
-        json!({"frameId": sesi, "html": html}),
+        json!({"html": html}),
         &sesi,
     )
     .await;
@@ -415,7 +415,7 @@ async fn peristiwa_cdp_terkirim_ke_klien() {
         &mut soket,
         12,
         "Page.setDocumentContent",
-        json!({"frameId": sesi, "html": HALAMAN}),
+        json!({"html": HALAMAN}),
         &sesi,
     )
     .await;

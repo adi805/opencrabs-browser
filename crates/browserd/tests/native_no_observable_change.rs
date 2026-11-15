@@ -62,6 +62,21 @@ impl Tab {
     }
 }
 
+/// Id bingkai utama tab, dibaca dari protokolnya sendiri.
+///
+/// Uji ini dulu memakai id karangan `FRAME-0`. Setelah mesin menolak `frameId`
+/// yang tidak menunjuk bingkai mana pun (FR-010), id karangan itu ditolak, dan
+/// yang gagal adalah ujinya, bukan mesinnya. Lebih buruk: penomoran bingkai
+/// mengikuti id tab yang naik lintas `NativeState` dalam satu proses, jadi
+/// `FRAME-0` hanya benar kalau uji ini kebetulan yang pertama membuat tab.
+/// Karena itu id-nya ditanyakan ke `Page.getFrameTree`, bukan ditebak.
+fn bingkai_utama(tab: &Tab, id: i64) -> String {
+    tab.kirim(id, "Page.getFrameTree", json!({}))["frameTree"]["frame"]["id"]
+        .as_str()
+        .expect("frameTree.frame.id")
+        .to_owned()
+}
+
 const HALAMAN: &str = "<html><head><title>Tetap</title></head><body><p>isi</p></body></html>";
 
 fn status(receipt: &Value) -> &str {
@@ -96,17 +111,18 @@ async fn navigasi_ke_url_yang_sama_tidak_diklaim_mengubah_apa_pun() {
 #[tokio::test]
 async fn mengisi_dokumen_dengan_isi_yang_sama_tidak_diklaim_mengubah() {
     let tab = Tab::new();
+    let frame = bingkai_utama(&tab, 3);
     let awal = tab.kirim(
-        3,
+        4,
         "Page.setDocumentContent",
-        json!({"frameId": "FRAME-0", "html": HALAMAN}),
+        json!({"frameId": frame, "html": HALAMAN}),
     );
     assert_eq!(status(&awal["receipt"]), "Changed");
 
     let ulang = tab.kirim(
-        4,
+        5,
         "Page.setDocumentContent",
-        json!({"frameId": "FRAME-0", "html": HALAMAN}),
+        json!({"frameId": frame, "html": HALAMAN}),
     );
     assert_eq!(
         status(&ulang["receipt"]),
@@ -119,13 +135,14 @@ async fn mengisi_dokumen_dengan_isi_yang_sama_tidak_diklaim_mengubah() {
 #[tokio::test]
 async fn skrip_baca_saja_tidak_diklaim_mengubah_dokumen() {
     let tab = Tab::new();
+    let frame = bingkai_utama(&tab, 3);
     tab.kirim(
-        3,
+        4,
         "Page.setDocumentContent",
-        json!({"frameId": "FRAME-0", "html": HALAMAN}),
+        json!({"frameId": frame, "html": HALAMAN}),
     );
 
-    let hasil = tab.kirim(4, "Runtime.evaluate", json!({"expression": "1 + 1"}));
+    let hasil = tab.kirim(5, "Runtime.evaluate", json!({"expression": "1 + 1"}));
     // Nilai bertipe sejak W1: angka JS jadi angka JSON, bukan string "2".
     assert_eq!(hasil["result"]["type"], json!("number"));
     assert_eq!(hasil["result"]["value"], json!(2));

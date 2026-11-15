@@ -275,7 +275,7 @@ fn url_jaringan_tanpa_dokumen_ditolak_bukan_jadi_halaman_kosong() {
         &state,
         3,
         "Page.setDocumentContent",
-        json!({"frameId": id, "html": "<p>lama</p>"}),
+        json!({"html": "<p>lama</p>"}),
         &sesi,
     );
     let gagal = balas_sesi(
@@ -607,7 +607,6 @@ fn accessibility_get_full_ax_tree_membawa_peran_dan_nama() {
         3,
         "Page.setDocumentContent",
         json!({
-            "frameId": "utama",
             "html": "<html><head><title>Halaman</title></head>\
                      <body><h1>Judul</h1><p>isi</p>\
                      <button aria-label=\"Tutup\">X</button></body></html>"
@@ -661,7 +660,6 @@ fn capture_screenshot_mengembalikan_png_base64() {
         3,
         "Page.setDocumentContent",
         json!({
-            "frameId": "utama",
             "html": "<body><div style=\"width:60px;height:40px;background-color:#ff0000\"></div></body>"
         }),
         &sesi,
@@ -682,6 +680,63 @@ fn capture_screenshot_mengembalikan_png_base64() {
     assert_eq!(hasil["receipt"]["kotakDilukis"].as_u64(), Some(1));
 }
 
+/// Tangkapan layar memakai ulang layout selama pohon tidak berubah, dan
+/// menghitungnya ulang begitu pohon berubah.
+///
+/// Dua arah diuji karena satu arah saja tidak membedakan apa pun: tangkapan
+/// yang selalu menata ulang juga lolos "berubah jadi segar", dan tangkapan
+/// yang selalu memakai cache juga lolos "dua kali sama". Yang dituntut adalah
+/// keduanya sekaligus, pada jalur yang benar-benar dipakai agen.
+#[test]
+fn capture_screenshot_memakai_ulang_layout_dan_tetap_segar() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({
+            "html": "<body style=\"margin:0\"><div id=\"k\" style=\"width:60px;height:40px;background-color:#ff0000\"></div></body>"
+        }),
+        &sesi,
+    );
+    let tangkap = |id_pesan: i64| {
+        let hasil = ok_sesi(
+            &state,
+            id_pesan,
+            "Page.captureScreenshot",
+            json!({"format": "png", "clip": {"x": 0, "y": 0, "width": 60, "height": 40}}),
+            &sesi,
+        );
+        hasil["data"].as_str().expect("data base64").to_owned()
+    };
+    let pertama = tangkap(4);
+    let kedua = tangkap(5);
+    assert_eq!(
+        pertama, kedua,
+        "pohon yang tidak berubah harus menghasilkan gambar yang sama persis"
+    );
+
+    // Lebar kotak diubah dari halaman. Kalau cache tidak dibuang, gambar
+    // berikutnya tetap memakai kotak lama dan tes ini gagal.
+    ok_sesi(
+        &state,
+        6,
+        "Runtime.evaluate",
+        json!({
+            "expression": "document.getElementById('k').setAttribute('style', 'width:20px;height:40px;background-color:#0000ff')",
+            "returnByValue": true
+        }),
+        &sesi,
+    );
+    let ketiga = tangkap(7);
+    assert_ne!(
+        pertama, ketiga,
+        "sesudah pohon berubah, tangkapan harus memakai layout baru"
+    );
+}
+
 /// JPEG dan WebP dilayani oleh encoder sendiri, dan `quality` benar-benar
 /// dipakai pada JPEG: dua mutu berbeda menghasilkan ukuran byte berbeda. Yang
 /// tidak punya encoder (`avif`) ditolak dengan nama, bukan diam-diam dikirim
@@ -696,7 +751,6 @@ fn capture_screenshot_melayani_jpeg_dan_webp_dan_menolak_format_lain() {
         3,
         "Page.setDocumentContent",
         json!({
-            "frameId": "utama",
             "html": "<body><div style=\"width:60px;height:40px;background:linear-gradient(#f00,#00f)\"></div></body>"
         }),
         &sesi,
@@ -886,5 +940,245 @@ fn capture_screenshot_mencatat_from_surface_sebagai_diabaikan() {
             .iter()
             .any(|n| n.as_str().unwrap_or_default().contains("fromSurface")),
         "fromSurface=false harus tercatat: {diabaikan:#?}"
+    );
+}
+
+/// FR-010 / AC-011: parameter yang tidak dikenal ditolak dengan galat yang
+/// **menyebut namanya**, bukan diabaikan senyap.
+///
+/// Yang diuji bukan cuma "ada galat": klien yang mengirim salah nama harus
+/// bisa membaca nama salahnya dari pesan, karena itulah satu-satunya cara ia
+/// memperbaiki panggilannya. Parameter sah di perintah yang sama tetap harus
+/// lolos, supaya penolakan ini tidak berubah jadi "semua parameter ditolak".
+#[test]
+fn parameter_tak_dikenal_ditolak_dengan_namanya() {
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({"html": "<body><div style=\"width:20px;height:20px;background:#0f0\"></div></body>"}),
+        &sesi,
+    );
+
+    // 1. Satu parameter karangan pada perintah yang biasanya berhasil.
+    let jawab = balas_sesi(
+        &state,
+        4,
+        "Page.captureScreenshot",
+        json!({"format": "png", "karangan": true}),
+        &sesi,
+    );
+    assert_eq!(
+        jawab["error"]["code"].as_i64(),
+        Some(-32602),
+        "parameter asing harus ditolak sebagai invalid params: {jawab}"
+    );
+    let pesan = jawab["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        pesan.contains("karangan"),
+        "galat harus menyebut nama parameternya, dapat: {pesan}"
+    );
+    assert!(
+        pesan.contains("format") && pesan.contains("clip"),
+        "galat harus menyebut yang didukung, dapat: {pesan}"
+    );
+
+    // 2. Parameter sah di perintah yang sama tetap dilayani.
+    let lolos = ok_sesi(
+        &state,
+        5,
+        "Page.captureScreenshot",
+        json!({"format": "png", "clip": {"x": 0, "y": 0, "width": 20, "height": 20}}),
+        &sesi,
+    );
+    assert!(
+        lolos["data"].as_str().is_some_and(|d| !d.is_empty()),
+        "parameter sah harus tetap menghasilkan gambar: {lolos}"
+    );
+
+    // 3. `Runtime.evaluate` menolak nama asing, bukan mengeksekusi ekspresinya.
+    let jawab = balas_sesi(
+        &state,
+        6,
+        "Runtime.evaluate",
+        json!({"expression": "1+1", "returnByValue": true, "karangan": 1}),
+        &sesi,
+    );
+    assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        jawab["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("karangan"),
+        "evaluate harus menyebut nama parameternya: {jawab}"
+    );
+
+    // 4. `Page.navigate` juga, dan `frameId` yang menunjuk bingkai lain ditolak
+    //    dengan nama parameternya: satu tab ini hanya punya satu bingkai.
+    let jawab = balas_sesi(
+        &state,
+        7,
+        "Page.navigate",
+        json!({"url": "about:blank", "karangan": "x"}),
+        &sesi,
+    );
+    assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        jawab["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("karangan"),
+        "navigate harus menyebut nama parameternya: {jawab}"
+    );
+    let jawab = balas_sesi(
+        &state,
+        8,
+        "Page.navigate",
+        json!({"url": "about:blank", "frameId": "BUKAN-BINGKAI"}),
+        &sesi,
+    );
+    assert_eq!(jawab["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        jawab["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("frameId"),
+        "frameId asing harus ditolak dengan namanya: {jawab}"
+    );
+
+    // 5. Bingkai yang benar-benar ada tetap dilayani.
+    let pohon = ok_sesi(&state, 9, "Page.getFrameTree", json!({}), &sesi);
+    let bingkai = pohon["frameTree"]["frame"]["id"]
+        .as_str()
+        .expect("frame.id")
+        .to_owned();
+    let ok_nav = ok_sesi(
+        &state,
+        10,
+        "Page.navigate",
+        json!({"url": "about:blank", "frameId": bingkai}),
+        &sesi,
+    );
+    assert_eq!(
+        ok_nav["frameId"].as_str(),
+        Some(bingkai.as_str()),
+        "navigasi ke bingkai utama harus berhasil: {ok_nav}"
+    );
+}
+
+/// NFR-002: `/json/list` tidak boleh menunggu raster.
+///
+/// Raster memegang kunci state besar selama ia berjalan: detik, bukan
+/// milidetik, pada biner debug. Selama daftar target dibaca lewat kunci yang
+/// sama, setiap polling `/json/list` ikut menunggu, dan itu terukur p95
+/// 200,3 ms pada biner rilis sebelum cermin dipasang (15 Nov 2026).
+///
+/// Tes ini mengunci janjinya dan membuktikan dirinya sendiri: ia menuntut
+/// raster yang diukur benar-benar berjalan lebih lama dari ambang, lalu
+/// menuntut setiap pembacaan daftar target di bawah 50 ms. Kalau rasternya
+/// kebetulan selesai terlalu cepat, tes gagal di penjaga pertama, bukan lolos
+/// diam-diam tanpa pernah menguji tumpang tindih.
+#[test]
+fn daftar_target_tidak_menunggu_raster() {
+    use std::time::{Duration, Instant};
+
+    let state = NativeState::baru();
+    let id = tab(&state);
+    let sesi = lekat(&state, &id);
+    // Dokumen sengaja berat: raster pada satu kotak 60x40 selesai dalam 10 ms
+    // di biner debug, terlalu cepat untuk membuktikan tumpang tindih. Tiga
+    // ratus kotak berbingkai membuat rasternya berjalan ratusan milidetik,
+    // cukup lama bagi pembaca daftar target untuk benar-benar bertabrakan.
+    let mut html = String::from("<body style=\"margin:0\">");
+    for i in 0..300 {
+        html.push_str(&format!(
+            "<div style=\"width:120px;height:40px;background-color:#{:06x};border:1px solid #000\">{i}</div>",
+            (i * 7919) % 0xffffff
+        ));
+    }
+    html.push_str("</body>");
+    ok_sesi(
+        &state,
+        3,
+        "Page.setDocumentContent",
+        json!({ "html": html }),
+        &sesi,
+    );
+    // Cermin baru terisi saat kunci dilepas, jadi tab di atas harus sudah
+    // terlihat sebelum raster dimulai. Kalau tidak, tes ini mengukur daftar
+    // kosong dan tidak membuktikan apa pun.
+    assert_eq!(
+        state.target().len(),
+        1,
+        "tab yang baru dibuka harus langsung terlihat di daftar target"
+    );
+
+    let mesin = state.clone();
+    let sesi_raster = sesi.clone();
+    let raster = std::thread::spawn(move || {
+        ok_sesi(
+            &mesin,
+            4,
+            "Page.captureScreenshot",
+            json!({"format": "png", "clip": {"x": 0, "y": 0, "width": 600, "height": 400}}),
+            &sesi_raster,
+        );
+    });
+
+    let mulai = Instant::now();
+    let mut sampel: Vec<Duration> = Vec::new();
+    let mut sampel_health: Vec<Duration> = Vec::new();
+    while !raster.is_finished() {
+        let t0 = Instant::now();
+        let daftar = state.target();
+        sampel.push(t0.elapsed());
+        // `/healthz` membaca jumlah tab, dan jalur itu dulu ikut menunggu
+        // raster juga (p50 110,4 ms terukur 15 Nov 2026). Diukur di sini
+        // supaya perbaikannya tidak bisa diam-diam dicabut lagi.
+        let t1 = Instant::now();
+        let jumlah = state.jumlah_tab();
+        sampel_health.push(t1.elapsed());
+        assert_eq!(jumlah, 1, "jumlah tab harus tetap terbaca selama raster");
+        assert_eq!(
+            daftar.len(),
+            1,
+            "selama raster berjalan, tab tetap harus terdaftar"
+        );
+        if mulai.elapsed() > Duration::from_secs(60) {
+            panic!("raster tidak selesai dalam 60 detik; tes ini tidak bisa menilai apa pun");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let durasi_raster = mulai.elapsed();
+    raster.join().expect("utas raster");
+
+    assert!(
+        durasi_raster > Duration::from_millis(200),
+        "raster hanya {durasi_raster:?}, terlalu cepat untuk membuktikan tumpang tindih; \
+         naikkan beban tangkapan atau turunkan ambangnya"
+    );
+    let maks = sampel.iter().max().copied().unwrap_or_default();
+    assert!(
+        maks < Duration::from_millis(50),
+        "daftar target terlambat {maks:?} ({} sampel) selama raster {durasi_raster:?}; \
+         NFR-002 menuntut di bawah 50 ms",
+        sampel.len()
+    );
+    let maks_health = sampel_health.iter().max().copied().unwrap_or_default();
+    assert!(
+        maks_health < Duration::from_millis(50),
+        "jumlah tab terlambat {maks_health:?} ({} sampel) selama raster {durasi_raster:?}; \
+         /healthz tidak boleh ikut menunggu raster",
+        sampel_health.len()
+    );
+
+    // Cermin juga harus mengikuti perubahan, bukan hanya tidak memblokir.
+    state.tutup(&id).expect("tutup tab");
+    assert!(
+        state.target().is_empty(),
+        "tab yang sudah ditutup tidak boleh tertinggal di daftar target"
     );
 }

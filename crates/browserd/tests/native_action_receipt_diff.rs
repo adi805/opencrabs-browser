@@ -60,19 +60,34 @@ fn lekat(state: &NativeState, id: &str) -> String {
         .to_owned()
 }
 
+/// Id bingkai utama tab, dibaca dari protokolnya sendiri.
+///
+/// Sebelum FR-010, `Page.setDocumentContent` mengabaikan `frameId`, jadi uji ini
+/// bisa memakai id karangan `FRAME-0` dan tetap hijau. Setelah mesin menolak
+/// `frameId` yang tidak menunjuk bingkai mana pun, id karangan itu ditolak
+/// dengan benar, dan uji yang tetap memakai `FRAME-0` menguji dirinya sendiri,
+/// bukan mesinnya. Karena itu id-nya ditanyakan, bukan ditebak.
+fn bingkai_utama(state: &NativeState, sesi: &str, id: i64) -> String {
+    kirim(state, Some(sesi), id, "Page.getFrameTree", json!({}))["frameTree"]["frame"]["id"]
+        .as_str()
+        .expect("frameTree.frame.id")
+        .to_owned()
+}
+
 #[tokio::test]
 async fn aksi_yang_mendarat_membawa_delta_dom_yang_tidak_kosong() {
     let state = NativeState::baru();
     let id = tab_baru(&state);
     let sesi = lekat(&state, &id);
 
+    let frame = bingkai_utama(&state, &sesi, 3);
     let hasil = kirim(
         &state,
         Some(&sesi),
-        3,
+        4,
         "Page.setDocumentContent",
         json!({
-            "frameId": "FRAME-0",
+            "frameId": frame,
             "html": "<html><head><title>Form</title></head>\
                      <body><form><input id='nama'><button>Simpan</button></form></body></html>"
         }),
@@ -121,12 +136,13 @@ async fn akar_dokumen_terbaca_setelah_aksi_sehingga_delta_bisa_dicek_silang() {
     let id = tab_baru(&state);
     let sesi = lekat(&state, &id);
 
+    let frame = bingkai_utama(&state, &sesi, 3);
     kirim(
         &state,
         Some(&sesi),
-        3,
+        4,
         "Page.setDocumentContent",
-        json!({"frameId": "FRAME-0", "html": "<html><body><p>satu</p></body></html>"}),
+        json!({"frameId": frame, "html": "<html><body><p>satu</p></body></html>"}),
     );
 
     // Tanda terima saja tidak cukup: isi dokumen yang sesudah harus benar-benar
@@ -135,7 +151,7 @@ async fn akar_dokumen_terbaca_setelah_aksi_sehingga_delta_bisa_dicek_silang() {
     let dok = kirim(
         &state,
         Some(&sesi),
-        4,
+        5,
         "DOM.getDocument",
         json!({"depth": 3}),
     );
@@ -157,18 +173,19 @@ async fn evaluasi_skrip_melaporkan_tanda_terima_tanpa_mengubah_dokumen() {
     let id = tab_baru(&state);
     let sesi = lekat(&state, &id);
 
+    let frame = bingkai_utama(&state, &sesi, 3);
     kirim(
         &state,
         Some(&sesi),
-        3,
+        4,
         "Page.setDocumentContent",
-        json!({"frameId": "FRAME-0", "html": "<html><body><p>x</p></body></html>"}),
+        json!({"frameId": frame, "html": "<html><body><p>x</p></body></html>"}),
     );
 
     let hasil = kirim(
         &state,
         Some(&sesi),
-        4,
+        5,
         "Runtime.evaluate",
         json!({"expression": "document.title === '' ? 'kosong' : 'ada'"}),
     );

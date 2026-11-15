@@ -252,7 +252,6 @@ async fn alur_agen_lengkap_dari_create_target_sampai_evaluasi() {
         "sessionId": sesi,
         "method": "Page.setDocumentContent",
         "params": {
-            "frameId": "FRAME-0",
             "html": "<html><head><title>Kasir</title></head><body><h1 id='judul'>Halo</h1></body></html>"
         }
     });
@@ -659,7 +658,7 @@ async fn tab_dengan(soket: &mut Klien, html: &str) -> String {
         soket,
         3,
         "Page.setDocumentContent",
-        json!({"frameId": "FRAME-0", "html": html}),
+        json!({"html": html}),
         &sesi,
     )
     .await;
@@ -1372,7 +1371,6 @@ async fn shadow_root_tertutup_terbaca_otomasi_tapi_tidak_oleh_skrip() {
         3,
         "Page.setDocumentContent",
         json!({
-            "frameId": id,
             "html": "<html><body><div id=\"tuan\"></div></body></html>",
         }),
     )
