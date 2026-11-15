@@ -2262,10 +2262,10 @@ impl Isolat {
             let fungsi: Function = ctx
                 .globals()
                 .get(NAMA_KIRIM)
-                .map_err(|e| self.galat_skrip(e))?;
+                .map_err(|e| self.galat_skrip(&ctx, e, None))?;
             let dijalankan: i32 = fungsi
                 .call((tipe, i64::try_from(node).unwrap_or(i64::MAX), detail))
-                .map_err(|e| self.galat_skrip(e))?;
+                .map_err(|e| self.galat_skrip(&ctx, e, None))?;
             Ok::<_, NativeError>(usize::try_from(dijalankan).unwrap_or(0))
         });
         self.lepas_tenggat();
@@ -2293,12 +2293,40 @@ impl Isolat {
     /// Menerjemahkan galat evaluasi. Kalau handler interrupt yang membatalkan
     /// skripnya, galatnya dilaporkan sebagai batas waktu, bukan sebagai
     /// kesalahan skrip.
-    fn galat_skrip(&self, err: rquickjs::Error) -> NativeError {
+    ///
+    /// `ctx` wajib ikut karena `Debug` untuk `rquickjs::Error::Exception` cuma
+    /// mencetak kata "Exception": nama simbol yang hilang dan pesannya hidup di
+    /// nilai yang tertunda di konteks, bukan di galatnya. Tanpa `ctx.catch()`
+    /// klien menerima `-32000 skrip gagal: Exception`, yang tidak memberi tahu
+    /// apa pun tentang apa yang salah di halamannya.
+    fn galat_skrip(
+        &self,
+        ctx: &rquickjs::Ctx<'_>,
+        err: rquickjs::Error,
+        sumber: Option<&str>,
+    ) -> NativeError {
         if self.lewat_batas.swap(false, Ordering::Relaxed) {
-            NativeError::batas_waktu(self.batas_waktu)
-        } else {
-            NativeError::script(err)
+            return NativeError::batas_waktu(self.batas_waktu);
         }
+        if matches!(err, rquickjs::Error::Exception) && ctx.has_exception() {
+            // `catch()` mengosongkan pengecualian yang tertunda sekaligus
+            // mengembalikan nilainya, jadi panggilan berikutnya di konteks yang
+            // sama tidak mewarisi galat yang sudah dilaporkan ini.
+            let nilai = ctx.catch();
+            let pesan = teks_dari(ctx, &nilai);
+            if !pesan.is_empty() {
+                // QuickJS sendiri tidak selalu menyebut simbolnya:
+                // `window.matchMedia('x')` saat `matchMedia` tidak ada cuma
+                // menghasilkan "TypeError: not a function". Potongan ekspresi
+                // yang gagal ditempelkan supaya klien tetap tahu API mana yang
+                // dimaksud, tanpa harus menebak dari halaman.
+                return NativeError::Script(match sumber {
+                    Some(teks) => format!("{pesan} (pada: {})", ringkas_sumber(teks)),
+                    None => pesan,
+                });
+            }
+        }
+        NativeError::script(err)
     }
 
     /// Menjalankan sumber sebagai *program* di scope global, lalu mengembalikan
@@ -2317,7 +2345,7 @@ impl Isolat {
                 Ok(nilai) => nilai,
                 // Diterjemahkan DI DALAM closure: pesan pengecualian hanya
                 // bisa diambil selama konteksnya masih dipegang.
-                Err(err) => return Err(self.galat_skrip(err)),
+                Err(err) => return Err(self.galat_skrip(&ctx, err, Some(sumber))),
             };
             // Microtask yang lahir dari evaluasi ini dijalankan sebelum
             // nilainya dikembalikan, sama seperti event loop browser yang
@@ -2353,7 +2381,7 @@ impl Isolat {
         self.context.with(|ctx| {
             let nilai: rquickjs::Value = ctx
                 .eval(sumber.as_bytes().to_vec())
-                .map_err(|e| self.galat_skrip(e))?;
+                .map_err(|e| self.galat_skrip(&ctx, e, Some(sumber)))?;
             // Sama seperti [`Isolat::eval`]: microtask yang dijadwalkan oleh
             // ekspresi ini dijalankan sebelum nilainya dibaca, sehingga
             // `await` di dalam fungsi async yang dipanggil klien selesai
@@ -2445,6 +2473,21 @@ impl Isolat {
 /// Dipanggil dari Rust, bukan lewat global tambahan: nama seperti `__oc_*`
 /// akan terlihat oleh skrip halaman dan melanggar AC-018
 /// (`test_no_automation_globals`).
+/// Merapikan potongan sumber untuk ditempel ke pesan galat.
+///
+/// Spasi dan baris baru diringkas jadi satu spasi supaya pesan tetap satu
+/// baris, lalu dipotong pada batas karakter (bukan byte) supaya teks UTF-8
+/// tidak terbelah.
+fn ringkas_sumber(sumber: &str) -> String {
+    let rapat = sumber.split_whitespace().collect::<Vec<_>>().join(" ");
+    const BATAS: usize = 120;
+    if rapat.chars().count() <= BATAS {
+        return rapat;
+    }
+    let potong: String = rapat.chars().take(BATAS).collect();
+    format!("{potong}…")
+}
+
 fn teks_dari<'js>(ctx: &rquickjs::Ctx<'js>, nilai: &rquickjs::Value<'js>) -> String {
     ctx.globals()
         .get::<_, rquickjs::Function<'js>>("String")
@@ -2727,6 +2770,23 @@ mod tests {
     fn galat_skrip_dilaporkan_bukan_ditelan() {
         let isolat = Isolat::new(PaguIsolat::default()).unwrap();
         assert!(isolat.eval("tidak_didefinisikan()").is_err());
+    }
+
+    #[test]
+    fn galat_skrip_menyebut_simbol_yang_hilang() {
+        // AC-023. Pesan `-32000 skrip gagal: Exception` tidak memberi tahu
+        // klien apa yang hilang. Debug untuk `rquickjs::Error::Exception`
+        // cuma mencetak kata "Exception", jadi pesan pengecualian harus
+        // diambil dari nilai yang tertunda di konteks.
+        let isolat = Isolat::new(PaguIsolat::default()).unwrap();
+        let galat = isolat
+            .eval_bertipe("window.matchMedia('(min-width: 1px)')")
+            .expect_err("panggilan ke API yang tidak ada harus gagal");
+        let pesan = galat.to_string();
+        assert!(
+            pesan.contains("matchMedia"),
+            "pesan galat harus menyebut simbol yang hilang, dapat: {pesan}"
+        );
     }
 
     #[test]
