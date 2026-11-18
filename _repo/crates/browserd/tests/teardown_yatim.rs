@@ -6,21 +6,20 @@
 //! pernah sampai ke `matikan_semua`. Setiap mesin yang sudah dinyalakannya
 //! tinggal sebagai proses yatim: di-reparent ke PID 1, memegang RAM, port, dan
 //! profil di `/tmp` sampai host di-reboot. Satu run gate pernah meninggalkan 26
-//! mesin seperti itu, RAM habis, lalu uji berikutnya gagal boot dan gate terbaca
+//! mesin seperti itu; RAM habis, lalu uji berikutnya gagal boot dan gate terbaca
 //! merah padahal kodenya tidak berubah.
 //!
-//! Perbaikannya ada di dua tempat yang sudah ada: [`common::buang`] mengirim
-//! SIGTERM lebih dulu dan baru SIGKILL kalau daemon membandel, dan `Proc`
-//! membunuh group prosesnya saat di-drop. Uji ini menjaga keduanya tetap ada:
-//! daemon dinyalakan, satu mesin dinyalakan, teardown dijalankan, lalu `/proc`
-//! diperiksa. Tanpa uji ini, `buang` bisa kembali menjadi `child.kill()` tanpa
-//! ada yang gagal.
+//! Perbaikannya sudah ada: `common::buang` mengirim SIGTERM lebih dulu dan baru
+//! SIGKILL kalau daemon membandel, dan `Proc` membunuh group prosesnya saat
+//! di-drop. Yang belum ada adalah penjaganya. Uji ini menjaga keduanya tetap
+//! ada; tanpa uji, `buang` bisa kembali menjadi `child.kill()` tanpa ada yang
+//! gagal.
 //!
 //! # Kenapa mesin palsu, bukan Chrome
 //!
-//! Yang diuji adalah jalur teardown, bukan mesinnya. Kalau uji ini menuntut
-//! `chrome-headless-shell`, ia hanya jalan di host yang punya Chrome dan tidak
-//! akan pernah menahan regresi di CI: dilewati berarti tidak lulus, dan regresi
+//! Yang diuji jalur teardown, bukan mesinnya. Uji yang menuntut
+//! `chrome-headless-shell` hanya jalan di host yang punya Chrome, jadi ia tidak
+//! pernah menahan regresi di CI: dilewati berarti tidak lulus, dan regresinya
 //! tetap masuk. Mesin palsu cukup menulis `DevToolsActivePort` dan menjawab
 //! `/json/version`, dan itu sudah membuat `ShellEngine` menahannya persis
 //! seperti mesin asli, termasuk `process_group(0)` yang membuatnya yatim kalau
@@ -28,6 +27,14 @@
 //!
 //! Kalau `python3` tidak ada, uji dilewati dengan pesan yang menyebut apa yang
 //! kurang. Dilewati bukan berarti lulus.
+//!
+//! # Kenapa hanya Linux
+//!
+//! Pemeriksaannya membaca `/proc`, dan `/proc` tidak ada di macOS. Uji yang
+//! "lulus" karena tidak bisa memeriksa apa pun lebih buruk daripada tidak ada
+//! uji sama sekali.
+
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -139,17 +146,25 @@ fn teardown_daemon_tidak_meninggalkan_mesin() {
     let control_port = port_kosong();
     let cdp_port = port_kosong();
 
-    // `idle_reap_secs = 0` supaya mesin tidak di-reap di tengah uji: yang
+    // Mesin ditulis eksplisit. Tanpa `[engines.*]` daemon start dengan nol
+    // mesin, dan uji teardown yang tidak pernah punya mesin tidak membuktikan
+    // apa pun: ia hanya membuktikan daemon bisa mati.
+    //
+    // `idle_reap_secs = 0` supaya mesin tidak di-reap di tengah uji. Yang
     // diperiksa adalah teardown, bukan reaper.
     std::fs::write(
         &config_path,
         format!(
             "[daemon]\ncontrol_bind = \"127.0.0.1:{control_port}\"\n\
              control_token = \"{}\"\nstore_db = \"{}\"\nstore_key = \"{}\"\n\
-             idle_reap_secs = 0\n",
+             idle_reap_secs = 0\n\
+             \n[engines.palsu]\nkind = \"shell\"\nbinary = \"{}\"\n\
+             user_data_dir = \"{}\"\n",
             token_path.display(),
             db.display(),
-            kunci.display()
+            kunci.display(),
+            skrip.display(),
+            profil.display()
         ),
     )
     .expect("menulis config uji");
@@ -177,10 +192,6 @@ fn teardown_daemon_tidak_meninggalkan_mesin() {
             &format!("127.0.0.1:{cdp_port}"),
             "--config",
             config_path.to_str().expect("path utf8"),
-            "--engine-binary",
-            skrip.to_str().expect("path utf8"),
-            "--user-data-dir",
-            profil.to_str().expect("path utf8"),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -194,8 +205,8 @@ fn teardown_daemon_tidak_meninggalkan_mesin() {
     }
 
     // Uji yang tidak pernah melihat mesin hidup tidak membuktikan apa pun soal
-    // teardown: ia hanya membuktikan daemon bisa mati. Mesin harus benar-benar
-    // ada di `/proc` sebelum teardown dijalankan.
+    // teardown. Mesin harus benar-benar ada di `/proc` sebelum teardown
+    // dijalankan, kalau tidak pemeriksaan akhirnya kosong artinya.
     let penanda = profil.to_str().expect("path utf8").to_owned();
     let mesin_hidup = tunggu(Duration::from_secs(10), || {
         !proses_dengan_penanda(&penanda).is_empty()
@@ -216,12 +227,15 @@ fn teardown_daemon_tidak_meninggalkan_mesin() {
     );
 }
 
-/// Satu baris laporan untuk proses yang tersisa: pid, induk, dan perintahnya.
+/// Satu baris laporan untuk proses yang tersisa.
 ///
 /// `ppid` ikut dicetak karena bentuk regresinya adalah `ppid=1`: mesin yang
 /// di-reparent ke PID 1, bukan mesin yang masih punya induk.
 fn ringkas(proses: &Proses) -> String {
-    format!("  pid={} ppid={} {}", proses.pid, proses.ppid, proses.perintah)
+    format!(
+        "  pid={} ppid={} {}",
+        proses.pid, proses.ppid, proses.perintah
+    )
 }
 
 fn ada_python() -> bool {
@@ -230,8 +244,7 @@ fn ada_python() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success())
 }
 
 fn direktori_uji() -> PathBuf {
@@ -259,8 +272,8 @@ fn minta(port: u16, path: &str) -> u16 {
         return 0;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let permintaan = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-    if stream.write_all(permintaan.as_bytes()).is_err() {
+    let baris = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    if stream.write_all(baris.as_bytes()).is_err() {
         return 0;
     }
     let mut respons = String::new();
@@ -298,19 +311,15 @@ fn tunggu_sampai_nol(penanda: &str, batas: Duration) -> Vec<Proses> {
 
 /// Proses yang baris perintahnya memuat `penanda`.
 ///
-/// Penanda sengaja berupa path profil: proses uji sendiri tidak memuatnya,
-/// jadi pemeriksa tidak bisa menuduh dirinya sendiri.
+/// Penanda sengaja berupa path profil: proses uji sendiri tidak memuatnya, jadi
+/// pemeriksa tidak bisa menuduh dirinya sendiri.
 fn proses_dengan_penanda(penanda: &str) -> Vec<Proses> {
     let mut hasil = Vec::new();
     let Ok(isi) = std::fs::read_dir("/proc") else {
         return hasil;
     };
     for masuk in isi.flatten() {
-        let Some(pid) = masuk
-            .file_name()
-            .to_str()
-            .and_then(|nama| nama.parse::<u32>().ok())
-        else {
+        let Some(pid) = pid_dari(&masuk) else {
             continue;
         };
         let Ok(mentah) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
@@ -327,6 +336,11 @@ fn proses_dengan_penanda(penanda: &str) -> Vec<Proses> {
         });
     }
     hasil
+}
+
+/// PID dari satu entri `/proc`, atau `None` kalau namanya bukan angka.
+fn pid_dari(masuk: &std::fs::DirEntry) -> Option<u32> {
+    masuk.file_name().to_str()?.parse().ok()
 }
 
 /// PID induk dari `/proc/<pid>/stat`.
